@@ -1,8 +1,8 @@
 import { relations } from "drizzle-orm";
 import { pgTable, text } from "drizzle-orm/pg-core";
 import { id, createdAt, updatedAt } from "../schemaHelpers";
-import { CourseProductTable } from "./courseProduct.js";
-import {UserCourseAccessTable} from "./userCourseAccess.js";
+import { CourseProductTable } from "./courseProduct";
+import {UserCourseAccessTable} from "./userCourseAccess";
 // import { uuid } from "zod";
 
 export const CourseTable = pgTable("courses", {
