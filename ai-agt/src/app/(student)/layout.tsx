@@ -1,3 +1,4 @@
+import { Button } from "@/components/ui/button";
 import { SignedIn, SignedOut, SignInButton, UserButton } from "@clerk/nextjs";
 import Link from "next/link";
 import { ReactNode, Suspense } from "react";
@@ -28,13 +29,36 @@ function Navbar() {
                 </Link>
                 <Suspense>
                     <SignedIn>
+                        <Link className="hover:bg-accent/10 flex items-center px-2" href="/admin">
+                            Admin
+                        </Link>
+                        <Link className="hover:bg-accent/10 flex items-center px-2" href="/instructor">
+                            Instructor
+                        </Link>
                         <Link className="hover:bg-accent/10 flex items-center px-2" href="/courses">
                             My Courses
                         </Link>
                         <Link className="hover:bg-accent/10 flex items-center px-2" href="/purchases">
                             Purchase History
                         </Link>
+                        <div>
+                            <UserButton appearance={{
+                                elements: {
+                                    userButtonAvatarBox: { width: "100%", height: "100%" },
+                                    },
+                                }}
+                            ></UserButton>
+
+                        </div>
                     </SignedIn>
+                </Suspense>
+                <Suspense>
+                    <SignedOut>
+                        <Button className="self-center" asChild>
+                            <Link href={"/sign-in"}> Sign In </Link>
+                            <SignInButton> Sign In </SignInButton>
+                        </Button>
+                    </SignedOut>
                 </Suspense>
             </nav>
         </header>
