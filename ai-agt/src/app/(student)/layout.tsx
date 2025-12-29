@@ -62,7 +62,9 @@ function Navbar() {
 }
 
 async function AdminLink() {
-    const user = await getCurrentUser();
+    const user = await getCurrentUser()
+    // console.log("student/layout.tsx", user.user?.name)
+
     if(!canAccessAdminPage(user)) return null
 
     return (
