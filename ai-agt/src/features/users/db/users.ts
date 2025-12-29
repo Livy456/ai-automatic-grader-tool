@@ -2,6 +2,7 @@ import { UserTable } from "@/drizzle/schema";
 import { db } from "@/drizzle/db";
 import { User } from "@clerk/nextjs/server";   
 import { eq } from "drizzle-orm"; 
+import { revalidateUserCache } from "./cache";
 
 // Handles creating, inserting, updating, and deleting users in the database
 
@@ -17,7 +18,8 @@ export async function insertUser(data: typeof UserTable.$inferInsert) {
         set: data,
     }) // anytime you insert deuplicate clerikUserId, update the user info
     
-    if (newUser == null) throw new Error("Failed to insert user")
+    if (newUser == null) throw new Error("Failed to create user")
+    revalidateUserCache(newUser.id)
     
     return newUser;
 }
@@ -35,7 +37,8 @@ export async function updateUser(
     .returning()
     
     if (updatedUser == null) throw new Error("Failed to update user")
-    
+    revalidateUserCache(updatedUser.id)
+
     return updatedUser;
 }
 
@@ -56,6 +59,7 @@ export async function deleteUser(
     .returning()
     
     if (deletedUser == null) throw new Error("Failed to delete user")
-    
+    revalidateUserCache(deletedUser.id)
+
     return deletedUser;
 }
