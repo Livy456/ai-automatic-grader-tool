@@ -1,0 +1,25 @@
+import os
+
+class Config:
+    SECRET_KEY = os.getenv("SECRET_KEY", "dev_secret")
+    DATABASE_URL = os.getenv("DATABASE_URL")
+    REDIS_URL = os.getenv("REDIS_URL", "redis://localhost:6379/0")
+
+    # S3 compatible storage
+    S3_ENDPOINT = os.getenv("S3_ENDPOINT")
+    S3_ACCESS_KEY = os.getenv("S3_ACCESS_KEY")
+    S3_SECRET_KEY = os.getenv("S3_SECRET_KEY")
+    S3_BUCKET = os.getenv("S3_BUCKET", "ai-grader")
+    S3_REGION = os.getenv("S3_REGION", "us-east-1")
+    S3_SECURE = os.getenv("S3_SECURE", "false").lower() == "true"
+
+    # OIDC / SSO
+    OIDC_CLIENT_ID = os.getenv("OIDC_CLIENT_ID")
+    OIDC_CLIENT_SECRET = os.getenv("OIDC_CLIENT_SECRET")
+    OIDC_DISCOVERY_URL = os.getenv("OIDC_DISCOVERY_URL")
+    OIDC_REDIRECT_URI = os.getenv("OIDC_REDIRECT_URI")
+
+    # AI
+    OLLAMA_BASE_URL = os.getenv("OLLAMA_BASE_URL", "http://localhost:11434")
+    OLLAMA_MODEL = os.getenv("OLLAMA_MODEL", "llama3.2:3b")
+    WHISPER_ENABLED = os.getenv("WHISPER_ENABLED", "false").lower() == "true"
