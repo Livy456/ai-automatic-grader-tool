@@ -1,7 +1,7 @@
-from .extensions import SessionLocal
-from .models import AuditLog
+from extensions import SessionLocal
+from models import AuditLog
 
-def log_event(actor_user_id, action, target_type, target_id, metadata=None):
+def log_event(actor_user_id, action, target_type, target_id, event_metadata=None):
     db = SessionLocal()
     try:
         db.add(AuditLog(
@@ -9,7 +9,7 @@ def log_event(actor_user_id, action, target_type, target_id, metadata=None):
             action=action,
             target_type=target_type,
             target_id=target_id,
-            metadata=metadata or {}
+            event_metadata=event_metadata or {}
         ))
         db.commit()
     finally:

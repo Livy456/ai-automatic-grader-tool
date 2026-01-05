@@ -57,3 +57,10 @@ drizzle/
 *.db
 
 *./src/data/env/client.ts
+
+
+# NEED TO RUN THE FOLLOWING COMMANDS AFTER INSTALLING
+# docker compose up -d --build
+# docker exec -it ai_grader_ollama ollama pull llama3.2:3b
+
+__pycache__

@@ -1,12 +1,12 @@
 from flask import Blueprint, request, jsonify
 from werkzeug.utils import secure_filename
-from ..rbac import require_auth
-from ..extensions import SessionLocal
-from ..models import Submission, SubmissionArtifact
-from ..config import Config
-from ..storage import put_object
-from ..tasks import grade_submission
-from ..audit import log_event
+from rbac import require_auth
+from extensions import SessionLocal
+from models import Submission, SubmissionArtifact
+from config import Config
+from storage import put_object
+from tasks import grade_submission
+from audit import log_event
 import io
 
 bp = Blueprint("submissions", __name__)

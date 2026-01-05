@@ -3,7 +3,7 @@ from sqlalchemy import (
 )
 from sqlalchemy.orm import relationship
 from datetime import datetime
-from .extensions import Base
+from extensions import Base
 
 class User(Base):
     __tablename__ = "users"
@@ -88,5 +88,6 @@ class AuditLog(Base):
     action = Column(String, nullable=False)  # VIEW_SUBMISSION, OVERRIDE_GRADE, etc.
     target_type = Column(String, nullable=False)  # Submission, Assignment, User
     target_id = Column(Integer, nullable=False)
-    metadata = Column(JSON, default=dict)
+    # metadata = Column(JSON, default=dict)
+    event_metadata = Column(JSON, default=dict)
     created_at = Column(DateTime, default=datetime.utcnow)
