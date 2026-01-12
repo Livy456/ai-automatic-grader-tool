@@ -11,6 +11,11 @@ GRADER = """Grade the submission using the rubric. You MUST:
 - Provide confidence 0..1
 - Provide rationale and cite evidence excerpts.
 
+If no grading rubric is provided. You MUST:
+- Provide a score from 0 to 100 based on response clarity, depth, and alignment with best responsible data science practices.
+- Provide rationale and cite evidence excerpts.
+
+
 JSON schema:
 {
   "overall": {"score": number, "confidence": number, "summary": "string"},

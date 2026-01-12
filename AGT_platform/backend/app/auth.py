@@ -61,3 +61,15 @@ def callback():
 def me():
     # frontend calls this after storing token
     return jsonify({"ok": True})
+
+@bp.get("/api/auth/whoami")
+def whoami():
+    """
+    Lightweight: frontend uses JWT already; this endpoint exists mostly
+    so you can expand later (e.g., course enrollments, display name).
+    """
+    from .rbac import get_user_from_token
+    u = get_user_from_token()
+    if not u:
+        return jsonify({"authenticated": False}), 200
+    return jsonify({"authenticated": True, "user": u})

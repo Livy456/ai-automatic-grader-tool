@@ -34,7 +34,7 @@ export default function TeacherDashboard() {
   return (
     <Container>
       <Typography variant="h5" gutterBottom>Teacher Dashboard</Typography>
-      <Typography sx={{ mb: 2 }}>Recent submissions queue (Canvas-style).</Typography>
+      <Typography sx={{ mb: 2 }}>Recent submissions queue.</Typography>
 
       <DataTable
         columns={[
