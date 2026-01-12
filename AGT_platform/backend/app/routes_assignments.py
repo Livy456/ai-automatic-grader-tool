@@ -12,7 +12,7 @@ from werkzeug.utils import secure_filename
 from sqlalchemy.orm import Session
 
 from .extensions import SessionLocal
-from .models import Assignment  # you'll add this model (see below)
+from .models import AssignmentUpload
 
 
 bp = Blueprint("assignments", __name__, url_prefix="/api")
@@ -34,7 +34,7 @@ def _db() -> Session:
 
 
 def _now() -> datetime:
-    return datetime.utcnow()
+    return datetime.now()
 
 
 def _allowed_file(filename: str) -> bool:
@@ -82,7 +82,7 @@ def _save_file_local(file_storage) -> Tuple[str, str]:
     return assignment_id, storage_uri
 
 
-def _grade_stub(assignment: Assignment) -> Tuple[int, str]:
+def _grade_stub(assignment: AssignmentUpload) -> Tuple[int, str]:
     """
     Synchronous grading placeholder.
 
@@ -107,7 +107,7 @@ def _grade_stub(assignment: Assignment) -> Tuple[int, str]:
     return 80, "Submission received. Basic rubric checks passed. Improve clarity and completeness."
 
 
-def _assignment_to_dict(a: Assignment) -> Dict[str, Any]:
+def _assignment_to_dict(a: AssignmentUpload) -> Dict[str, Any]:
     return {
         "id": a.id,
         "filename": a.filename,
@@ -131,8 +131,8 @@ def list_assignments():
     db = _db()
     try:
         items = (
-            db.query(Assignment)
-            .order_by(Assignment.created_at.desc())
+            db.query(AssignmentUpload)
+            .order_by(AssignmentUpload.created_at.desc())
             .limit(100)
             .all()
         )
@@ -163,7 +163,7 @@ def create_assignment():
 
     db = _db()
     try:
-        a = Assignment(
+        a = AssignmentUpload(
             id=assignment_id,
             filename=secure_filename(f.filename),
             storage_uri=storage_uri,
@@ -187,7 +187,7 @@ def get_assignment(assignment_id: str):
     """
     db = _db()
     try:
-        a: Optional[Assignment] = db.query(Assignment).filter(Assignment.id == assignment_id).first()
+        a: Optional[AssignmentUpload] = db.query(AssignmentUpload).filter(AssignmentUpload.id == assignment_id).first()
         if not a:
             return jsonify({"error": "Assignment not found"}), 404
         return jsonify(_assignment_to_dict(a))
@@ -202,7 +202,7 @@ def grade_assignment(assignment_id: str):
     """
     db = _db()
     try:
-        a: Optional[Assignment] = db.query(Assignment).filter(Assignment.id == assignment_id).first()
+        a: Optional[AssignmentUpload] = db.query(AssignmentUpload).filter(AssignmentUpload.id == assignment_id).first()
         if not a:
             return jsonify({"error": "Assignment not found"}), 404
 

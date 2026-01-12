@@ -5,7 +5,8 @@ from .config import Config
 
 # from app import extensions
 # from app.extensions import Base
-from app.extensions import Base, init_db
+from app.extensions import init_db
+from app.models import Base
 
 from .auth import bp as auth_bp, init_oauth
 from .tasks import init_celery
@@ -32,7 +33,7 @@ def create_app():
     print("DATABASE_URL =", app.config.get("DATABASE_URL"))
     print("DATABASE_URL_ACTUAL: ", app.config["DATABASE_URL"])
     engine = init_db(app.config["DATABASE_URL"])
-    Base.metadata.create_all(bind=engine)
+    #Base.metadata.create_all(bind=engine) # affects alembic migration, will remove later!!
 
     init_oauth(app)
     init_celery(app)

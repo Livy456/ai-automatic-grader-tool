@@ -1,53 +1,63 @@
+/// <reference types="vite/client" />
+
 export type Assignment = {
   id: string;
   filename: string;
-  status: "uploaded" | "grading" | "graded" | "failed";
-  suggested_grade?: number;
-  feedback?: string;
-  created_at?: string;
+  status: string;
+  suggested_grade?: number | null;
+  feedback?: string | null;
+  created_at?: string | null;
+  updated_at?: string | null;
 };
 
-const API_BASE = ""; // use Vite proxy: /api -> backend
+const API_BASE = import.meta.env.VITE_API_BASE ?? "";
 
+/**
+ * api: simple wrapper used by dashboards.
+ * Usage: api.get("/api/assignments"), api.post("/api/assignments", formData)
+ */
+export const api = {
+  async get(path: string) {
+    const res = await fetch(`${API_BASE}${path}`, {
+      method: "GET",
+      credentials: "include",
+    });
+    if (!res.ok) {
+      const text = await res.text().catch(() => "");
+      throw new Error(`GET ${path} failed: ${res.status} ${text}`);
+    }
+    return res.json();
+  },
+
+  async post(path: string, body?: BodyInit) {
+    const res = await fetch(`${API_BASE}${path}`, {
+      method: "POST",
+      body,
+      credentials: "include",
+    });
+    if (!res.ok) {
+      const text = await res.text().catch(() => "");
+      throw new Error(`POST ${path} failed: ${res.status} ${text}`);
+    }
+    return res.json();
+  },
+};
+
+// Convenience functions (optional, nice for pages)
 export async function listAssignments(): Promise<Assignment[]> {
-  const res = await fetch(`${API_BASE}/api/assignments`, { credentials: "include" });
-  if (!res.ok) throw new Error(`listAssignments failed: ${res.status}`);
-  return res.json();
+  return api.get("/api/assignments");
 }
 
 export async function uploadAssignment(file: File): Promise<{ id: string }> {
-  const form = new FormData();
-  form.append("file", file);
-
-  const res = await fetch(`${API_BASE}/api/assignments`, {
-    method: "POST",
-    body: form,
-    credentials: "include",
-  });
-
-  if (!res.ok) {
-    const text = await res.text();
-    throw new Error(`uploadAssignment failed: ${res.status} ${text}`);
-  }
-  return res.json();
-}
-
-export async function startGrading(id: string): Promise<{ ok: true }> {
-  const res = await fetch(`${API_BASE}/api/assignments/${id}/grade`, {
-    method: "POST",
-    credentials: "include",
-  });
-  if (!res.ok) {
-    const text = await res.text();
-    throw new Error(`startGrading failed: ${res.status} ${text}`);
-  }
-  return res.json();
+  const fd = new FormData();
+  fd.append("file", file);
+  return api.post("/api/assignments", fd);
 }
 
 export async function getAssignment(id: string): Promise<Assignment> {
-  const res = await fetch(`${API_BASE}/api/assignments/${id}`, { credentials: "include" });
-  if (!res.ok) throw new Error(`getAssignment failed: ${res.status}`);
-  return res.json();
+  return api.get(`/api/assignments/${id}`);
 }
 
-
+export async function startGrading(id: string): Promise<{ ok: boolean }> {
+  return api.post(`/api/assignments/${id}/grade`);
+}

@@ -1,24 +1,55 @@
 from sqlalchemy import (
-    Column, Integer, String, Text, DateTime, ForeignKey, Boolean, Numeric, JSON, Index
+    Column, Integer, String, Text, Float, DateTime, ForeignKey, Boolean, Numeric, JSON, Index, UUID
 )
-
-from sqlalchemy.orm import relationship
+from sqlalchemy.orm import relationship, DeclarativeBase
 from datetime import datetime
-from .extensions import Base
+import uuid
+
+class Base(DeclarativeBase):
+    pass
+
+def now():
+    return datetime.now()
+
+class AssignmentUpload(Base):
+    __tablename__ = "assignment_uploads"
+
+    id = Column(UUID(as_uuid=True), primary_key=True, default=uuid.uuid4)
+    filename = Column(String(512), nullable=False)
+    storage_uri = Column(Text, nullable=False)
+    status = Column(String(32), nullable=False, default="uploaded")  # uploaded|grading|graded|error
+    suggested_grade = Column(Float, nullable=True)
+    feedback = Column(Text, nullable=True)
+
+    created_at = Column(DateTime, default=now)
+    updated_at = Column(DateTime, default=now, onupdate=now)
 
 class Assignment(Base):
     __tablename__ = "assignments"
 
-    id = Column(String, primary_key=True)  # uuid string
-    filename = Column(String, nullable=False)
-    storage_uri = Column(String, nullable=False)  # file://... or s3://... later
-    status = Column(String, nullable=False, default="uploaded")  # uploaded|grading|graded|failed
+    id = Column(Integer, primary_key=True)
+    course_id = Column(Integer, ForeignKey("courses.id"), nullable=False)
+    title = Column(String, nullable=False)
+    description = Column(Text)
+    modality = Column(String, nullable=False)
+    rubric = Column(JSON, nullable=False)
+    created_at = Column(DateTime)
 
-    suggested_grade = Column(Integer, nullable=True)  # 0-100 (example)
-    feedback = Column(Text, nullable=True)
+    course = relationship("Course")
 
-    created_at = Column(DateTime, default=datetime.utcnow, nullable=False)
-    updated_at = Column(DateTime, default=datetime.utcnow, nullable=False)
+# class Assignment(Base):
+#     __tablename__ = "assignments"
+
+#     id = Column(String, primary_key=True)  # uuid string
+#     filename = Column(String, nullable=False)
+#     storage_uri = Column(String, nullable=False)  # file://... or s3://... later
+#     status = Column(String, nullable=False, default="uploaded")  # uploaded|grading|graded|failed
+
+#     suggested_grade = Column(Integer, nullable=True)  # 0-100 (example)
+#     feedback = Column(Text, nullable=True)
+
+#     created_at = Column(DateTime, default=datetime.utcnow, nullable=False)
+#     updated_at = Column(DateTime, default=datetime.utcnow, nullable=False)
 
 class User(Base):
     __tablename__ = "users"
@@ -64,7 +95,7 @@ class Submission(Base):
     assignment_id = Column(Integer, ForeignKey("assignments.id"), nullable=False)
     student_id = Column(Integer, ForeignKey("users.id"), nullable=False)
     status = Column(String, default="queued")  # queued|grading|graded|needs_review|error
-    created_at = Column(DateTime, default=datetime.utcnow)
+    created_at = Column(DateTime, default=datetime.now)
 
     final_score = Column(Numeric(5,2))
     final_feedback = Column(Text)

@@ -11,3 +11,4 @@ Make sure you are in the frontend directory, then do the following steps to run 
 3. Go to the following link to look at the app locally
 
 http://172.20.29.253:5173
+
