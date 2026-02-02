@@ -1,30 +1,62 @@
-import { createBrowserRouter } from "react-router-dom";
-import App from "./App";
+// src/App.tsx or src/routes.tsx
+import React from "react";
+import { BrowserRouter, Routes, Route, Navigate } from "react-router-dom";
 import Login from "./pages/Login";
 import StudentDashboard from "./pages/StudentDashboard";
 import TeacherDashboard from "./pages/TeacherDashboard";
 import AdminDashboard from "./pages/AdminDashboard";
-import AssignmentDetail from "./pages/AssignmentDetail";
-import SubmissionUpload from "./pages/SubmissionUpload";
-import SubmissionReview from "./pages/SubmissionReview";
-import AssignmentsPage from "./pages/AssignmentsPage";
+import { getToken } from "./auth";
+import jwt_decode from "jwt-decode";
 
-export const router = createBrowserRouter([
-  { path: "/login", element: <Login /> },
+// Define an interface matching the claims in your JWT
+interface JwtPayload {
+  role: string;
+  [key: string]: any;
+}
 
-  {
-    path: "/",
-    element: <App />,
-    children: [
-      
-      { path: "/", element: <StudentDashboard /> },
-      { path: "/assignment", element: <AssignmentsPage /> },
-      { path: "/teacher", element: <TeacherDashboard /> },
-      { path: "/admin", element: <AdminDashboard /> },
-
-      { path: "/assignments/:id", element: <AssignmentDetail /> },
-      { path: "/assignments/:id/submit", element: <SubmissionUpload /> },
-      { path: "/submissions/:id", element: <SubmissionReview /> },
-    ]
+function PrivateRoute({ children }: { children: JSX.Element }) {
+  const token = getToken();
+  if (!token) {
+    // no token → go to login
+    return <Navigate to="/login" replace />;
   }
-]);
+  return children;
+}
+
+function RoleBasedDashboard() {
+  const token = getToken();
+  if (!token) return <Navigate to="/login" replace />;
+
+  const decoded = jwt_decode<JwtPayload>(token);
+  const role = decoded.role;
+
+  switch (role) {
+    case "admin":
+      return <AdminDashboard />;
+    case "teacher":
+      return <TeacherDashboard />;
+    case "student":
+    default:
+      // default to student if unknown
+      return <StudentDashboard />;
+  }
+}
+
+export default function AppRoutes() {
+  return (
+    <BrowserRouter>
+      <Routes>
+        <Route path="/login" element={<Login />} />
+        {/* Protected routes: role-based dashboard */}
+        <Route
+          path="/*"
+          element={
+            <PrivateRoute>
+              <RoleBasedDashboard />
+            </PrivateRoute>
+          }
+        />
+      </Routes>
+    </BrowserRouter>
+  );
+}
