@@ -9,6 +9,7 @@ class Config:
     SECRET_KEY = os.getenv("SECRET_KEY", "dev_secret")
     DATABASE_URL = os.getenv("DATABASE_URL", "postgresql://dev:dev@localhost:5432/ai_grader")
     REDIS_URL = os.getenv("REDIS_URL", "redis://localhost:6379/0")
+    FRONTEND_BASE_URL = os.getenv("FRONTEND_BASE_URL", "http://172.20.29.253:5173/")
 
     # S3 compatible storage
     S3_ENDPOINT = os.getenv("S3_ENDPOINT")

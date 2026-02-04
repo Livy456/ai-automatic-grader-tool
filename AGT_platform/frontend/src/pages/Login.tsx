@@ -1,70 +1,106 @@
-// src/pages/Login.tsx
-import React, { useEffect, useState } from "react";
-import { Button, Container, Typography, CircularProgress } from "@mui/material";
-import { setToken, getToken } from "../auth";
+import { useEffect, useMemo, useState } from "react";
+import { Button, Container, TextField, Typography, Box, Alert } from "@mui/material";
+import { setToken } from "../auth";
+
+const API_BASE = import.meta.env.VITE_API_BASE ?? "http://localhost:5000";
+
+type DiscoverResponse =
+  | { supported: true; domain: string }
+  | { supported: false; domain: string; message?: string }
+  | { error: string };
 
 export default function Login() {
-  const [loading, setLoading] = useState(false);
-  const [error, setError] = useState<string | null>(null);
+  const [email, setEmail] = useState("");
+  const [busy, setBusy] = useState(false);
+  const [err, setErr] = useState<string | null>(null);
+  const [info, setInfo] = useState<string | null>(null);
 
+  // If backend returned token in fragment
   useEffect(() => {
-    // Check if the identity provider returned a JWT in the URL fragment:
-    // e.g. /login#token=<JWT>&first_login=1
-    const params = new URLSearchParams(window.location.hash.replace("#", ""));
-    const jwt = params.get("token");
-    const first = params.get("first_login"); // "1" if it's their first login
-    if (jwt) {
-      setLoading(true);
-      setToken(jwt); // persist token in localStorage for future API calls
-
-      // If first_login=1, tell backend to record user info (email/course/time/type)
-      if (first === "1") {
-        fetch("/api/auth/first_login", {
-          method: "POST",
-          headers: {
-            Authorization: `Bearer ${jwt}`,
-            "Content-Type": "application/json",
-          },
-          // backend can derive user info from JWT; body can include additional metadata if needed
-          body: JSON.stringify({}),
-        })
-          .catch((e) => {
-            console.error("failed to record first login", e);
-          })
-          .finally(() => {
-            window.location.href = "/";
-          });
-      } else {
-        // not first login, go straight home
-        window.location.href = "/";
-      }
+    const hash = new URLSearchParams(window.location.hash.replace("#", ""));
+    const t = hash.get("token");
+    if (t) {
+      setToken(t);
+      window.location.href = "/"; // go to router landing
     }
   }, []);
 
+  const canSubmit = useMemo(() => email.includes("@") && email.length > 5, [email]);
+
+  async function handleContinue() {
+    setErr(null);
+    setInfo(null);
+    setBusy(true);
+    try {
+      const res = await fetch(`${API_BASE}/api/auth/discover`, {
+        method: "POST",
+        headers: { "content-type": "application/json" },
+        body: JSON.stringify({ email }),
+        credentials: "include",
+      });
+
+      const data = (await res.json()) as DiscoverResponse;
+
+      if (!res.ok) {
+        throw new Error("error" in data ? data.error : `discover failed (${res.status})`);
+      }
+
+      if ("supported" in data && data.supported) {
+        // Start OIDC flow
+        window.location.href = `${API_BASE}/api/auth/login?email=${encodeURIComponent(email)}`;
+        return;
+      }
+
+      if ("supported" in data && !data.supported) {
+        setInfo(data.message ?? "Your school is not configured yet.");
+        return;
+      }
+
+      throw new Error("Unexpected response from server.");
+    } catch (e: any) {
+      setErr(e?.message ?? String(e));
+    } finally {
+      setBusy(false);
+    }
+  }
+
   return (
-    <Container maxWidth="sm" sx={{ mt: 8 }}>
+    <Container maxWidth="sm" sx={{ mt: 10 }}>
       <Typography variant="h4" gutterBottom>
-        AI Grader Login
+        AI Grader
       </Typography>
-      <Typography gutterBottom>
-        Sign in with your institution’s Single Sign‑On to access your assignments and grading dashboard.
+
+      <Typography sx={{ mb: 3, color: "text.secondary" }}>
+        Sign in with your college account. Enter your school email and we’ll redirect you to your institution’s SSO.
       </Typography>
-      {loading ? (
-        <CircularProgress />
-      ) : (
+
+      <Box sx={{ display: "flex", flexDirection: "column", gap: 2 }}>
+        <TextField
+          label="College email"
+          placeholder="name@university.edu"
+          value={email}
+          onChange={(e) => setEmail(e.target.value)}
+          autoComplete="email"
+          fullWidth
+        />
+
         <Button
           variant="contained"
-          // this route is provided by the backend; it triggers OIDC auth
-          href="/api/auth/login"
+          disabled={!canSubmit || busy}
+          onClick={handleContinue}
         >
-          Sign in with College SSO
+          {busy ? "Checking..." : "Continue with SSO"}
         </Button>
-      )}
-      {error && (
-        <Typography color="error" sx={{ mt: 2 }}>
-          {error}
+
+        {err && <Alert severity="error">{err}</Alert>}
+        {info && <Alert severity="info">{info}</Alert>}
+
+        {/* Optional fallback buttons */}
+        <Typography variant="body2" sx={{ mt: 2, color: "text.secondary" }}>
+          If your school isn’t configured yet, ask an admin to add it (domain → OIDC discovery URL),
+          or use a fallback provider (Google/Microsoft) if you implement one.
         </Typography>
-      )}
+      </Box>
     </Container>
   );
 }
