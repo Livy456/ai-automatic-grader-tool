@@ -24,6 +24,14 @@ class Config:
     OIDC_CLIENT_SECRET = os.getenv("OIDC_CLIENT_SECRET")
     OIDC_DISCOVERY_URL = os.getenv("OIDC_DISCOVERY_URL")
     OIDC_REDIRECT_URI = os.getenv("OIDC_REDIRECT_URI")
+    
+    # Microsoft OAuth
+    MICROSOFT_CLIENT_ID = os.getenv("MICROSOFT_CLIENT_ID")
+    MICROSOFT_CLIENT_SECRET = os.getenv("MICROSOFT_CLIENT_SECRET")
+    
+    # Google OAuth
+    GOOGLE_CLIENT_ID = os.getenv("GOOGLE_CLIENT_ID")
+    GOOGLE_CLIENT_SECRET = os.getenv("GOOGLE_CLIENT_SECRET")
 
     # AI
     OLLAMA_BASE_URL = os.getenv("OLLAMA_BASE_URL", "http://localhost:11434")
