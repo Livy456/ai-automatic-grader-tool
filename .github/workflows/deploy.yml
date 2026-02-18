@@ -44,8 +44,8 @@ jobs:
           username: ${{ secrets.SERVER_USER }}
           key: ${{ secrets.SERVER_SSH_KEY }}
           port: 22
-          timeout: 30s
-          command_timeout: 10m
+          timeout: 60s
+          command_timeout: 15m
           script: |
             set -e  # Exit on error
             cd /opt/ai-grader/AGT_platform || { echo "❌ Directory /opt/ai-grader/AGT_platform does not exist"; exit 1; }
@@ -55,6 +55,8 @@ jobs:
             docker compose -f docker-compose.prod.yaml --env-file .env.production pull
             echo "🔨 Building and starting containers..."
             docker compose -f docker-compose.prod.yaml --env-file .env.production up -d --build
+            echo "⏳ Waiting for services to be healthy..."
+            sleep 10
             echo "🤖 Pulling Ollama model (if needed)..."
             docker exec ai_grader_ollama_prod ollama pull llama3.2:3b || true
             echo "📊 Running database migrations..."
