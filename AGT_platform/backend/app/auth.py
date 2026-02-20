@@ -161,7 +161,11 @@ def login_microsoft():
     if not current_app.config.get("MICROSOFT_CLIENT_ID"):
         return jsonify({"error": "Microsoft OAuth not configured"}), 500
     
+    # Construct redirect URI dynamically from request host
+    # Production: https://dia-ai-grader.com/api/auth/callback/microsoft
+    # Development: http://localhost:5000/api/auth/callback/microsoft
     redirect_uri = request.host_url.rstrip("/") + "/api/auth/callback/microsoft"
+    # Authlib automatically generates and validates state parameter for CSRF protection
     return oauth.microsoft.authorize_redirect(redirect_uri)
 
 @bp.get("/api/auth/login/google")
@@ -170,7 +174,11 @@ def login_google():
     if not current_app.config.get("GOOGLE_CLIENT_ID"):
         return jsonify({"error": "Google OAuth not configured"}), 500
     
+    # Construct redirect URI dynamically from request host
+    # Production: https://dia-ai-grader.com/api/auth/callback/google
+    # Development: http://localhost:5000/api/auth/callback/google
     redirect_uri = request.host_url.rstrip("/") + "/api/auth/callback/google"
+    # Authlib automatically generates and validates state parameter for CSRF protection
     return oauth.google.authorize_redirect(redirect_uri)
 
 def _handle_oauth_callback(provider_name: str):

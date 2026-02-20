@@ -15,13 +15,24 @@ from .routes.health import bp as health_bp
 from .routes.submissions import bp as submissions_bp
 from .routes.admin import bp as admin_bp
 from .routes_assignments import bp as assignments_bp
-
-
+import os
 
 def create_app():
     app = Flask(__name__)
     app.config.from_object(Config)
     app.config_obj = Config()  # for celery task access
+    
+    # Configure session for OAuth state parameter (CSRF protection)
+
+
+    # BEGIN => MIGHT HAVE TO REMOVE THIS LATER!!
+    # Authlib uses Flask sessions to store OAuth state
+    app.config['SECRET_KEY'] = os.getenv("SECRET_KEY")    
+    app.config['SESSION_COOKIE_SECURE'] = True  # Use secure cookies in production (HTTPS)
+    app.config['SESSION_COOKIE_HTTPONLY'] = True  # Prevent JavaScript access
+    app.config['SESSION_COOKIE_SAMESITE'] = 'Lax'  # CSRF protection
+    # END => MIGHT HAVE TO REMOVE THIS LATER!!
+    
     CORS(app, supports_credentials=True)
 
     # init_db(app.config["DATABASE_URL"])
