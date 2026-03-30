@@ -4,10 +4,10 @@ from app.rbac import require_auth
 from app.extensions import SessionLocal
 from app.models import Submission, SubmissionArtifact
 from app.config import Config
-from app.storage import put_object
+from app.storage import upload_from_werkzeug_file
 from app.tasks import grade_submission
 from app.audit import log_event
-import io
+import uuid
 
 bp = Blueprint("submissions", __name__)
 
@@ -24,12 +24,15 @@ def submit():
         db.add(sub); db.commit(); db.refresh(sub)
 
         for f in request.files.getlist("files"):
-            filename = secure_filename(f.filename)
+            filename = secure_filename(f.filename or "")
+            if not filename:
+                continue
             kind = filename.split(".")[-1].lower()
-            data = f.stream.read()
-            key = put_object(cfg, data_stream=io.BytesIO(data), length=len(data),
-                             content_type=f.mimetype or "application/octet-stream",
-                             prefix=f"submissions/{sub.id}")
+            key = (
+                f"assignments/by-id/{assignment_id}/submissions/{sub.id}/"
+                f"{uuid.uuid4().hex}_{filename}"
+            )
+            upload_from_werkzeug_file(cfg, f, key)
             db.add(SubmissionArtifact(submission_id=sub.id, kind=kind, s3_key=key))
 
         db.commit()

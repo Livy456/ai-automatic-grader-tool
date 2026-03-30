@@ -1,5 +1,6 @@
-# Legacy: single EC2 runs API + data + Ollama + worker. For ALB + split GPU tier, use
-# docker-compose.web.prod.yaml and docker-compose.gpu.prod.yaml (see WEBSITE_INFRASTRUCTURE.md).
+# Web / app tier: API (ALB target), Postgres, Redis, MinIO — no Ollama.
+# See WEBSITE_INFRASTRUCTURE.md. Bind backend to all interfaces for ALB → HTTP :5000.
+# Postgres/Redis/MinIO ports are published for the private GPU host (restrict with security groups).
 
 services:
   postgres:
@@ -9,6 +10,8 @@ services:
       POSTGRES_USER: ${DB_USER:-ai_grader}
       POSTGRES_PASSWORD: ${DB_PASSWORD}
       POSTGRES_DB: ${DB_NAME:-ai_grader}
+    ports:
+      - "5432:5432"
     volumes:
       - pgdata_prod:/var/lib/postgresql/data
     restart: unless-stopped
@@ -21,6 +24,8 @@ services:
   redis:
     image: redis:7-alpine
     container_name: ai_grader_redis_prod
+    ports:
+      - "6379:6379"
     restart: unless-stopped
     volumes:
       - redisdata_prod:/data
@@ -37,6 +42,9 @@ services:
     environment:
       MINIO_ROOT_USER: ${MINIO_ROOT_USER:-minio}
       MINIO_ROOT_PASSWORD: ${MINIO_ROOT_PASSWORD}
+    ports:
+      - "9000:9000"
+      - "9001:9001"
     volumes:
       - miniodata_prod:/data
     restart: unless-stopped
@@ -59,17 +67,6 @@ services:
       exit 0;
       "
 
-  ollama:
-    image: ollama/ollama:latest
-    container_name: ai_grader_ollama_prod
-    volumes:
-      - ollamadata_prod:/root/.ollama
-    restart: unless-stopped
-    deploy:
-      resources:
-        reservations:
-          memory: 2G
-
   backend:
     build:
       context: ./backend
@@ -77,7 +74,7 @@ services:
     container_name: ai_grader_backend_prod
     env_file: .env.production
     ports:
-      - "127.0.0.1:5000:5000"  # Localhost only (Cloudflare Tunnel). For ALB use docker-compose.web.prod.yaml (0.0.0.0:5000).
+      - "0.0.0.0:5000:5000"
     depends_on:
       postgres:
         condition: service_healthy
@@ -85,33 +82,10 @@ services:
         condition: service_healthy
       minio:
         condition: service_healthy
-      ollama:
-        condition: service_started
     restart: unless-stopped
     command: python -m app.main
-
-  worker:
-    build:
-      context: ./backend
-      dockerfile: Dockerfile
-    container_name: ai_grader_worker_prod
-    env_file: .env.production
-    command: celery -A app.tasks.celery_app worker --loglevel=INFO --concurrency=2 -Q gpu,celery
-    depends_on:
-      backend:
-        condition: service_started
-      postgres:
-        condition: service_healthy
-      redis:
-        condition: service_healthy
-      minio:
-        condition: service_healthy
-      ollama:
-        condition: service_started
-    restart: unless-stopped
 
 volumes:
   pgdata_prod:
   redisdata_prod:
   miniodata_prod:
-  ollamadata_prod:

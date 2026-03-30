@@ -3,15 +3,15 @@ name: Deploy to Production
 on:
   push:
     branches:
-      - main  # Change to your production branch
-  workflow_dispatch:  # Allow manual triggers
+      - main
+  workflow_dispatch:
 
 jobs:
   deploy-backend:
-    name: Deploy Backend to Server
+    name: Deploy backend (monolith or web tier)
     runs-on: ubuntu-latest
     if: github.ref == 'refs/heads/main'
-    
+
     steps:
       - name: Checkout code
         uses: actions/checkout@v4
@@ -19,23 +19,18 @@ jobs:
       - name: Validate Required Secrets
         run: |
           if [ -z "${{ secrets.SERVER_HOST }}" ]; then
-            echo "❌ Error: SERVER_HOST secret is not set"
-            echo "Please go to: Settings → Secrets and variables → Actions"
-            echo "Add secret: SERVER_HOST = 54.234.41.63"
-            echo "Note: If using Elastic IP, use that IP instead"
+            echo "❌ SERVER_HOST secret is not set"
             exit 1
           fi
           if [ -z "${{ secrets.SERVER_USER }}" ]; then
-            echo "❌ Error: SERVER_USER secret is not set"
-            echo "Please add secret: SERVER_USER = root (or your SSH username)"
+            echo "❌ SERVER_USER secret is not set"
             exit 1
           fi
           if [ -z "${{ secrets.SERVER_SSH_KEY }}" ]; then
-            echo "❌ Error: SERVER_SSH_KEY secret is not set"
-            echo "Please generate SSH key and add to secrets (see CLOUDFLARE_DEPLOYMENT.md section 7.3)"
+            echo "❌ SERVER_SSH_KEY secret is not set"
             exit 1
           fi
-          echo "✅ All required secrets are set"
+          echo "✅ Web server SSH secrets are set"
 
       - name: Deploy to server
         uses: appleboy/ssh-action@v1.0.0
@@ -45,31 +40,76 @@ jobs:
           key: ${{ secrets.SERVER_SSH_KEY }}
           port: 22
           timeout: 60s
-          command_timeout: 15m
+          command_timeout: 20m
           script: |
-            set -e  # Exit on error
-            cd /opt/ai-grader/AGT_platform || { echo "❌ Directory /opt/ai-grader/AGT_platform does not exist"; exit 1; }
-            echo "📦 Pulling latest code..."
+            set -e
+            cd /opt/ai-grader/AGT_platform || { echo "❌ Missing /opt/ai-grader/AGT_platform"; exit 1; }
             git pull origin main
-            echo "🐳 Pulling Docker images..."
-            docker compose -f docker-compose.prod.yaml --env-file .env.production pull
-            echo "🔨 Building and starting containers..."
-            docker compose -f docker-compose.prod.yaml --env-file .env.production up -d --build
-            echo "⏳ Waiting for services to be healthy..."
-            sleep 10
-            echo "🤖 Pulling Ollama model (if needed)..."
+            STACK='${{ secrets.DEPLOY_STACK }}'
+            if [ -z "$STACK" ]; then STACK=monolith; fi
+            echo "📦 Deploy stack: $STACK"
+
+            if [ "$STACK" = "split" ]; then
+              echo "🐳 Web tier (docker-compose.web.prod.yaml)…"
+              docker compose -f docker-compose.web.prod.yaml --env-file .env.production pull
+              docker compose -f docker-compose.web.prod.yaml --env-file .env.production up -d --build
+              echo "⏳ Waiting for services…"
+              sleep 10
+              echo "📊 Database migrations…"
+              docker exec ai_grader_backend_prod alembic upgrade head || true
+              docker compose -f docker-compose.web.prod.yaml restart backend
+            else
+              echo "🐳 Monolith (docker-compose.prod.yaml)…"
+              docker compose -f docker-compose.prod.yaml --env-file .env.production pull
+              docker compose -f docker-compose.prod.yaml --env-file .env.production up -d --build
+              sleep 10
+              echo "🤖 Ollama model pull…"
+              docker exec ai_grader_ollama_prod ollama pull llama3.2:3b || true
+              echo "📊 Database migrations…"
+              docker exec ai_grader_backend_prod alembic upgrade head || true
+              docker compose -f docker-compose.prod.yaml restart backend worker
+            fi
+            echo "✅ Backend deploy complete"
+
+  deploy-gpu:
+    name: Deploy GPU inference tier
+    runs-on: ubuntu-latest
+    if: |
+      github.ref == 'refs/heads/main' &&
+      secrets.DEPLOY_STACK == 'split' &&
+      secrets.GPU_SERVER_HOST
+
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@v4
+
+      - name: Deploy GPU stack
+        uses: appleboy/ssh-action@v1.0.0
+        with:
+          host: ${{ secrets.GPU_SERVER_HOST }}
+          username: ${{ secrets.SERVER_USER }}
+          key: ${{ secrets.SERVER_SSH_KEY }}
+          port: 22
+          timeout: 60s
+          command_timeout: 25m
+          script: |
+            set -e
+            cd /opt/ai-grader/AGT_platform || { echo "❌ Missing /opt/ai-grader/AGT_platform"; exit 1; }
+            git pull origin main
+            echo "🐳 GPU tier (docker-compose.gpu.prod.yaml)…"
+            docker compose -f docker-compose.gpu.prod.yaml --env-file .env.production.gpu pull
+            docker compose -f docker-compose.gpu.prod.yaml --env-file .env.production.gpu up -d --build
+            sleep 8
+            echo "🤖 Ollama model pull…"
             docker exec ai_grader_ollama_prod ollama pull llama3.2:3b || true
-            echo "📊 Running database migrations..."
-            docker exec ai_grader_backend_prod alembic upgrade head || true
-            echo "🔄 Restarting services..."
-            docker compose -f docker-compose.prod.yaml restart backend worker
-            echo "✅ Deployment complete!"
+            docker compose -f docker-compose.gpu.prod.yaml restart worker
+            echo "✅ GPU deploy complete"
 
   deploy-frontend:
     name: Deploy Frontend to Cloudflare Pages
     runs-on: ubuntu-latest
     if: github.ref == 'refs/heads/main'
-    
+
     steps:
       - name: Checkout code
         uses: actions/checkout@v4
@@ -78,17 +118,10 @@ jobs:
         id: check-secrets
         run: |
           if [ -z "${{ secrets.CLOUDFLARE_API_TOKEN }}" ]; then
-            echo "⚠️  Warning: CLOUDFLARE_API_TOKEN secret is not set"
-            echo "Frontend deployment will be skipped"
-            echo "To enable: Add CLOUDFLARE_API_TOKEN secret (see CLOUDFLARE_DEPLOYMENT.md section 7.2)"
             echo "secrets_available=false" >> $GITHUB_OUTPUT
           elif [ -z "${{ secrets.CLOUDFLARE_ACCOUNT_ID }}" ]; then
-            echo "⚠️  Warning: CLOUDFLARE_ACCOUNT_ID secret is not set"
-            echo "Frontend deployment will be skipped"
-            echo "To enable: Add CLOUDFLARE_ACCOUNT_ID secret"
             echo "secrets_available=false" >> $GITHUB_OUTPUT
           else
-            echo "✅ Cloudflare secrets are configured"
             echo "secrets_available=true" >> $GITHUB_OUTPUT
           fi
 
@@ -106,11 +139,4 @@ jobs:
 
       - name: Skip Frontend Deployment (if secrets missing)
         if: steps.check-secrets.outputs.secrets_available != 'true'
-        run: |
-          echo "⏭️  Skipping frontend deployment - Cloudflare secrets not configured"
-          echo "This is optional. Backend deployment will continue."
-          echo ""
-          echo "To enable frontend deployment:"
-          echo "1. Add CLOUDFLARE_API_TOKEN secret"
-          echo "2. Add CLOUDFLARE_ACCOUNT_ID secret"
-          echo "See CLOUDFLARE_DEPLOYMENT.md section 7.2 for details"
+        run: echo "⏭️ Skipping Cloudflare Pages (secrets not set). Set VITE_API_BASE in Pages to https://api.dia-ai-grader.com when using split + ALB."

@@ -34,7 +34,10 @@ yarn-error.log*
 .pnpm-debug.log*
 
 # env files, for environment variables
-.env*
+.env
+.env.local
+**/.env.local
+.env.production
 
 # vercel
 .vercel
@@ -86,4 +89,11 @@ DIA_ai_scorer.pem
 **/SSH_IP_CHANGE_FIX.md
 **/SSH_KEY_TYPE_RECOMMENDATION.md
 **/DOCKER_EC2_TROUBLESHOOTING.md
-**/
+**/EC2_SSH_TIMEOUT_TROUBLESHOOTING.md
+**/EXTERNAL_PRIVILEGE_SEPARATION_SETUP.md
+**/S3_BUCKET_SETUP.md
+**/WEBSITE_INFRASTRUCTURE.md
+**/USER_AND_JWT_SETUP.md
+
+# environment variables file for GPU host
+env.production.gpu

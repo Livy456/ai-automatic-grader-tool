@@ -1,8 +1,15 @@
 from logging.config import fileConfig
 import os
+from pathlib import Path
+
+from dotenv import load_dotenv
 from sqlalchemy import engine_from_config, pool
 from alembic import context
-from app.models import Base 
+from app.models import Base
+
+_BACKEND_DIR = Path(__file__).resolve().parent.parent
+load_dotenv(_BACKEND_DIR / ".env.local")
+load_dotenv(_BACKEND_DIR / ".env", override=True)
 
 
 # this is the Alembic Config object, which provides
@@ -27,8 +34,7 @@ target_metadata = Base.metadata
 # my_important_option = config.get_main_option("my_important_option")
 # ... etc.
 def get_url():
-    # pull from environment (or .env already loaded by your app)
-    url = os.getenv("DATABASE_URL")
+    url = os.getenv("DATABASE_URL", "")
     if not url:
         # fallback to alembic.ini if env var isn't set
         url = config.get_main_option("sqlalchemy.url")

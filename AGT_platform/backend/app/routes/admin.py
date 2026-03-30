@@ -1,7 +1,10 @@
+from datetime import datetime
+
 from flask import Blueprint, jsonify, request
-from app.rbac import require_role
+
 from app.extensions import SessionLocal
-from app.models import User, AuditLog, Course, Enrollment, Assignment
+from app.models import Assignment, AuditLog, Course, Enrollment, IssuedJwt, User
+from app.rbac import require_role
 
 bp = Blueprint("admin", __name__)
 
@@ -28,6 +31,8 @@ def set_role(user_id: int):
         if not u:
             return jsonify({"error":"not found"}), 404
         u.role = role
+        for tok in db.query(IssuedJwt).filter_by(user_id=user_id).all():
+            tok.revoked_at = datetime.utcnow()
         db.commit()
         return jsonify({"ok": True})
     finally:

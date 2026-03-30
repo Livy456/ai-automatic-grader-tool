@@ -1,20 +1,34 @@
 from celery import Celery
 from .config import Config
-from .extensions import SessionLocal
+from .extensions import SessionLocal, engine, init_db
 from .models import Submission, Assignment, AIScore
-from .storage import client
+from .storage import get_object_bytes
 from .grading.pipelines import run_grading_pipeline
 
 celery_app = Celery(__name__)
+
+# Workers load this module without Flask; broker must come from env/Config.
+_cfg = Config()
+celery_app.conf.broker_url = _cfg.REDIS_URL
+celery_app.conf.result_backend = _cfg.REDIS_URL
+celery_app.conf.task_routes = {"grade_submission": {"queue": "gpu"}}
+
 
 def init_celery(app):
     celery_app.conf.broker_url = app.config["REDIS_URL"]
     celery_app.conf.result_backend = app.config["REDIS_URL"]
 
+
+def _ensure_db():
+    """Workers do not run Flask create_app(); bind SQLAlchemy before any DB access."""
+    if engine is None:
+        init_db(Config().DATABASE_URL)
+
+
 @celery_app.task(name="grade_submission")
 def grade_submission(submission_id: int):
-    from flask import current_app
-    cfg = current_app.config_obj  # set in app factory
+    _ensure_db()
+    cfg = Config()
 
     db = SessionLocal()
     try:
@@ -25,12 +39,9 @@ def grade_submission(submission_id: int):
 
         assignment = db.query(Assignment).get(sub.assignment_id)
 
-        # fetch artifacts from storage
-        s3 = client(cfg)
         artifacts = {}
         for art in sub.artifacts:
-            resp = s3.get_object(cfg.S3_BUCKET, art.s3_key)
-            data = resp.read()
+            data = get_object_bytes(cfg, art.s3_key)
             # normalize kinds
             if art.kind.endswith("pdf"): artifacts["pdf"] = data
             if art.kind.endswith("txt"): artifacts["txt"] = data

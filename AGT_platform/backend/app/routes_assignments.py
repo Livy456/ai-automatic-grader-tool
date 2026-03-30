@@ -6,13 +6,15 @@ import uuid
 from datetime import datetime
 from typing import Optional, Dict, Any, Tuple
 
-from flask import Blueprint, jsonify, request, current_app
+from flask import Blueprint, jsonify, request
 from werkzeug.utils import secure_filename
 
 from sqlalchemy.orm import Session
 
+from .config import Config
 from .extensions import SessionLocal
 from .models import AssignmentUpload
+from .storage import upload_from_werkzeug_file
 
 
 bp = Blueprint("assignments", __name__, url_prefix="/api")
@@ -52,34 +54,20 @@ def _allowed_file(filename: str) -> bool:
     return ext in allowed
 
 
-def _storage_mode() -> str:
+def _save_upload_to_s3(file_storage) -> Tuple[str, str]:
     """
-    'minio' or 'local'
+    Stream file to S3 (AWS or MinIO). Returns (assignment_upload_uuid, s3_object_key).
+    storage_uri in DB holds the object key (not s3://).
     """
-    return current_app.config.get("STORAGE_MODE", "local").lower()
-
-
-def _save_file_local(file_storage) -> Tuple[str, str]:
-    """
-    Save file to local disk (backend/uploads/<assignment_id>/filename)
-    Returns: (storage_uri, sha placeholder)
-    """
-    upload_root = current_app.config.get("UPLOAD_ROOT", os.path.join(os.getcwd(), "uploads"))
-    os.makedirs(upload_root, exist_ok=True)
-
     filename = secure_filename(file_storage.filename or "upload.bin")
     if not _allowed_file(filename):
         raise ValueError(f"File type not allowed: {filename}")
 
     assignment_id = str(uuid.uuid4())
-    assignment_dir = os.path.join(upload_root, assignment_id)
-    os.makedirs(assignment_dir, exist_ok=True)
-
-    path = os.path.join(assignment_dir, filename)
-    file_storage.save(path)
-
-    storage_uri = f"file://{path}"
-    return assignment_id, storage_uri
+    cfg = Config()
+    key = f"ingest/assignment-uploads/{assignment_id}/{filename}"
+    upload_from_werkzeug_file(cfg, file_storage, key)
+    return assignment_id, key
 
 
 def _grade_stub(assignment: AssignmentUpload) -> Tuple[int, str]:
@@ -146,7 +134,7 @@ def create_assignment():
     """
     POST /api/assignments
     - Accepts multipart/form-data with "file"
-    - Stores file (local for now)
+    - Stores file in S3 (see storage.py / S3_BUCKET_SETUP.md)
     - Inserts Assignment row into Postgres
     """
     if "file" not in request.files:
@@ -157,7 +145,7 @@ def create_assignment():
         return jsonify({"error": "Empty file upload"}), 400
 
     try:
-        assignment_id, storage_uri = _save_file_local(f)
+        assignment_id, storage_uri = _save_upload_to_s3(f)
     except ValueError as e:
         return jsonify({"error": str(e)}), 400
 

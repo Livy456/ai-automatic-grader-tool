@@ -1,18 +1,40 @@
+from datetime import datetime
 from functools import wraps
-from flask import request, jsonify
+
 import jwt
-import os
+from flask import jsonify, request
+
+from .config import Config
+from .extensions import SessionLocal
+from .models import IssuedJwt
+
 
 def get_user_from_token():
     auth = request.headers.get("Authorization", "")
     if not auth.startswith("Bearer "):
         return None
     token = auth.split(" ", 1)[1]
+    cfg = Config()
+    secret = cfg.SECRET_KEY or "dev_secret"
     try:
-        payload = jwt.decode(token, os.getenv("SECRET_KEY","dev_secret"), algorithms=["HS256"])
-        return payload  # {id,email,role}
+        payload = jwt.decode(token, secret, algorithms=["HS256"])
     except Exception:
         return None
+
+    jti = payload.get("jti")
+    if not jti:
+        return None
+
+    db = SessionLocal()
+    try:
+        row = db.query(IssuedJwt).filter(IssuedJwt.jti == jti).one_or_none()
+        if row is None or row.revoked_at is not None:
+            return None
+        if row.expires_at < datetime.utcnow():
+            return None
+        return payload
+    finally:
+        db.close()
 
 def require_auth(fn):
     @wraps(fn)

@@ -1,10 +1,17 @@
 # backend/app/auth.py
-from flask import Blueprint, redirect, request, jsonify, current_app
-from authlib.integrations.flask_client import OAuth
-import jwt, os, time
-from .extensions import SessionLocal
-from .models import User  # you’ll add fields below
+import time
+import uuid
 from datetime import datetime
+
+import jwt
+from authlib.integrations.flask_client import OAuth
+from flask import Blueprint, current_app, jsonify, redirect, request
+from werkzeug.security import check_password_hash
+
+from .config import Config
+from .extensions import SessionLocal
+from .models import IssuedJwt, User
+from .rbac import require_auth
 
 bp = Blueprint("auth", __name__)
 oauth = OAuth()
@@ -97,15 +104,87 @@ def _is_college_email(email: str) -> bool:
     # In production, you might want a whitelist
     return True
 
-def _issue_token(user: User):
+def _issue_token(user: User, db) -> str:
+    """
+    Issue a signed JWT and persist its jti in issued_jwts (API auth is Bearer + server allowlist).
+    End-user identity is not stored in Flask session cookies—only OAuth CSRF state uses the session.
+    """
+    cfg = Config()
+    jti = str(uuid.uuid4())
+    now_ts = int(time.time())
+    exp_ts = now_ts + int(cfg.JWT_EXPIRATION_SECONDS)
+    secret = cfg.SECRET_KEY or "dev_secret"
     payload = {
         "id": user.id,
         "email": user.email,
         "role": user.role,
-        "iat": int(time.time()),
-        "exp": int(time.time()) + 60 * 60 * 8,
+        "iat": now_ts,
+        "exp": exp_ts,
+        "jti": jti,
     }
-    return jwt.encode(payload, os.getenv("SECRET_KEY", "dev_secret"), algorithm="HS256")
+    token = jwt.encode(payload, secret, algorithm="HS256")
+    db.add(
+        IssuedJwt(
+            user_id=user.id,
+            jti=jti,
+            expires_at=datetime.utcfromtimestamp(exp_ts),
+        )
+    )
+    db.commit()
+    return token
+
+
+@bp.post("/api/auth/login/password")
+def login_password():
+    """Email + password login; returns JWT (role comes from users.role in the database)."""
+    data = request.get_json(silent=True) or {}
+    email = (data.get("email") or data.get("username") or "").strip().lower()
+    password = data.get("password") or ""
+    if not email or not password:
+        return jsonify({"error": "email and password required"}), 400
+
+    db = SessionLocal()
+    try:
+        user = db.query(User).filter_by(email=email).one_or_none()
+        if not user or not user.password_hash:
+            return jsonify({"error": "invalid credentials"}), 401
+        if not check_password_hash(user.password_hash, password):
+            return jsonify({"error": "invalid credentials"}), 401
+
+        user.last_login_at = datetime.utcnow()
+        db.commit()
+        db.refresh(user)
+
+        token = _issue_token(user, db)
+        cfg = Config()
+        return jsonify(
+            {
+                "access_token": token,
+                "token_type": "Bearer",
+                "expires_in": cfg.JWT_EXPIRATION_SECONDS,
+            }
+        )
+    finally:
+        db.close()
+
+
+@bp.post("/api/auth/logout")
+@require_auth
+def logout():
+    """Revoke the current JWT (jti) so it no longer passes get_user_from_token."""
+    jti = request.user.get("jti")
+    if not jti:
+        return jsonify({"error": "invalid token"}), 400
+
+    db = SessionLocal()
+    try:
+        row = db.query(IssuedJwt).filter_by(jti=jti).one_or_none()
+        if row:
+            row.revoked_at = datetime.utcnow()
+            db.commit()
+    finally:
+        db.close()
+    return jsonify({"ok": True})
 
 @bp.post("/api/auth/discover")
 def discover():
@@ -227,7 +306,7 @@ def _handle_oauth_callback(provider_name: str):
                 user.institution_domain = domain
             db.commit()
 
-        jwt_token = _issue_token(user)
+        jwt_token = _issue_token(user, db)
     finally:
         db.close()
 
@@ -271,7 +350,7 @@ def callback():
                 user.institution_domain = domain
             db.commit()
 
-        jwt_token = _issue_token(user)
+        jwt_token = _issue_token(user, db)
     finally:
         db.close()
 

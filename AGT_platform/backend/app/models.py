@@ -37,6 +37,25 @@ class Assignment(Base):
     created_at = Column(DateTime)
 
     course = relationship("Course")
+    attachments = relationship("AssignmentAttachment", back_populates="assignment")
+
+
+class AssignmentAttachment(Base):
+    """Teacher-uploaded rubric files / answer keys for a course Assignment (integer id)."""
+
+    __tablename__ = "assignment_attachments"
+
+    id = Column(Integer, primary_key=True)
+    assignment_id = Column(Integer, ForeignKey("assignments.id"), nullable=False)
+    kind = Column(String(32), nullable=False)  # rubric | answer_key
+    s3_key = Column(String(1024), nullable=False)
+    filename = Column(String(512), nullable=False)
+    uploaded_by_id = Column(Integer, ForeignKey("users.id"), nullable=True)
+    created_at = Column(DateTime, default=datetime.utcnow)
+
+    assignment = relationship("Assignment", back_populates="attachments")
+    uploaded_by = relationship("User")
+
 
 class User(Base):
     __tablename__ = "users"
@@ -44,6 +63,23 @@ class User(Base):
     email = Column(String, unique=True, nullable=False, index=True)
     name = Column(String)
     role = Column(String, nullable=False)  # student|teacher|admin
+    created_at = Column(DateTime, default=datetime.utcnow)
+    # Local login (OAuth users leave password_hash null)
+    password_hash = Column(String(255), nullable=True)
+    institution_domain = Column(String(255), nullable=True)
+    first_login_at = Column(DateTime, nullable=True)
+    last_login_at = Column(DateTime, nullable=True)
+
+
+class IssuedJwt(Base):
+    """Server-side record for each issued access token (jti allowlist + logout/revocation)."""
+    __tablename__ = "issued_jwts"
+
+    id = Column(Integer, primary_key=True)
+    user_id = Column(Integer, ForeignKey("users.id"), nullable=False)
+    jti = Column(String(64), unique=True, nullable=False, index=True)
+    expires_at = Column(DateTime, nullable=False)
+    revoked_at = Column(DateTime, nullable=True)
     created_at = Column(DateTime, default=datetime.utcnow)
 
 class Course(Base):

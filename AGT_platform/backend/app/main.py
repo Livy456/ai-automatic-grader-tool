@@ -15,25 +15,26 @@ from .routes.health import bp as health_bp
 from .routes.submissions import bp as submissions_bp
 from .routes.admin import bp as admin_bp
 from .routes_assignments import bp as assignments_bp
-import os
+from .routes.assignment_materials import bp as assignment_materials_bp
+
 
 def create_app():
     app = Flask(__name__)
     app.config.from_object(Config)
     app.config_obj = Config()  # for celery task access
+    _cfg = Config()
+    app.config["MAX_CONTENT_LENGTH"] = _cfg.MAX_UPLOAD_BYTES
     
-    # Configure session for OAuth state parameter (CSRF protection)
-
-
-    # BEGIN => MIGHT HAVE TO REMOVE THIS LATER!!
-    # Authlib uses Flask sessions to store OAuth state
-    app.config['SECRET_KEY'] = os.getenv("SECRET_KEY")    
-    app.config['SESSION_COOKIE_SECURE'] = True  # Use secure cookies in production (HTTPS)
-    app.config['SESSION_COOKIE_HTTPONLY'] = True  # Prevent JavaScript access
-    app.config['SESSION_COOKIE_SAMESITE'] = 'Lax'  # CSRF protection
-    # END => MIGHT HAVE TO REMOVE THIS LATER!!
+    # Flask session cookie: used only for OAuth (Authlib) state/CSRF during provider redirects.
+    # Authenticated API access uses Authorization: Bearer <JWT>, not session cookies.
+    # SECRET_KEY comes from Config / .env.local + .env (see app.config.from_object above).
+    if not (app.config.get("SECRET_KEY") or "").strip():
+        app.config["SECRET_KEY"] = "dev_secret"
+    app.config["SESSION_COOKIE_SECURE"] = True
+    app.config["SESSION_COOKIE_HTTPONLY"] = True
+    app.config["SESSION_COOKIE_SAMESITE"] = "Lax"
     
-    CORS(app, supports_credentials=True)
+    CORS(app, supports_credentials=True, origins=app.config["CORS_ORIGINS"])
 
     # init_db(app.config["DATABASE_URL"])
     # Base.metadata.create_all(bind=engine)
@@ -52,6 +53,7 @@ def create_app():
     app.register_blueprint(auth_bp)
     app.register_blueprint(health_bp)
     app.register_blueprint(assignments_bp)
+    app.register_blueprint(assignment_materials_bp)
     app.register_blueprint(submissions_bp)
     app.register_blueprint(admin_bp)
     return app

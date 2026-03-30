@@ -9,8 +9,9 @@ export default defineConfig(({ mode }) => {
   // Get VITE_API_BASE from environment variable
   // CORRECT VALUES:
   // - Development: "http://localhost:5000"
-  // - Production: "https://dia-ai-grader.com"
-  const apiBase = env.VITE_API_BASE || "https://dia-ai-grader.com";
+  // - Production (ALB): "https://api.dia-ai-grader.com"
+  // - Legacy same-origin API: "https://dia-ai-grader.com"
+  const apiBase = env.VITE_API_BASE || "https://api.dia-ai-grader.com";
 
   return {
     plugins: [react()],

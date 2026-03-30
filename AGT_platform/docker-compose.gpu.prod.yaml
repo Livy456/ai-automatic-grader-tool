@@ -1,0 +1,30 @@
+# GPU inference tier: Ollama + Celery workers consuming the `gpu` queue only.
+# Run on a private GPU instance. Point DATABASE_URL, REDIS_URL, S3_* at the web/app host
+# private IP (see env.production.gpu.example).
+
+services:
+  ollama:
+    image: ollama/ollama:latest
+    container_name: ai_grader_ollama_prod
+    volumes:
+      - ollamadata_prod:/root/.ollama
+    restart: unless-stopped
+    gpus: all
+
+  worker:
+    build:
+      context: ./backend
+      dockerfile: Dockerfile
+    container_name: ai_grader_worker_prod
+    env_file: .env.production.gpu
+    command: >
+      celery -A app.tasks.celery_app worker
+      --loglevel=INFO
+      --concurrency=2
+      -Q gpu
+    depends_on:
+      - ollama
+    restart: unless-stopped
+
+volumes:
+  ollamadata_prod:

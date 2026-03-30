@@ -12,7 +12,9 @@ type DiscoverResponse =
 
 export default function Login() {
   const [email, setEmail] = useState("");
+  const [password, setPassword] = useState("");
   const [busy, setBusy] = useState(false);
+  const [pwBusy, setPwBusy] = useState(false);
   const [err, setErr] = useState<string | null>(null);
   const [info, setInfo] = useState<string | null>(null);
 
@@ -34,6 +36,35 @@ export default function Login() {
   }, []);
 
   const canSubmit = useMemo(() => email.includes("@") && email.length > 5, [email]);
+  const canPasswordLogin = useMemo(
+    () => email.includes("@") && password.length >= 1,
+    [email, password],
+  );
+
+  async function handlePasswordLogin() {
+    setErr(null);
+    setInfo(null);
+    setPwBusy(true);
+    try {
+      const res = await fetch(`${API_BASE}/api/auth/login/password`, {
+        method: "POST",
+        headers: { "content-type": "application/json" },
+        body: JSON.stringify({ email: email.trim().toLowerCase(), password }),
+      });
+      const data = await res.json().catch(() => ({}));
+      if (!res.ok) {
+        throw new Error((data as { error?: string }).error || `login failed (${res.status})`);
+      }
+      const token = (data as { access_token?: string }).access_token;
+      if (!token) throw new Error("no access_token in response");
+      setToken(token);
+      window.location.href = "/";
+    } catch (e: unknown) {
+      setErr(e instanceof Error ? e.message : String(e));
+    } finally {
+      setPwBusy(false);
+    }
+  }
 
   async function handleContinue() {
     setErr(null);
@@ -179,16 +210,46 @@ export default function Login() {
           </Typography>
         </Divider>
 
-        {/* Institution SSO */}
+        <Typography variant="subtitle2" color="text.secondary" sx={{ mb: 1 }}>
+          Email and password (role is set in the database by an admin), or institution SSO below
+        </Typography>
         <TextField
           label="College email"
           placeholder="name@university.edu"
+          type="email"
           value={email}
           onChange={(e) => setEmail(e.target.value)}
           autoComplete="email"
           fullWidth
+          sx={{ mb: 1.5 }}
         />
+        <TextField
+          label="Password"
+          type="password"
+          value={password}
+          onChange={(e) => setPassword(e.target.value)}
+          autoComplete="current-password"
+          fullWidth
+          sx={{ mb: 1.5 }}
+        />
+        <Button
+          variant="contained"
+          color="secondary"
+          disabled={!canPasswordLogin || pwBusy}
+          onClick={handlePasswordLogin}
+          fullWidth
+          sx={{ mb: 2 }}
+        >
+          {pwBusy ? "Signing in…" : "Sign in with password"}
+        </Button>
 
+        <Divider sx={{ my: 2 }}>
+          <Typography variant="body2" color="text.secondary">
+            OR
+          </Typography>
+        </Divider>
+
+        {/* Institution SSO (uses same email field) */}
         <Button
           variant="contained"
           disabled={!canSubmit || busy}
