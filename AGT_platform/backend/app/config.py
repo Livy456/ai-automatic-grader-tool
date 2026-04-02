@@ -24,6 +24,8 @@ def _env_bool(key: str) -> bool:
 
 class Config:
     SECRET_KEY = _env_str("SECRET_KEY")
+    # Host port for `python -m app.main` only. Default 5000; raise if Docker/backend already binds 5000.
+    FLASK_PORT = _env_int("FLASK_PORT", default=5000)
     JWT_EXPIRATION_SECONDS = _env_int("JWT_EXPIRATION_SECONDS", default=8 * 3600)
     DATABASE_URL = _env_str("DATABASE_URL")
     REDIS_URL = _env_str("REDIS_URL")

@@ -174,6 +174,11 @@ export default function AdminDashboard() {
     }
   }, [assignmentCourseId, loadAssignments]);
 
+  const enrollableUsers = useMemo(() => {
+    const enrolledIds = new Set(enrollments.map((e) => e.user_id));
+    return users.filter((u) => !enrolledIds.has(u.id));
+  }, [users, enrollments]);
+
   const todayStart = useMemo(() => {
     const d = new Date();
     d.setHours(0, 0, 0, 0);
@@ -244,7 +249,7 @@ export default function AdminDashboard() {
   };
 
   const submitEnroll = async () => {
-    if (enrollmentCourseId == null || enrollUserId === "") return;
+    if (enrollmentCourseId == null || enrollUserId === "" || enrollableUsers.length === 0) return;
     setEnrollBusy(true);
     setEnrollWarning(null);
     try {
@@ -544,11 +549,16 @@ export default function AdminDashboard() {
                 <MenuItem value="">
                   <em>Select user</em>
                 </MenuItem>
-                {users.map((u) => (
+                {enrollableUsers.map((u) => (
                   <MenuItem key={u.id} value={u.id}>
                     {u.name || u.email} ({u.email})
                   </MenuItem>
                 ))}
+                {enrollableUsers.length === 0 && (
+                  <MenuItem disabled value="__all_enrolled__">
+                    All users are already enrolled
+                  </MenuItem>
+                )}
               </TextField>
               <TextField
                 select
@@ -565,7 +575,7 @@ export default function AdminDashboard() {
               <Button
                 variant="contained"
                 fullWidth
-                disabled={enrollBusy || enrollUserId === ""}
+                disabled={enrollBusy || enrollUserId === "" || enrollableUsers.length === 0}
                 onClick={submitEnroll}
                 aria-label="Enroll user"
               >

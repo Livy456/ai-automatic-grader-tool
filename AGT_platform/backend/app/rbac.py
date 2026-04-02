@@ -6,7 +6,7 @@ from flask import jsonify, request
 
 from .config import Config
 from .extensions import SessionLocal
-from .models import IssuedJwt
+from .models import IssuedJwt, User
 
 
 def get_user_from_token():
@@ -22,7 +22,8 @@ def get_user_from_token():
         return None
 
     jti = payload.get("jti")
-    if not jti:
+    user_id = payload.get("id")
+    if not jti or user_id is None:
         return None
 
     db = SessionLocal()
@@ -32,7 +33,13 @@ def get_user_from_token():
             return None
         if row.expires_at < datetime.utcnow():
             return None
-        return payload
+
+        # Use live role from DB so SQL/API role changes apply without re-login.
+        db_user = db.query(User).get(int(user_id))
+        if db_user is None:
+            return None
+
+        return {**payload, "role": db_user.role}
     finally:
         db.close()
 
