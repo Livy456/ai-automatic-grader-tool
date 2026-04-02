@@ -102,5 +102,8 @@ DIA_ai_scorer.pem
 **/BUG_REPORT.md
 **/docs/role_assignment.md
 
+# Local how-to (not committed)
+RESTART_DEV_SERVER.md
+
 # environment variables file for GPU host
 env.production.gpu

@@ -13,6 +13,7 @@ export default defineConfig(({ mode }) => {
   // - Legacy same-origin API: "https://dia-ai-grader.com"
   // Proxy /api to local Flask when unset (host SPA + Docker backend). Override with VITE_API_BASE.
   const apiBase = env.VITE_API_BASE || "http://localhost:5000";
+  const proxySecure = apiBase.startsWith("https://");
 
   return {
     plugins: [react()],
@@ -30,7 +31,16 @@ export default defineConfig(({ mode }) => {
         "/api": {
           target: apiBase,
           changeOrigin: true,
-          secure: true,
+          // Local Flask is http:// — secure:true can break the proxy; only verify TLS for https targets.
+          secure: proxySecure,
+          configure(proxy) {
+            proxy.on("proxyReq", (proxyReq, req) => {
+              const auth = req.headers.authorization;
+              if (auth) {
+                proxyReq.setHeader("Authorization", auth);
+              }
+            });
+          },
         },
       },
     },

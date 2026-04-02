@@ -40,7 +40,13 @@ def create_app():
     app.config["SESSION_COOKIE_HTTPONLY"] = True
     app.config["SESSION_COOKIE_SAMESITE"] = "Lax"
     
-    CORS(app, supports_credentials=True, origins=app.config["CORS_ORIGINS"])
+    CORS(
+        app,
+        supports_credentials=True,
+        origins=app.config["CORS_ORIGINS"],
+        allow_headers=["Content-Type", "Authorization"],
+        methods=["GET", "POST", "PUT", "PATCH", "DELETE", "OPTIONS"],
+    )
 
     # init_db(app.config["DATABASE_URL"])
     # Base.metadata.create_all(bind=engine)
