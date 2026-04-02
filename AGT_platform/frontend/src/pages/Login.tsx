@@ -3,7 +3,28 @@ import { useEffect, useMemo, useState } from "react";
 import { setToken } from "../auth";
 import { Container, TextField, Typography, Box, Alert, Divider, Button } from "@mui/material";
 
-const API_BASE = import.meta.env.VITE_API_BASE ?? "http://localhost:5000";
+function trimApiBase(v: unknown): string {
+  if (v == null) return "";
+  const s = String(v).trim();
+  return s.replace(/\/+$/, "");
+}
+
+/** JSON/fetch calls (CORS). Empty VITE_API_BASE → local Docker API. */
+const API_BASE =
+  trimApiBase(import.meta.env.VITE_API_BASE) || "http://localhost:5000";
+
+/**
+ * Full-page OAuth must open the real Flask origin (Entra redirect URI), not the Vite port.
+ * VITE_OAUTH_API_ORIGIN wins; else if VITE_API_BASE wrongly points at :5173/:5174, use :5000.
+ */
+const OAUTH_API_ORIGIN: string = (() => {
+  const explicit = trimApiBase(import.meta.env.VITE_OAUTH_API_ORIGIN);
+  if (explicit) return explicit;
+  if (/:(5173|5174)(\/|$)/.test(API_BASE)) {
+    return "http://localhost:5000";
+  }
+  return API_BASE;
+})();
 
 type DiscoverResponse =
   | { supported: true; domain: string }
@@ -90,7 +111,7 @@ export default function Login() {
 
       if ("supported" in data && data.supported) {
         // Start OIDC flow
-        window.location.href = `${API_BASE}/api/auth/login?email=${encodeURIComponent(email)}`;
+        window.location.href = `${OAUTH_API_ORIGIN}/api/auth/login?email=${encodeURIComponent(email)}`;
         return;
       }
 
@@ -108,11 +129,11 @@ export default function Login() {
   }
 
   function handleMicrosoftLogin() {
-    window.location.href = `${API_BASE}/api/auth/login/microsoft`;
+    window.location.href = `${OAUTH_API_ORIGIN}/api/auth/login/microsoft`;
   }
 
   function handleGoogleLogin() {
-    window.location.href = `${API_BASE}/api/auth/login/google`;
+    window.location.href = `${OAUTH_API_ORIGIN}/api/auth/login/google`;
   }
 
   return (

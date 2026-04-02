@@ -17,6 +17,32 @@ from .rbac import require_auth
 bp = Blueprint("auth", __name__)
 oauth = OAuth()
 
+
+def _public_api_base() -> str:
+    """
+    Base URL the browser uses to reach this API for OAuth (scheme + host + port).
+    Microsoft/Google redirect_uri must match app registration exactly; session cookies for
+    the OAuth state must be set on this same origin. When the SPA is on :5174, still use
+    PUBLIC_API_URL=http://localhost:5000 for local Docker.
+    """
+    explicit = (current_app.config.get("PUBLIC_API_URL") or "").strip().rstrip("/")
+    if explicit:
+        return explicit
+    return request.host_url.rstrip("/")
+
+
+def _frontend_origin() -> str:
+    """
+    Normalized SPA base URL for redirects after OAuth (no trailing slash).
+    Must match where the UI is actually served: Docker frontend usually :5173,
+    host `npm run dev` in this repo defaults to :5174 (see frontend/vite.config.ts).
+    If FRONTEND_BASE_URL is unset or empty in .env, Flask config can be ""; fall back then.
+    """
+    raw = (current_app.config.get("FRONTEND_BASE_URL") or "").strip()
+    if not raw:
+        raw = "http://localhost:5173"
+    return raw.rstrip("/")
+
 def _microsoft_entra_iss_ok(_claims, value) -> bool:
     """
     Accept Microsoft-issued ID token iss values. Authlib's default check compares `iss` to
@@ -276,7 +302,7 @@ def login():
 
     _register_dynamic_client(discovery_url)
 
-    redirect_uri = request.host_url.rstrip("/") + "/api/auth/callback"
+    redirect_uri = _public_api_base() + "/api/auth/callback"
     # persist domain in state via session param
     return oauth.campus.authorize_redirect(redirect_uri, domain=domain)
 
@@ -286,10 +312,8 @@ def login_microsoft():
     if not current_app.config.get("MICROSOFT_CLIENT_ID"):
         return jsonify({"error": "Microsoft OAuth not configured"}), 500
     
-    # Construct redirect URI dynamically from request host
-    # Production: https://dia-ai-grader.com/api/auth/callback/microsoft
-    # Development: http://localhost:5000/api/auth/callback/microsoft
-    redirect_uri = request.host_url.rstrip("/") + "/api/auth/callback/microsoft"
+    # redirect_uri must match Entra registration; use PUBLIC_API_URL when SPA is on another port
+    redirect_uri = _public_api_base() + "/api/auth/callback/microsoft"
     # Authlib automatically generates and validates state parameter for CSRF protection
     return oauth.microsoft.authorize_redirect(redirect_uri)
 
@@ -299,10 +323,7 @@ def login_google():
     if not current_app.config.get("GOOGLE_CLIENT_ID"):
         return jsonify({"error": "Google OAuth not configured"}), 500
     
-    # Construct redirect URI dynamically from request host
-    # Production: https://dia-ai-grader.com/api/auth/callback/google
-    # Development: http://localhost:5000/api/auth/callback/google
-    redirect_uri = request.host_url.rstrip("/") + "/api/auth/callback/google"
+    redirect_uri = _public_api_base() + "/api/auth/callback/google"
     # Authlib automatically generates and validates state parameter for CSRF protection
     return oauth.google.authorize_redirect(redirect_uri)
 
@@ -312,9 +333,7 @@ def _oauth_callback_fail_redirect(exc: Exception, provider_name: str):
     "invalid response" on OAuth return URLs). Logs full exception server-side.
     """
     current_app.logger.exception("OAuth %s callback failed", provider_name)
-    frontend_base = (
-        current_app.config.get("FRONTEND_BASE_URL", "http://localhost:5173").rstrip("/")
-    )
+    frontend_base = _frontend_origin()
     msg = str(exc).strip() or type(exc).__name__
     lower = msg.lower()
     if "state" in lower or "mismatch" in lower or "csrf" in lower:
@@ -361,8 +380,9 @@ def _handle_oauth_callback(provider_name: str):
     
     # Validate college email
     if not _is_college_email(email):
-        frontend_base = current_app.config.get("FRONTEND_BASE_URL", "http://localhost:5173")
-        return redirect(f"{frontend_base}/login?error=Please use your college email address")
+        return redirect(
+            f"{_frontend_origin()}/login?error=Please use your college email address"
+        )
 
     domain = email.split("@", 1)[1] if "@" in email else None
 
@@ -394,8 +414,7 @@ def _handle_oauth_callback(provider_name: str):
     finally:
         db.close()
 
-    frontend_base = current_app.config.get("FRONTEND_BASE_URL", "http://localhost:5173")
-    return redirect(f"{frontend_base}/login#token={jwt_token}")
+    return redirect(f"{_frontend_origin()}/login#token={jwt_token}")
 
 @bp.get("/api/auth/callback")
 def callback():
@@ -438,8 +457,7 @@ def callback():
     finally:
         db.close()
 
-    frontend_base = current_app.config.get("FRONTEND_BASE_URL", "http://localhost:5173")
-    return redirect(f"{frontend_base}/login#token={jwt_token}")
+    return redirect(f"{_frontend_origin()}/login#token={jwt_token}")
 
 @bp.get("/api/auth/callback/microsoft")
 def callback_microsoft():

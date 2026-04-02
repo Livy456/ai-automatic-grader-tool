@@ -29,6 +29,11 @@ class Config:
     REDIS_URL = _env_str("REDIS_URL")
     FRONTEND_BASE_URL = _env_str("FRONTEND_BASE_URL")
 
+    # Browser-reachable API origin for OAuth redirect_uri (no path, no trailing slash).
+    # Local: http://localhost:5000 so Entra/Google match Azure/console registration and session
+    # cookies stay on the same host as the callback. Leave empty to use the request Host.
+    PUBLIC_API_URL = _env_str("PUBLIC_API_URL").strip().rstrip("/")
+
     # OAuth (Authlib) stores CSRF state in Flask session cookies.
     # Must be False when the API is reached over http:// (e.g. localhost:5000) or the browser
     # will not store/send the session cookie and the callback returns 400 "state mismatch".

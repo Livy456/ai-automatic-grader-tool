@@ -11,7 +11,8 @@ export default defineConfig(({ mode }) => {
   // - Development: "http://localhost:5000"
   // - Production (ALB): "https://api.dia-ai-grader.com"
   // - Legacy same-origin API: "https://dia-ai-grader.com"
-  const apiBase = env.VITE_API_BASE || "https://api.dia-ai-grader.com";
+  // Proxy /api to local Flask when unset (host SPA + Docker backend). Override with VITE_API_BASE.
+  const apiBase = env.VITE_API_BASE || "http://localhost:5000";
 
   return {
     plugins: [react()],
