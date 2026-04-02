@@ -55,10 +55,17 @@ docker compose up -d --build
 
 ### 3. Database migrations
 
-Run Alembic **inside the backend container** once (and after pulling migrations):
+Run Alembic **inside the backend container** once (and after pulling migrations). The container’s working directory is `/app`, where **`alembic.ini`** lives, so this works even though **`alembic.ini` is not** in **`AGT_platform/`** on the host.
 
 ```bash
+cd AGT_platform
 docker compose exec backend python -m alembic upgrade head
+```
+
+To check for a **single migration head** (see runbook §4):
+
+```bash
+docker compose exec backend python -m alembic heads
 ```
 
 ### 4. Pull an Ollama model (first time)
@@ -108,11 +115,15 @@ From **`AGT_platform/backend/`**:
    - `REDIS_URL=`
    - `SECRET_KEY=`, `JWT_EXPIRATION_SECONDS=`, `OLLAMA_BASE_URL=`, `S3_*` as needed (empty values use application defaults where the backend supports them)
 
-3. **Migrations**
+3. **Migrations** (must run with **`alembic.ini`** visible: stay in **`AGT_platform/backend/`**, or use `-c path/to/alembic.ini`)
 
    ```bash
+   cd AGT_platform/backend
+   python -m alembic heads          # expect exactly one head
    python -m alembic upgrade head
    ```
+
+   Running `python -m alembic` from **`AGT_platform/`** fails with *No config file 'alembic.ini' found* because the config file lives next to the backend app, not next to `docker-compose.yaml`.
 
 4. **Run the API**
 
@@ -157,11 +168,15 @@ From **`AGT_platform/frontend/`**:
 
 3. **Run the dev server**
 
+   Host **`npm run dev`** uses port **5174** by default (see **`vite.config.ts`**) so it does not fight **Docker** for **5173** (the compose **frontend** service).
+
    ```bash
    npm run dev
    ```
 
-   Open the URL and port printed in the terminal (per Vite defaults and your config).
+   Set **`FRONTEND_BASE_URL=http://localhost:5174`** for the API when testing Microsoft/Google login from this dev server (see **`frontend/ReadMe.md`**).
+
+   See **`AGT_platform/frontend/ReadMe.md`** for freeing **5174** if needed.
 
 4. **Production build**
 

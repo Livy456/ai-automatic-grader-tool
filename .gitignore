@@ -97,6 +97,8 @@ DIA_ai_scorer.pem
 **/AGT_LOCAL_AND_PRODUCTION_RUNBOOK.md
 **/AGT_platform/DOCKER_DESKTOP.md
 **/docs/production_architecture_redesign.md
+**/docs/AZURE_AI_GRADER_WEBSITE_SETUP.md
+**/docs/AZURE_ENTRA_TENANT_AND_GUEST_ACCESS.md
 
 # environment variables file for GPU host
 env.production.gpu

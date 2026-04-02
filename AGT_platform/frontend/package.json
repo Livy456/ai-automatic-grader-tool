@@ -4,7 +4,9 @@
   "version": "0.1.0",
   "type": "module",
   "scripts": {
-    "dev": "vite --host 0.0.0.0 --port 5173",
+    "dev": "vite",
+    "dev:free-port": "npx --yes kill-port 5174",
+    "dev:local": "npm run dev:free-port && vite",
     "build": "vite build",
     "preview": "vite preview"
   },

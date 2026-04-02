@@ -34,7 +34,8 @@ def create_app():
     # SECRET_KEY comes from Config / .env.local + .env (see app.config.from_object above).
     if not (app.config.get("SECRET_KEY") or "").strip():
         app.config["SECRET_KEY"] = "dev_secret"
-    app.config["SESSION_COOKIE_SECURE"] = True
+    # Match Config (default False for local http:// OAuth); production sets SESSION_COOKIE_SECURE=true
+    app.config["SESSION_COOKIE_SECURE"] = bool(_cfg.SESSION_COOKIE_SECURE)
     app.config["SESSION_COOKIE_HTTPONLY"] = True
     app.config["SESSION_COOKIE_SAMESITE"] = "Lax"
     

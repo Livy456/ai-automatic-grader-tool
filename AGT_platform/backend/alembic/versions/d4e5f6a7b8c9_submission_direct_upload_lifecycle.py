@@ -1,10 +1,11 @@
 """submission direct upload lifecycle columns
 
 Revision ID: d4e5f6a7b8c9
-Revises: 0a9fbf797fc1
+Revises: c7d8e9f0a1b2
 Create Date: 2026-03-29
 
 Adds columns for presigned S3 upload flow and idempotent grading dispatch.
+Uses IF NOT EXISTS for databases that already had these columns from an earlier bootstrap.
 """
 from typing import Sequence, Union
 
@@ -13,13 +14,12 @@ import sqlalchemy as sa
 
 
 revision: str = "d4e5f6a7b8c9"
-down_revision: Union[str, None] = "0a9fbf797fc1"
+down_revision: Union[str, None] = "c7d8e9f0a1b2"
 branch_labels: Union[str, Sequence[str], None] = None
 depends_on: Union[str, Sequence[str], None] = None
 
 
 def upgrade() -> None:
-    # submissions may already exist outside this migration chain; use IF NOT EXISTS (Postgres).
     op.execute(
         sa.text(
             """

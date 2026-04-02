@@ -29,6 +29,12 @@ class Config:
     REDIS_URL = _env_str("REDIS_URL")
     FRONTEND_BASE_URL = _env_str("FRONTEND_BASE_URL")
 
+    # OAuth (Authlib) stores CSRF state in Flask session cookies.
+    # Must be False when the API is reached over http:// (e.g. localhost:5000) or the browser
+    # will not store/send the session cookie and the callback returns 400 "state mismatch".
+    # Set True in production when users only hit the API over HTTPS (e.g. .env.production).
+    SESSION_COOKIE_SECURE = _env_bool("SESSION_COOKIE_SECURE")
+
     # deployment_tier: web | gpu — informational; used in logs and optional guards
     DEPLOYMENT_TIER = _env_str("DEPLOYMENT_TIER").strip().lower() or "web"
 
@@ -72,6 +78,10 @@ class Config:
 
     MICROSOFT_CLIENT_ID = _env_str("MICROSOFT_CLIENT_ID")
     MICROSOFT_CLIENT_SECRET = _env_str("MICROSOFT_CLIENT_SECRET")
+    # Empty → use "common" OpenID metadata (multi-tenant). Set to your Directory (tenant) ID
+    # (GUID) for single-tenant: discovery issuer matches token iss and Authlib iss check passes
+    # without workarounds. Also accepts "organizations" or "consumers" as the path segment.
+    MICROSOFT_TENANT_ID = _env_str("MICROSOFT_TENANT_ID").strip()
 
     GOOGLE_CLIENT_ID = _env_str("GOOGLE_CLIENT_ID")
     GOOGLE_CLIENT_SECRET = _env_str("GOOGLE_CLIENT_SECRET")
@@ -99,6 +109,7 @@ class Config:
     if not _cors:
         _cors = (
             "http://localhost:5173,http://127.0.0.1:5173,"
+            "http://localhost:5174,http://127.0.0.1:5174,"
             "https://dia-ai-grader.com,https://www.dia-ai-grader.com,"
             "https://api.dia-ai-grader.com"
         )

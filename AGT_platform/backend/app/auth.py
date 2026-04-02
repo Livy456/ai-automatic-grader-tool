@@ -2,6 +2,7 @@
 import time
 import uuid
 from datetime import datetime
+from urllib.parse import quote
 
 import jwt
 from authlib.integrations.flask_client import OAuth
@@ -16,16 +17,61 @@ from .rbac import require_auth
 bp = Blueprint("auth", __name__)
 oauth = OAuth()
 
+def _microsoft_entra_iss_ok(_claims, value) -> bool:
+    """
+    Accept Microsoft-issued ID token iss values. Authlib's default check compares `iss` to
+    the `issuer` string from OpenID metadata; for /common (and sometimes tenant-specific
+    metadata) that string can be a template or otherwise not equal to the token, which raises
+    invalid_claim iss (authlib/authlib#605).
+
+    We still require a Microsoft-shaped issuer (not arbitrary URLs).
+    """
+    if not value or not isinstance(value, str):
+        return False
+    v = value.rstrip("/")
+    if v.startswith("https://login.microsoftonline.com/") and v.endswith("/v2.0"):
+        return True
+    if v.startswith("https://sts.windows.net/") and len(v) > len("https://sts.windows.net/"):
+        return True
+    # Entra External ID (CIAM) style issuers
+    if v.startswith("https://") and ".ciamlogin.com/" in v and v.endswith("/v2.0"):
+        return True
+    return False
+
+
+# Always pass this for Microsoft id_token validation (including inside authorize_access_token
+# when Authlib parses the token before returning — see flask_client/apps.py).
+_MICROSOFT_ISS_CLAIMS_OPTIONS = {"iss": {"validate": _microsoft_entra_iss_ok}}
+
+
+def _parse_oidc_userinfo(provider, provider_name: str, token: dict):
+    """Resolve user claims from token."""
+    userinfo = token.get("userinfo")
+    if userinfo:
+        return userinfo
+    if provider_name == "microsoft":
+        return provider.parse_id_token(
+            token, nonce=None, claims_options=_MICROSOFT_ISS_CLAIMS_OPTIONS
+        )
+    return provider.parse_id_token(token, nonce=None)
+
+
 def init_oauth(app):
     oauth.init_app(app)
     
     # Register Microsoft OAuth
     if app.config.get("MICROSOFT_CLIENT_ID") and app.config.get("MICROSOFT_CLIENT_SECRET"):
+        raw = (app.config.get("MICROSOFT_TENANT_ID") or "").strip()
+        authority_segment = raw if raw else "common"
+        meta = (
+            f"https://login.microsoftonline.com/{authority_segment}"
+            f"/v2.0/.well-known/openid-configuration"
+        )
         oauth.register(
             name="microsoft",
             client_id=app.config["MICROSOFT_CLIENT_ID"],
             client_secret=app.config["MICROSOFT_CLIENT_SECRET"],
-            server_metadata_url="https://login.microsoftonline.com/common/v2.0/.well-known/openid-configuration",
+            server_metadata_url=meta,
             client_kwargs={"scope": "openid email profile"},
         )
     
@@ -260,14 +306,52 @@ def login_google():
     # Authlib automatically generates and validates state parameter for CSRF protection
     return oauth.google.authorize_redirect(redirect_uri)
 
+def _oauth_callback_fail_redirect(exc: Exception, provider_name: str):
+    """
+    Return a browser redirect with a readable error instead of raw JSON 400 (avoids Chrome
+    "invalid response" on OAuth return URLs). Logs full exception server-side.
+    """
+    current_app.logger.exception("OAuth %s callback failed", provider_name)
+    frontend_base = (
+        current_app.config.get("FRONTEND_BASE_URL", "http://localhost:5173").rstrip("/")
+    )
+    msg = str(exc).strip() or type(exc).__name__
+    lower = msg.lower()
+    if "state" in lower or "mismatch" in lower or "csrf" in lower:
+        user_msg = (
+            "OAuth session/state failed (often: session cookie not sent over HTTP). "
+            "For local dev use SESSION_COOKIE_SECURE=false (default). Same browser tab, retry sign-in."
+        )
+    elif "invalid_client" in lower or "unauthorized_client" in lower or "700016" in msg:
+        user_msg = (
+            "Microsoft rejected the app credentials. If your Azure free trial ended, the app "
+            "registration may be disabled—renew Azure or create a new app registration and update "
+            "MICROSOFT_CLIENT_ID / MICROSOFT_CLIENT_SECRET."
+        )
+    elif "invalid_grant" in lower or "expired" in lower:
+        user_msg = (
+            "Authorization code expired or reused. Close the tab and start sign-in again from the login page."
+        )
+    else:
+        user_msg = f"Sign-in failed ({provider_name}). {msg[:280]}"
+
+    return redirect(f"{frontend_base}/login?error={quote(user_msg)}")
+
+
 def _handle_oauth_callback(provider_name: str):
     """Common handler for OAuth callbacks"""
     try:
         provider = getattr(oauth, provider_name)
-        token = provider.authorize_access_token()
-        userinfo = token.get("userinfo") or provider.parse_id_token(token)
+        # Flask OAuth2: when state contains a nonce, authorize_access_token() parses the id_token
+        # internally first; it must receive the same Microsoft iss workaround or iss validation fails
+        # before we return here (authlib/integrations/flask_client/apps.py).
+        token_kw: dict = {}
+        if provider_name == "microsoft":
+            token_kw["claims_options"] = _MICROSOFT_ISS_CLAIMS_OPTIONS
+        token = provider.authorize_access_token(**token_kw)
+        userinfo = _parse_oidc_userinfo(provider, provider_name, token)
     except Exception as e:
-        return jsonify({"error": f"OAuth callback failed: {str(e)}"}), 400
+        return _oauth_callback_fail_redirect(e, provider_name)
 
     email = (userinfo.get("email") or "").lower().strip()
     name = userinfo.get("name") or userinfo.get("preferred_username") or email

@@ -1,39 +1,43 @@
-Make sure you are in the backend directory
+Make sure you are in the **`AGT_platform/backend`** directory for local Python commands (migrations, `app.main`).
 
-1. Run the following command in the terminal to install packages used for the backend:
+1. Install backend dependencies:
 
->> pip install -r requirements.txt
+   ```bash
+   pip install -r requirements.txt
+   ```
 
-2. If you are using the autograder and not MIT-affiliated coruse, consult your school's IT docs for “OpenID Connect discovery URL” / “Issuer” / “OIDC”. Then replace the value for OIDC_DISCOVERY_URL with your school's appropriate OpenID Connect URL
+2. If you are using the autograder and not an MIT-affiliated course, consult your school’s IT docs for “OpenID Connect discovery URL” / “Issuer” / “OIDC”, then set **`OIDC_DISCOVERY_URL`** appropriately.
 
-3. Install alembic to have database migrations
+3. **Database migrations (Alembic)** — this repo **already** has `alembic/` and `alembic.ini`. Do **not** run `alembic init` again.
 
->> python -m pip install alembic
+   From **`AGT_platform/backend/`** (so `alembic.ini` is found), with **`DATABASE_URL`** set:
 
-4. Initialize alembic in the backend
+   ```bash
+   python -m alembic heads          # should show a single head (e.g. d4e5f6a7b8c9)
+   python -m alembic upgrade head
+   ```
 
->> alembic init alembic
+   Or from the repo root:
 
-5. Generate the migration (for wsl)
+   ```bash
+   python -m alembic -c AGT_platform/backend/alembic.ini upgrade head
+   ```
 
->> export DATABASE_URL="postgresql://dev:dev@localhost:5432/ai_grader"
->> alembic revision --autogenerate -m "create assignment_uploads"
->> alembic upgrade head
+   With Docker, run migrations **inside** the backend container (see root **`README.md`**).
 
-6. Run the following command in the terminal to run the backend:
+4. Run the API:
 
->> python -m app.main
+   ```bash
+   python -m app.main
+   ```
 
-7. Access the backend information locally from this link:
+5. Access the backend locally at the host/port your environment configures (see app defaults and `.env`).
 
->> INSERT LINK EVENTUALLY
+**Adding a new migration** (after model changes), from **`backend/`**:
 
-When migrating new tables to the database:
-
-python -m alembic current
-python -m alembic revision --autogenerate -m "create assignment_uploads"
+```bash
+python -m alembic revision --autogenerate -m "describe_change"
 python -m alembic upgrade head
+```
 
-alembic revision --autogenerate -m "create assignment_uploads"
-
-
+Review generated SQL carefully; autogenerate is not always complete.

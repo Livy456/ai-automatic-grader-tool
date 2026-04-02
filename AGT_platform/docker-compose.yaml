@@ -64,6 +64,7 @@ services:
       S3_ADDRESSING_STYLE: "${S3_ADDRESSING_STYLE:-path}"
       MAX_UPLOAD_MB: "${MAX_UPLOAD_MB:-1024}"
       ALLOW_FLASK_MULTIPART_UPLOAD: "${ALLOW_FLASK_MULTIPART_UPLOAD:-true}"
+      SESSION_COOKIE_SECURE: "${SESSION_COOKIE_SECURE:-false}"
     ports: ["5000:5000"]
     depends_on: [postgres, redis, minio, createbuckets, ollama]
 

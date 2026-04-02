@@ -72,6 +72,7 @@ services:
       DATABASE_URL: "${DATABASE_URL}"
       REDIS_URL: "${REDIS_URL:-redis://redis:6379/0}"
       ALLOW_FLASK_MULTIPART_UPLOAD: "${ALLOW_FLASK_MULTIPART_UPLOAD:-false}"
+      SESSION_COOKIE_SECURE: "${SESSION_COOKIE_SECURE:-true}"
       DEPLOYMENT_TIER: web
     ports:
       - "0.0.0.0:5000:5000"

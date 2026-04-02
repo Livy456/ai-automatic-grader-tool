@@ -22,7 +22,9 @@ export default defineConfig(({ mode }) => {
     },
     server: {
       host: "0.0.0.0",
-      port: 5173,
+      // Host `npm run dev`: use 5174 so Docker Compose can keep publishing frontend on 5173.
+      port: 5174,
+      strictPort: false,
       proxy: {
         "/api": {
           target: apiBase,
