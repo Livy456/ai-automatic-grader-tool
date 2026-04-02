@@ -8,6 +8,23 @@ function withAuthHeaders(extra?: HeadersInit): Headers {
   return h;
 }
 
+/**
+ * Central response handler.
+ * - On 401: token expired or revoked → clear it and redirect to login.
+ * - On other errors: throw a descriptive Error for the caller.
+ */
+async function handleResponse(res: Response, label: string): Promise<string> {
+  const text = await res.text().catch(() => "");
+  if (res.status === 401) {
+    const { clearToken } = await import("./auth");
+    clearToken();
+    window.location.replace("/login");
+    return "";
+  }
+  if (!res.ok) throw new Error(`${label} failed: ${res.status} ${text}`);
+  return text;
+}
+
 export type Assignment = {
   id: string;
   filename: string;
@@ -88,8 +105,7 @@ export const api = {
       headers: withAuthHeaders(),
       credentials: "include",
     });
-    const text = await res.text().catch(() => "");
-    if (!res.ok) throw new Error(`GET ${path} failed: ${res.status} ${text}`);
+    const text = await handleResponse(res, `GET ${path}`);
     return text ? JSON.parse(text) : null;
   },
 
@@ -112,8 +128,7 @@ export const api = {
       credentials: "include",
     });
 
-    const text = await res.text().catch(() => "");
-    if (!res.ok) throw new Error(`POST ${path} failed: ${res.status} ${text}`);
+    const text = await handleResponse(res, `POST ${path}`);
     return text ? JSON.parse(text) : null;
   },
 
@@ -126,8 +141,7 @@ export const api = {
       headers,
       credentials: "include",
     });
-    const text = await res.text().catch(() => "");
-    if (!res.ok) throw new Error(`PATCH ${path} failed: ${res.status} ${text}`);
+    const text = await handleResponse(res, `PATCH ${path}`);
     return text ? JSON.parse(text) : null;
   },
 
@@ -137,8 +151,7 @@ export const api = {
       headers: withAuthHeaders(),
       credentials: "include",
     });
-    const text = await res.text().catch(() => "");
-    if (!res.ok) throw new Error(`DELETE ${path} failed: ${res.status} ${text}`);
+    const text = await handleResponse(res, `DELETE ${path}`);
     return text ? JSON.parse(text) : null;
   },
 };

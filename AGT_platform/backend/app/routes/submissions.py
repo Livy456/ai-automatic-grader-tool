@@ -22,14 +22,22 @@ from app.tasks import grade_submission
 
 bp = Blueprint("submissions", __name__)
 
+_SUBMITTER_ROLES = frozenset({"student", "teacher", "admin"})
 
-def _student_enrolled(db, user_id: int, assignment_id: int) -> bool:
+
+def _is_authorized_submitter(db, user: dict, assignment_id: int) -> bool:
+    """
+    True if the user may create a submission for this assignment.
+    Admins bypass enrollment; teachers and students must be enrolled in the course.
+    """
     a = db.query(Assignment).get(assignment_id)
     if not a:
         return False
+    if user.get("role") == "admin":
+        return True
     return (
         db.query(Enrollment)
-        .filter_by(user_id=user_id, course_id=a.course_id)
+        .filter_by(user_id=user["id"], course_id=a.course_id)
         .first()
         is not None
     )
@@ -43,8 +51,8 @@ def direct_upload_start():
     Browser uploads bytes directly to S3 (no large body through Flask).
     """
     user = request.user
-    if user["role"] != "student":
-        return jsonify({"error": "only students use this flow"}), 403
+    if user["role"] not in _SUBMITTER_ROLES:
+        return jsonify({"error": "submission not permitted for this role"}), 403
 
     body = request.get_json(silent=True) or {}
     assignment_id = body.get("assignment_id")
@@ -56,8 +64,8 @@ def direct_upload_start():
     cfg = Config()
     db = SessionLocal()
     try:
-        if not _student_enrolled(db, user["id"], assignment_id):
-            return jsonify({"error": "not enrolled"}), 403
+        if not _is_authorized_submitter(db, user, assignment_id):
+            return jsonify({"error": "not enrolled or not authorized"}), 403
 
         sub = Submission(
             assignment_id=assignment_id,
@@ -124,8 +132,8 @@ def direct_upload_finalize(submission_id: int):
     cfg = Config()
     db = SessionLocal()
     try:
-        if user["role"] != "student":
-            return jsonify({"error": "only submitting student may finalize"}), 403
+        if user["role"] not in _SUBMITTER_ROLES:
+            return jsonify({"error": "submission not permitted for this role"}), 403
 
         sub = (
             db.query(Submission)
