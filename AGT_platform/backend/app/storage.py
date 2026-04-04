@@ -55,6 +55,34 @@ def s3_client(cfg: Config):
     return boto3.client("s3", **kwargs)
 
 
+def s3_client_for_presign(cfg: Config):
+    """
+    Boto client used only to build presigned URLs returned to browsers.
+
+    The URL's host must be reachable from the user's machine (not a Docker-only hostname like
+    ``minio``). Server-side S3 calls continue to use :func:`s3_client`.
+    """
+    ep = (cfg.S3_PRESIGN_ENDPOINT or cfg.S3_ENDPOINT or "").strip()
+    kwargs: dict = {
+        "region_name": cfg.AWS_REGION or cfg.S3_REGION or "us-east-1",
+        "config": BotoClientConfig(
+            signature_version="s3v4",
+            s3={"addressing_style": "path" if ep else _addressing_style(cfg)},
+        ),
+    }
+    if cfg.S3_ACCESS_KEY:
+        kwargs["aws_access_key_id"] = cfg.S3_ACCESS_KEY
+    if cfg.S3_SECRET_KEY:
+        kwargs["aws_secret_access_key"] = cfg.S3_SECRET_KEY
+    if ep:
+        kwargs["endpoint_url"] = ep
+    if ep:
+        kwargs["use_ssl"] = ep.lower().startswith("https://")
+    else:
+        kwargs["use_ssl"] = cfg.S3_SECURE
+    return boto3.client("s3", **kwargs)
+
+
 def _upload_fileobj(
     cfg: Config,
     fileobj: BinaryIO,
@@ -124,7 +152,7 @@ def get_object_bytes(cfg: Config, key: str) -> bytes:
 
 
 def get_presigned_url(cfg: Config, key: str, method: str = "GET", expires: int = 3600) -> str:
-    client = s3_client(cfg)
+    client = s3_client_for_presign(cfg)
     m = method.upper()
     if m == "GET":
         return client.generate_presigned_url(
@@ -152,7 +180,7 @@ def presigned_put_url(
     Keeps large files off the Flask host (production ingress is metadata + presign only).
     """
     exp = expires if expires is not None else cfg.S3_PRESIGN_PUT_EXPIRES
-    client = s3_client(cfg)
+    client = s3_client_for_presign(cfg)
     ct = content_type or "application/octet-stream"
     return client.generate_presigned_url(
         "put_object",

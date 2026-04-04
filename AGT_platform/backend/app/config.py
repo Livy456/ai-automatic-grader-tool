@@ -70,7 +70,7 @@ class Config:
     DEPLOYMENT_TIER = _env_str("DEPLOYMENT_TIER").strip().lower() or "web"
 
     # S3-compatible storage (AWS S3 or MinIO). Empty S3_ENDPOINT = native AWS.
-    S3_ENDPOINT = _env_str("S3_ENDPOINT").strip()
+    S3_ENDPOINT = _env_str("S3_ENDPOINT").strip().rstrip("/")
     S3_ACCESS_KEY = _env_str("S3_ACCESS_KEY")
     S3_SECRET_KEY = _env_str("S3_SECRET_KEY")
     S3_BUCKET = _env_str("S3_BUCKET")
@@ -78,6 +78,16 @@ class Config:
     S3_SECURE = _env_bool("S3_SECURE")
     S3_ADDRESSING_STYLE = _env_str("S3_ADDRESSING_STYLE").strip()
     AWS_REGION = _env_str("AWS_REGION").strip() or S3_REGION
+
+    # Host/port the *browser* uses for presigned PUT/GET URLs. Must match what appears in the URL
+    # string (SigV4 signs the Host header). Leave empty to use S3_ENDPOINT; for AWS both are empty
+    # and URLs are correct. For Docker Compose, S3_ENDPOINT is often http://minio:9000 (unreachable
+    # from the host browser) — set S3_PRESIGN_ENDPOINT=http://127.0.0.1:9000 or use the default
+    # below when S3_ENDPOINT is the standard internal MinIO URL.
+    _presign_ep = _env_str("S3_PRESIGN_ENDPOINT").strip().rstrip("/")
+    if not _presign_ep and S3_ENDPOINT == "http://minio:9000":
+        _presign_ep = "http://127.0.0.1:9000"
+    S3_PRESIGN_ENDPOINT = _presign_ep
 
     # Prefix for student submission objects (unique keys still include ids/uuids).
     UPLOADS_S3_PREFIX = _env_str("UPLOADS_S3_PREFIX").strip() or "assignments/by-id"

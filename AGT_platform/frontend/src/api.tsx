@@ -136,11 +136,29 @@ export async function putToPresignedUrl(
   body: Blob,
   contentType: string
 ): Promise<void> {
-  const res = await fetch(url, {
-    method: "PUT",
-    body,
-    headers: { "Content-Type": contentType },
-  });
+  let res: Response;
+  try {
+    res = await fetch(url, {
+      method: "PUT",
+      body,
+      headers: { "Content-Type": contentType },
+    });
+  } catch (e: unknown) {
+    let host = "";
+    try {
+      host = new URL(url).hostname;
+    } catch {
+      /* ignore */
+    }
+    const dockerish = host === "minio" || /\.svc\.cluster\.local$/i.test(host);
+    const hint = dockerish
+      ? " The upload URL uses a hostname only reachable inside Docker (e.g. minio). Set S3_PRESIGN_ENDPOINT to a URL your browser can open, such as http://127.0.0.1:9000, and restart the API."
+      : " Check that object storage is running, CORS allows your app origin, and the URL is HTTPS/HTTP as expected.";
+    if (e instanceof TypeError) {
+      throw new Error(`Storage upload failed (network / blocked request).${hint} (${e.message})`);
+    }
+    throw e;
+  }
   if (!res.ok) {
     const t = await res.text().catch(() => "");
     throw new Error(`S3 PUT failed: ${res.status} ${t}`);

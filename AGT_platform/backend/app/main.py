@@ -25,6 +25,20 @@ def create_app():
     app.config.from_object(Config)
     app.config_obj = Config()  # for celery task access
     _cfg = Config()
+    if (
+        _cfg.S3_ENDPOINT
+        and "minio" in _cfg.S3_ENDPOINT.lower()
+        and _cfg.S3_BUCKET
+        and _cfg.S3_BUCKET != "ai-grader"
+    ):
+        app.logger.warning(
+            "S3_ENDPOINT targets MinIO but S3_BUCKET=%r is not the default dev bucket "
+            "'ai-grader'. Requests go to MinIO, which returns NoSuchBucket if that name "
+            "was never created there. For local Docker use S3_BUCKET=ai-grader; for AWS S3 "
+            "leave S3_ENDPOINT empty and set IAM credentials. See "
+            "AGT_platform/docs/s3_bucket_and_presigned_uploads_setup.md",
+            _cfg.S3_BUCKET,
+        )
     # Production: keep API bodies small (JSON + presign metadata only). Large files go to S3.
     if _cfg.ALLOW_FLASK_MULTIPART_UPLOAD:
         app.config["MAX_CONTENT_LENGTH"] = _cfg.MAX_UPLOAD_BYTES
