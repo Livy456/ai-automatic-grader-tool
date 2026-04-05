@@ -424,6 +424,7 @@ export type StandaloneSubmissionDetail = {
   grading_instructions?: string | null;
   grading_dispatch_at: string | null;
   created_at?: string | null;
+  grading_report_s3_key?: string | null;
   ai_scores: Array<{
     criterion: string;
     score: number;
@@ -579,6 +580,16 @@ export async function getStandaloneSubmission(id: number): Promise<StandaloneSub
     method: "GET",
   });
   return standaloneAutograderJson(res, "GET standalone submission");
+}
+
+export async function getStandaloneGradingReportUrl(
+  submissionId: number,
+): Promise<{ download_url: string; s3_key: string }> {
+  const res = await standaloneAutograderFetch(
+    `/api/standalone/submissions/${submissionId}/report`,
+    { method: "GET" },
+  );
+  return standaloneAutograderJson(res, "GET standalone grading report");
 }
 
 export async function deleteStandaloneSubmission(id: number): Promise<{ ok: boolean } | null> {

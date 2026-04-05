@@ -1,3 +1,5 @@
+import json
+import logging
 from datetime import datetime
 from types import SimpleNamespace
 
@@ -16,9 +18,11 @@ from .models import (
     StandaloneSubmission,
     Submission,
 )
-from .storage import get_object_bytes
+from .storage import get_object_bytes, s3_client
 
 celery_app = Celery(__name__)
+
+_log = logging.getLogger(__name__)
 
 _cfg = Config()
 celery_app.conf.broker_url = _cfg.REDIS_URL
@@ -29,6 +33,8 @@ celery_app.conf.task_routes = {
 }
 # Bound prefetch so one worker does not hoard many large grading tasks in memory.
 celery_app.conf.worker_prefetch_multiplier = max(1, _cfg.CELERY_WORKER_PREFETCH)
+celery_app.conf.task_acks_late = True
+celery_app.conf.task_reject_on_worker_lost = True
 
 
 def init_celery(app):
@@ -194,6 +200,48 @@ def grade_submission(self, submission_id: int):
             sub.status = "graded"
         sub.updated_at = datetime.utcnow()
         db.commit()
+
+        try:
+            sub_ref = db.query(Submission).get(submission_id)
+            if sub_ref and sub_ref.status in ("graded", "needs_review"):
+                report_key = f"grading-reports/course/{submission_id}/{submission_id}_report.json"
+                grading_report = {
+                    "submission_id": submission_id,
+                    "title": getattr(assignment, "title", None),
+                    "status": sub_ref.status,
+                    "final_score": float(sub_ref.final_score)
+                    if sub_ref.final_score is not None
+                    else None,
+                    "final_feedback": sub_ref.final_feedback,
+                    "model_used": model_used,
+                    "graded_at": sub_ref.updated_at.isoformat()
+                    if sub_ref.updated_at
+                    else None,
+                    "criteria": [
+                        {
+                            "criterion": c.get("name", ""),
+                            "score": c.get("score", 0),
+                            "confidence": c.get("confidence", 0.5),
+                            "rationale": c.get("rationale", ""),
+                        }
+                        for c in criteria
+                    ],
+                }
+                s3_client(cfg).put_object(
+                    Bucket=cfg.S3_GRADING_REPORTS_BUCKET,
+                    Key=report_key,
+                    Body=json.dumps(grading_report, indent=2).encode("utf-8"),
+                    ContentType="application/json",
+                )
+                sub_ref.grading_report_s3_key = report_key
+                db.commit()
+        except Exception as e:
+            _log.error(
+                "Failed to upload grading report for submission %s: %s",
+                submission_id,
+                e,
+                exc_info=True,
+            )
     except Exception:
         db.rollback()
         if sub:
@@ -314,6 +362,50 @@ def grade_standalone_submission(self, submission_id: int):
             sub.status = "graded"
         sub.updated_at = datetime.utcnow()
         db.commit()
+
+        try:
+            sub_ref = db.query(StandaloneSubmission).get(submission_id)
+            if sub_ref and sub_ref.status in ("graded", "needs_review"):
+                report_key = (
+                    f"grading-reports/standalone/{submission_id}/{submission_id}_report.json"
+                )
+                grading_report = {
+                    "submission_id": submission_id,
+                    "title": sub_ref.title,
+                    "status": sub_ref.status,
+                    "final_score": float(sub_ref.final_score)
+                    if sub_ref.final_score is not None
+                    else None,
+                    "final_feedback": sub_ref.final_feedback,
+                    "model_used": model_used,
+                    "graded_at": sub_ref.updated_at.isoformat()
+                    if sub_ref.updated_at
+                    else None,
+                    "criteria": [
+                        {
+                            "criterion": c.get("name", ""),
+                            "score": c.get("score", 0),
+                            "confidence": c.get("confidence", 0.5),
+                            "rationale": c.get("rationale", ""),
+                        }
+                        for c in criteria
+                    ],
+                }
+                s3_client(cfg).put_object(
+                    Bucket=cfg.S3_GRADING_REPORTS_BUCKET,
+                    Key=report_key,
+                    Body=json.dumps(grading_report, indent=2).encode("utf-8"),
+                    ContentType="application/json",
+                )
+                sub_ref.grading_report_s3_key = report_key
+                db.commit()
+        except Exception as e:
+            _log.error(
+                "Failed to upload grading report for standalone submission %s: %s",
+                submission_id,
+                e,
+                exc_info=True,
+            )
     except Exception:
         db.rollback()
         if sub:

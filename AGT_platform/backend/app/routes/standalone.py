@@ -1,12 +1,10 @@
 """
-Public standalone autograder: no JWT required.
+Public standalone autograder: JWT required for uploads.
 
-Creates rows in assignments (course_id NULL), submissions (student_id optional),
-submission_artifacts, and ai_scores via the existing grade_submission Celery task.
+Uses StandaloneSubmission + StandaloneArtifact + StandaloneAIScore and grade_standalone_submission.
 """
 from __future__ import annotations
 
-import copy
 import uuid
 from datetime import datetime, timedelta
 
@@ -17,11 +15,10 @@ from werkzeug.utils import secure_filename
 from app.audit import log_event
 from app.config import Config
 from app.extensions import SessionLocal
-from app.grading.pipelines import DEFAULT_STANDALONE_RUBRIC
-from app.models import AIScore, Assignment, Submission, SubmissionArtifact
+from app.models import StandaloneAIScore, StandaloneArtifact, StandaloneSubmission
 from app.rbac import get_user_from_token
-from app.storage import object_exists, presigned_put_url
-from app.tasks import grade_submission
+from app.storage import get_presigned_url, object_exists, presigned_put_url
+from app.tasks import grade_standalone_submission
 
 bp = Blueprint("standalone", __name__)
 
@@ -42,40 +39,16 @@ def _optional_user() -> dict | None:
     return get_user_from_token()
 
 
-def _assignment_for_sub(db, sub: Submission) -> Assignment | None:
-    return db.query(Assignment).get(sub.assignment_id)
-
-
-def _is_public_autograder_submission(sub: Submission, db) -> bool:
-    a = _assignment_for_sub(db, sub)
-    return bool(a and a.course_id is None)
-
-
-def _can_view_submission(sub: Submission, db, user: dict | None) -> bool:
-    a = _assignment_for_sub(db, sub)
-    if not a:
-        return False
-    if a.course_id is None:
-        return True
+def _can_view_standalone(sub: StandaloneSubmission, user: dict | None) -> bool:
     if not user:
         return False
     if user.get("role") == "admin":
         return True
-    return sub.student_id is not None and int(sub.student_id) == int(user["id"])
+    return sub.user_id is not None and int(sub.user_id) == int(user["id"])
 
 
-def _can_mutate_public_submission(sub: Submission, user: dict | None, db) -> bool:
-    if not _is_public_autograder_submission(sub, db):
-        return False
-    if user:
-        if user.get("role") == "admin":
-            return True
-        if sub.student_id is not None and int(sub.student_id) == int(user["id"]):
-            return True
-    if sub.student_id is None:
-        ip = _client_ip()
-        return bool(sub.submitter_ip and ip and sub.submitter_ip == ip)
-    return False
+def _can_mutate_standalone(sub: StandaloneSubmission, user: dict | None) -> bool:
+    return _can_view_standalone(sub, user)
 
 
 def _kind_for_spec(spec: dict, default: str) -> str:
@@ -105,8 +78,11 @@ def _parse_enqueue_grading(body: dict) -> bool:
 
 @bp.post("/api/standalone/submissions/start")
 def standalone_start():
-    """Create assignment (no course) + submission + artifact rows; return presigned PUT URLs."""
+    """Create StandaloneSubmission + StandaloneArtifact rows; return presigned PUT URLs."""
     user = _optional_user()
+    if not user:
+        return jsonify({"error": "authentication required"}), 401
+
     body = request.get_json(silent=True) or {}
     title = (body.get("title") or "").strip()
     if not title:
@@ -125,81 +101,40 @@ def standalone_start():
     grading_instructions = (body.get("grading_instructions") or "").strip() or None
 
     cfg = Config()
-    client_ip = _client_ip()
     db = SessionLocal()
     try:
         since = datetime.utcnow() - timedelta(hours=_STANDALONE_RATE_WINDOW_HOURS)
-        if not user:
-            recent_ip = (
-                db.query(Submission)
-                .join(Assignment)
-                .filter(
-                    Assignment.course_id.is_(None),
-                    Submission.submitter_ip == client_ip,
-                    Submission.student_id.is_(None),
-                    Submission.created_at >= since,
-                    Submission.status != "deleted",
-                )
-                .count()
+        recent = (
+            db.query(StandaloneSubmission)
+            .filter(
+                StandaloneSubmission.user_id == user["id"],
+                StandaloneSubmission.created_at >= since,
+                StandaloneSubmission.status != "deleted",
             )
-            if recent_ip >= _STANDALONE_RATE_MAX:
-                return (
-                    jsonify(
-                        {
-                            "error": "rate limit",
-                            "detail": f"max {_STANDALONE_RATE_MAX} anonymous autograder uploads per {_STANDALONE_RATE_WINDOW_HOURS}h from this network",
-                        }
-                    ),
-                    429,
-                )
-        else:
-            recent = (
-                db.query(Submission)
-                .join(Assignment)
-                .filter(
-                    Assignment.course_id.is_(None),
-                    Submission.student_id == user["id"],
-                    Submission.created_at >= since,
-                    Submission.status != "deleted",
-                )
-                .count()
-            )
-            if recent >= _STANDALONE_RATE_MAX:
-                return (
-                    jsonify(
-                        {
-                            "error": "rate limit",
-                            "detail": f"max {_STANDALONE_RATE_MAX} autograder uploads per {_STANDALONE_RATE_WINDOW_HOURS}h",
-                        }
-                    ),
-                    429,
-                )
-
-        assignment = Assignment(
-            course_id=None,
-            title=title,
-            description=title,
-            modality="written",
-            rubric=copy.deepcopy(DEFAULT_STANDALONE_RUBRIC),
-            created_at=datetime.utcnow(),
-            due_date=None,
-            grader_rubric_text=rubric_text,
-            grader_answer_key_text=answer_key_text,
-            grader_instructions=grading_instructions,
+            .count()
         )
-        db.add(assignment)
-        db.flush()
+        if recent >= _STANDALONE_RATE_MAX:
+            return (
+                jsonify(
+                    {
+                        "error": "rate limit",
+                        "detail": f"max {_STANDALONE_RATE_MAX} autograder uploads per {_STANDALONE_RATE_WINDOW_HOURS}h",
+                    }
+                ),
+                429,
+            )
 
-        sub = Submission(
-            assignment_id=assignment.id,
-            student_id=int(user["id"]) if user else None,
+        sub = StandaloneSubmission(
+            user_id=int(user["id"]),
+            title=title,
             status="uploading",
-            submitter_ip=client_ip or None,
+            rubric_text=rubric_text,
+            answer_key_text=answer_key_text,
+            grading_instructions=grading_instructions,
         )
         db.add(sub)
         db.flush()
 
-        prefix = cfg.UPLOADS_S3_PREFIX.rstrip("/")
         uploads_out = []
         for spec in files:
             raw_name = (spec.get("filename") or "").strip()
@@ -208,8 +143,13 @@ def standalone_start():
                 continue
             content_type = (spec.get("content_type") or "application/octet-stream").strip()
             skind = _storage_kind_for_file(spec, filename)
-            key = f"{prefix}/{assignment.id}/submissions/{sub.id}/{uuid.uuid4().hex}_{filename}"
-            art = SubmissionArtifact(submission_id=sub.id, kind=skind, s3_key=key)
+            key = f"standalone/{sub.id}/{uuid.uuid4().hex}_{filename}"
+            art = StandaloneArtifact(
+                submission_id=sub.id,
+                kind=skind,
+                s3_key=key,
+                filename=filename,
+            )
             db.add(art)
             db.flush()
             url = presigned_put_url(cfg, key, content_type)
@@ -229,16 +169,15 @@ def standalone_start():
         db.commit()
         db.refresh(sub)
         log_event(
-            user["id"] if user else None,
-            "CREATE_PUBLIC_AUTOGRADER",
-            "Submission",
+            user["id"],
+            "CREATE_STANDALONE_AUTOGRADER",
+            "StandaloneSubmission",
             sub.id,
-            {"assignment_id": assignment.id, "n_files": len(uploads_out)},
+            {"n_files": len(uploads_out)},
         )
         return jsonify(
             {
                 "submission_id": sub.id,
-                "assignment_id": assignment.id,
                 "status": sub.status,
                 "uploads": uploads_out,
             }
@@ -250,23 +189,24 @@ def standalone_start():
 @bp.post("/api/standalone/submissions/<int:submission_id>/finalize")
 def standalone_finalize(submission_id: int):
     user = _optional_user()
-    cfg = Config()
+    if not user:
+        return jsonify({"error": "authentication required"}), 401
+
     body = request.get_json(silent=True) or {}
     enqueue_grading = _parse_enqueue_grading(body)
+    cfg = Config()
     db = SessionLocal()
     try:
         sub = (
-            db.query(Submission)
-            .options(selectinload(Submission.artifacts))
+            db.query(StandaloneSubmission)
+            .options(selectinload(StandaloneSubmission.artifacts))
             .filter_by(id=submission_id)
             .with_for_update()
             .first()
         )
         if not sub or sub.status == "deleted":
             return jsonify({"error": "not found"}), 404
-        if not _is_public_autograder_submission(sub, db):
-            return jsonify({"error": "not found"}), 404
-        if not _can_mutate_public_submission(sub, user, db):
+        if not _can_mutate_standalone(sub, user):
             return jsonify({"error": "forbidden"}), 403
 
         if sub.grading_dispatch_at is not None:
@@ -302,9 +242,9 @@ def standalone_finalize(submission_id: int):
         if not enqueue_grading:
             db.commit()
             log_event(
-                user["id"] if user else None,
-                "FINALIZE_PUBLIC_AUTOGRADER_UPLOAD",
-                "Submission",
+                user["id"],
+                "FINALIZE_STANDALONE_UPLOAD",
+                "StandaloneSubmission",
                 sub.id,
                 {"enqueue_grading": False},
             )
@@ -319,7 +259,7 @@ def standalone_finalize(submission_id: int):
         sub.status = "queued"
         sub.grading_dispatch_at = datetime.utcnow()
         try:
-            task = grade_submission.delay(sub.id)
+            task = grade_standalone_submission.delay(sub.id)
         except Exception:
             db.rollback()
             return jsonify({"error": "failed to enqueue grading job"}), 503
@@ -328,9 +268,9 @@ def standalone_finalize(submission_id: int):
         db.commit()
 
         log_event(
-            user["id"] if user else None,
-            "FINALIZE_PUBLIC_AUTOGRADER",
-            "Submission",
+            user["id"],
+            "FINALIZE_STANDALONE_AUTOGRADER",
+            "StandaloneSubmission",
             sub.id,
             {"celery_task_id": task.id},
         )
@@ -351,20 +291,21 @@ def standalone_finalize(submission_id: int):
 @bp.patch("/api/standalone/submissions/<int:submission_id>/context")
 def standalone_patch_context(submission_id: int):
     user = _optional_user()
+    if not user:
+        return jsonify({"error": "authentication required"}), 401
+
     body = request.get_json(silent=True) or {}
     db = SessionLocal()
     try:
         sub = (
-            db.query(Submission)
+            db.query(StandaloneSubmission)
             .filter_by(id=submission_id)
             .with_for_update()
             .first()
         )
         if not sub or sub.status == "deleted":
             return jsonify({"error": "not found"}), 404
-        if not _is_public_autograder_submission(sub, db):
-            return jsonify({"error": "not found"}), 404
-        if not _can_mutate_public_submission(sub, user, db):
+        if not _can_mutate_standalone(sub, user):
             return jsonify({"error": "forbidden"}), 403
         if sub.status != "uploaded" or sub.grading_dispatch_at is not None:
             return (
@@ -377,26 +318,22 @@ def standalone_patch_context(submission_id: int):
                 409,
             )
 
-        a = _assignment_for_sub(db, sub)
-        if not a:
-            return jsonify({"error": "not found"}), 404
-
         if "rubric_text" in body:
             v = body.get("rubric_text")
-            a.grader_rubric_text = (str(v).strip() if v is not None else "") or None
+            sub.rubric_text = (str(v).strip() if v is not None else "") or None
         if "answer_key_text" in body:
             v = body.get("answer_key_text")
-            a.grader_answer_key_text = (str(v).strip() if v is not None else "") or None
+            sub.answer_key_text = (str(v).strip() if v is not None else "") or None
         if "grading_instructions" in body:
             v = body.get("grading_instructions")
-            a.grader_instructions = (str(v).strip() if v is not None else "") or None
+            sub.grading_instructions = (str(v).strip() if v is not None else "") or None
 
         sub.updated_at = datetime.utcnow()
         db.commit()
         log_event(
-            user["id"] if user else None,
-            "PATCH_PUBLIC_AUTOGRADER_CONTEXT",
-            "Submission",
+            user["id"],
+            "PATCH_STANDALONE_CONTEXT",
+            "StandaloneSubmission",
             sub.id,
             {},
         )
@@ -408,6 +345,9 @@ def standalone_patch_context(submission_id: int):
 @bp.post("/api/standalone/submissions/<int:submission_id>/context_files/presign")
 def standalone_presign_context_files(submission_id: int):
     user = _optional_user()
+    if not user:
+        return jsonify({"error": "authentication required"}), 401
+
     body = request.get_json(silent=True) or {}
     files = body.get("files")
     if not files or not isinstance(files, list):
@@ -417,17 +357,15 @@ def standalone_presign_context_files(submission_id: int):
     db = SessionLocal()
     try:
         sub = (
-            db.query(Submission)
-            .options(selectinload(Submission.artifacts))
+            db.query(StandaloneSubmission)
+            .options(selectinload(StandaloneSubmission.artifacts))
             .filter_by(id=submission_id)
             .with_for_update()
             .first()
         )
         if not sub or sub.status == "deleted":
             return jsonify({"error": "not found"}), 404
-        if not _is_public_autograder_submission(sub, db):
-            return jsonify({"error": "not found"}), 404
-        if not _can_mutate_public_submission(sub, user, db):
+        if not _can_mutate_standalone(sub, user):
             return jsonify({"error": "forbidden"}), 403
         if sub.status != "uploaded" or sub.grading_dispatch_at is not None:
             return jsonify({"error": "invalid state for context file upload"}), 409
@@ -435,11 +373,6 @@ def standalone_presign_context_files(submission_id: int):
         if len(sub.artifacts) + len(files) > _MAX_FILES:
             return jsonify({"error": f"at most {_MAX_FILES} files per submission"}), 400
 
-        a = _assignment_for_sub(db, sub)
-        if not a:
-            return jsonify({"error": "not found"}), 404
-
-        prefix = cfg.UPLOADS_S3_PREFIX.rstrip("/")
         uploads_out = []
         for spec in files:
             raw_name = (spec.get("filename") or "").strip()
@@ -451,8 +384,13 @@ def standalone_presign_context_files(submission_id: int):
                 return jsonify({"error": "context files must be rubric or answer_key"}), 400
             content_type = (spec.get("content_type") or "application/octet-stream").strip()
             skind = _storage_kind_for_file(spec, filename)
-            key = f"{prefix}/{a.id}/submissions/{sub.id}/{uuid.uuid4().hex}_{filename}"
-            art = SubmissionArtifact(submission_id=sub.id, kind=skind, s3_key=key)
+            key = f"standalone/{sub.id}/{uuid.uuid4().hex}_{filename}"
+            art = StandaloneArtifact(
+                submission_id=sub.id,
+                kind=skind,
+                s3_key=key,
+                filename=filename,
+            )
             db.add(art)
             db.flush()
             url = presigned_put_url(cfg, key, content_type)
@@ -471,9 +409,9 @@ def standalone_presign_context_files(submission_id: int):
 
         db.commit()
         log_event(
-            user["id"] if user else None,
-            "PRESIGN_PUBLIC_AUTOGRADER_CONTEXT",
-            "Submission",
+            user["id"],
+            "PRESIGN_STANDALONE_CONTEXT",
+            "StandaloneSubmission",
             sub.id,
             {"n_files": len(uploads_out)},
         )
@@ -490,21 +428,22 @@ def standalone_presign_context_files(submission_id: int):
 @bp.post("/api/standalone/submissions/<int:submission_id>/enqueue_grading")
 def standalone_enqueue_grading(submission_id: int):
     user = _optional_user()
+    if not user:
+        return jsonify({"error": "authentication required"}), 401
+
     cfg = Config()
     db = SessionLocal()
     try:
         sub = (
-            db.query(Submission)
-            .options(selectinload(Submission.artifacts))
+            db.query(StandaloneSubmission)
+            .options(selectinload(StandaloneSubmission.artifacts))
             .filter_by(id=submission_id)
             .with_for_update()
             .first()
         )
         if not sub or sub.status == "deleted":
             return jsonify({"error": "not found"}), 404
-        if not _is_public_autograder_submission(sub, db):
-            return jsonify({"error": "not found"}), 404
-        if not _can_mutate_public_submission(sub, user, db):
+        if not _can_mutate_standalone(sub, user):
             return jsonify({"error": "forbidden"}), 403
 
         if sub.grading_dispatch_at is not None:
@@ -527,7 +466,7 @@ def standalone_enqueue_grading(submission_id: int):
         sub.status = "queued"
         sub.grading_dispatch_at = datetime.utcnow()
         try:
-            task = grade_submission.delay(sub.id)
+            task = grade_standalone_submission.delay(sub.id)
         except Exception:
             db.rollback()
             return jsonify({"error": "failed to enqueue grading job"}), 503
@@ -536,9 +475,9 @@ def standalone_enqueue_grading(submission_id: int):
         db.commit()
 
         log_event(
-            user["id"] if user else None,
-            "ENQUEUE_PUBLIC_AUTOGRADER",
-            "Submission",
+            user["id"],
+            "ENQUEUE_STANDALONE_AUTOGRADER",
+            "StandaloneSubmission",
             sub.id,
             {"celery_task_id": task.id},
         )
@@ -559,46 +498,33 @@ def standalone_enqueue_grading(submission_id: int):
 @bp.get("/api/standalone/submissions")
 def standalone_list():
     user = _optional_user()
+    if not user:
+        return jsonify({"error": "authentication required"}), 401
+
     page = int(request.args.get("page") or 1)
     per_page = min(int(request.args.get("per_page") or 20), 100)
     if page < 1:
         page = 1
 
-    ip = _client_ip()
     db = SessionLocal()
     try:
-        q = (
-            db.query(Submission)
-            .join(Assignment)
-            .filter(
-                Assignment.course_id.is_(None),
-                Submission.status != "deleted",
-            )
+        q = db.query(StandaloneSubmission).filter(
+            StandaloneSubmission.user_id == user["id"],
+            StandaloneSubmission.status != "deleted",
         )
-        if user:
-            q = q.filter(Submission.student_id == user["id"])
-        else:
-            if not ip:
-                return jsonify({"items": [], "total": 0, "page": page, "per_page": per_page})
-            q = q.filter(
-                Submission.student_id.is_(None),
-                Submission.submitter_ip == ip,
-            )
-
         total = q.count()
         rows = (
-            q.order_by(Submission.created_at.desc())
+            q.order_by(StandaloneSubmission.created_at.desc())
             .offset((page - 1) * per_page)
             .limit(per_page)
             .all()
         )
         items = []
         for r in rows:
-            a = _assignment_for_sub(db, r)
             items.append(
                 {
                     "id": r.id,
-                    "title": a.title if a else "—",
+                    "title": r.title,
                     "status": r.status,
                     "final_score": float(r.final_score) if r.final_score is not None else None,
                     "created_at": r.created_at.isoformat() if r.created_at else None,
@@ -614,29 +540,32 @@ def standalone_list():
 @bp.get("/api/standalone/submissions/<int:submission_id>")
 def standalone_get(submission_id: int):
     user = _optional_user()
+    if not user:
+        return jsonify({"error": "authentication required"}), 401
+
     db = SessionLocal()
     try:
-        sub = db.query(Submission).filter_by(id=submission_id).first()
+        sub = db.query(StandaloneSubmission).filter_by(id=submission_id).first()
         if not sub or sub.status == "deleted":
             return jsonify({"error": "not found"}), 404
-        if not _can_view_submission(sub, db, user):
+        if not _can_view_standalone(sub, user):
             return jsonify({"error": "forbidden"}), 403
 
-        a = _assignment_for_sub(db, sub)
-        scores = db.query(AIScore).filter_by(submission_id=sub.id).all()
-        log_event(user["id"] if user else None, "VIEW_PUBLIC_AUTOGRADER", "Submission", sub.id, {})
+        scores = db.query(StandaloneAIScore).filter_by(submission_id=sub.id).all()
+        log_event(user["id"], "VIEW_STANDALONE_AUTOGRADER", "StandaloneSubmission", sub.id, {})
         return jsonify(
             {
                 "id": sub.id,
-                "title": a.title if a else "—",
+                "title": sub.title,
                 "status": sub.status,
                 "final_score": float(sub.final_score) if sub.final_score is not None else None,
                 "final_feedback": sub.final_feedback,
-                "grading_instructions": a.grader_instructions if a else None,
+                "grading_instructions": sub.grading_instructions,
                 "grading_dispatch_at": sub.grading_dispatch_at.isoformat()
                 if sub.grading_dispatch_at
                 else None,
                 "created_at": sub.created_at.isoformat() if sub.created_at else None,
+                "grading_report_s3_key": sub.grading_report_s3_key,
                 "ai_scores": [
                     {
                         "criterion": s.criterion,
@@ -652,28 +581,60 @@ def standalone_get(submission_id: int):
         db.close()
 
 
+@bp.get("/api/standalone/submissions/<int:submission_id>/report")
+def standalone_get_report(submission_id: int):
+    """Return a presigned GET URL for the grading report JSON in S3."""
+    user = _optional_user()
+    if not user:
+        return jsonify({"error": "authentication required"}), 401
+
+    cfg = Config()
+    db = SessionLocal()
+    try:
+        sub = db.query(StandaloneSubmission).filter_by(id=submission_id).first()
+        if not sub or sub.status == "deleted":
+            return jsonify({"error": "not found"}), 404
+        if not _can_view_standalone(sub, user):
+            return jsonify({"error": "forbidden"}), 403
+        if not sub.grading_report_s3_key:
+            return jsonify({"error": "report not available yet"}), 404
+        url = get_presigned_url(
+            cfg,
+            sub.grading_report_s3_key,
+            method="GET",
+            expires=3600,
+            bucket=cfg.S3_GRADING_REPORTS_BUCKET,
+        )
+        return jsonify(
+            {"download_url": url, "s3_key": sub.grading_report_s3_key}
+        )
+    finally:
+        db.close()
+
+
 @bp.delete("/api/standalone/submissions/<int:submission_id>")
 def standalone_delete(submission_id: int):
     user = _optional_user()
+    if not user:
+        return jsonify({"error": "authentication required"}), 401
+
     db = SessionLocal()
     try:
         sub = (
-            db.query(Submission)
+            db.query(StandaloneSubmission)
             .filter_by(id=submission_id)
             .with_for_update()
             .first()
         )
         if not sub or sub.status == "deleted":
             return jsonify({"error": "not found"}), 404
-        if not _is_public_autograder_submission(sub, db):
-            return jsonify({"error": "not found"}), 404
-        if not _can_mutate_public_submission(sub, user, db):
+        if not _can_mutate_standalone(sub, user):
             return jsonify({"error": "forbidden"}), 403
 
         sub.status = "deleted"
         sub.updated_at = datetime.utcnow()
         db.commit()
-        log_event(user["id"] if user else None, "DELETE_PUBLIC_AUTOGRADER", "Submission", sub.id, {})
+        log_event(user["id"], "DELETE_STANDALONE_AUTOGRADER", "StandaloneSubmission", sub.id, {})
         return jsonify({"ok": True})
     finally:
         db.close()

@@ -1,6 +1,7 @@
 import { useEffect, useState } from "react";
 import { useNavigate, useParams } from "react-router-dom";
 import {
+  Alert,
   Box,
   Button,
   Card,
@@ -16,7 +17,12 @@ import {
   Typography,
 } from "@mui/material";
 import ArrowBackOutlined from "@mui/icons-material/ArrowBackOutlined";
-import { getStandaloneSubmission, type StandaloneSubmissionDetail } from "../api";
+import DownloadOutlined from "@mui/icons-material/DownloadOutlined";
+import {
+  getStandaloneGradingReportUrl,
+  getStandaloneSubmission,
+  type StandaloneSubmissionDetail,
+} from "../api";
 import StatusChip from "../components/StatusChip";
 
 const POLL_STATUSES = new Set(["uploading", "uploaded", "queued", "grading"]);
@@ -24,6 +30,12 @@ const POLL_STATUSES = new Set(["uploading", "uploaded", "queued", "grading"]);
 function gradeBarColor(score: number): "success" | "warning" | "error" {
   if (score >= 90) return "success";
   if (score >= 70) return "warning";
+  return "error";
+}
+
+function confidenceColor(conf: number): "success" | "warning" | "error" {
+  if (conf >= 0.85) return "success";
+  if (conf >= 0.7) return "warning";
   return "error";
 }
 
@@ -38,6 +50,7 @@ export default function StandaloneResult() {
   const navigate = useNavigate();
   const [sub, setSub] = useState<StandaloneSubmissionDetail | null>(null);
   const [loadError, setLoadError] = useState(false);
+  const [reportBusy, setReportBusy] = useState(false);
 
   useEffect(() => {
     let cancelled = false;
@@ -67,6 +80,19 @@ export default function StandaloneResult() {
     };
   }, [id]);
 
+  const handleDownloadReport = async () => {
+    if (!id) return;
+    setReportBusy(true);
+    try {
+      const { download_url } = await getStandaloneGradingReportUrl(parseInt(id, 10));
+      window.open(download_url, "_blank", "noopener,noreferrer");
+    } catch {
+      /* ignore */
+    } finally {
+      setReportBusy(false);
+    }
+  };
+
   if (loadError || !id) {
     return (
       <Box>
@@ -88,6 +114,8 @@ export default function StandaloneResult() {
 
   const scores = sub.ai_scores ?? [];
   const polling = POLL_STATUSES.has(sub.status);
+  const avgConfidence =
+    scores.length > 0 ? scores.reduce((sum, s) => sum + s.confidence, 0) / scores.length : 0;
 
   return (
     <Box>
@@ -107,6 +135,13 @@ export default function StandaloneResult() {
         <StatusChip status={sub.status} />
       </Box>
 
+      {sub.status === "needs_review" && (
+        <Alert severity="warning" sx={{ mb: 2 }} role="status">
+          One or more criteria have confidence below the recommended threshold. A human review is
+          recommended before treating this grade as final.
+        </Alert>
+      )}
+
       {polling && <LinearProgress sx={{ mb: 2 }} aria-label="Grading in progress" />}
 
       {sub.final_score != null && !polling && (
@@ -115,12 +150,31 @@ export default function StandaloneResult() {
             <Typography variant="overline" color="text.secondary">
               Overall score
             </Typography>
-            <Box sx={{ display: "flex", alignItems: "baseline", gap: 2, mt: 1 }}>
+            <Box sx={{ display: "flex", alignItems: "center", gap: 2, mt: 1, flexWrap: "wrap" }}>
               <Chip
                 label={`${sub.final_score.toFixed(1)} / 100`}
                 color={gradeBarColor(Number(sub.final_score))}
                 sx={{ fontSize: "1.1rem", fontWeight: 700, height: 40 }}
               />
+              {scores.length > 0 && (
+                <Chip
+                  size="small"
+                  label={`Avg confidence ${(avgConfidence * 100).toFixed(0)}%`}
+                  color={confidenceColor(avgConfidence)}
+                  variant="outlined"
+                />
+              )}
+              {sub.grading_report_s3_key && (
+                <Button
+                  size="small"
+                  variant="outlined"
+                  startIcon={<DownloadOutlined />}
+                  disabled={reportBusy}
+                  onClick={() => void handleDownloadReport()}
+                >
+                  Download grading report (JSON)
+                </Button>
+              )}
             </Box>
             {sub.final_feedback && (
               <Typography variant="body1" sx={{ mt: 2, whiteSpace: "pre-wrap" }}>
@@ -163,7 +217,14 @@ export default function StandaloneResult() {
                       variant="outlined"
                     />
                   </TableCell>
-                  <TableCell align="right">{(row.confidence * 100).toFixed(0)}%</TableCell>
+                  <TableCell align="right">
+                    <Chip
+                      size="small"
+                      label={`${(row.confidence * 100).toFixed(0)}%`}
+                      color={confidenceColor(row.confidence)}
+                      variant="outlined"
+                    />
+                  </TableCell>
                   <TableCell sx={{ maxWidth: 480, whiteSpace: "pre-wrap" }}>{row.rationale}</TableCell>
                 </TableRow>
               );

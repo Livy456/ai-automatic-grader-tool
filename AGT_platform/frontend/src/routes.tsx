@@ -5,7 +5,6 @@ import {
   Navigate,
   Outlet,
   Route,
-  useLocation,
 } from "react-router-dom";
 import { Box, CircularProgress } from "@mui/material";
 import { jwtDecode } from "jwt-decode";
@@ -28,15 +27,9 @@ interface JwtPayload {
 }
 
 function PrivateLayout() {
-  const location = useLocation();
-  const publicAutograder = location.pathname.startsWith("/autograder");
   const [gate, setGate] = useState<"loading" | "in" | "out">("loading");
 
   useEffect(() => {
-    if (publicAutograder) {
-      setGate("in");
-      return;
-    }
     let cancelled = false;
     (async () => {
       if (getToken()) {
@@ -49,11 +42,7 @@ function PrivateLayout() {
     return () => {
       cancelled = true;
     };
-  }, [publicAutograder]);
-
-  if (publicAutograder) {
-    return <Outlet />;
-  }
+  }, []);
 
   if (gate === "loading") {
     return (

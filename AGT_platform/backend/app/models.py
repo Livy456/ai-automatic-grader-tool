@@ -147,6 +147,8 @@ class Submission(Base):
     # Best-effort client IP for anonymous autograder rate limiting / mutation checks.
     submitter_ip = Column(String(64), nullable=True)
 
+    grading_report_s3_key = Column(String(1024), nullable=True)
+
     assignment = relationship("Assignment")
     student = relationship("User")
     artifacts = relationship("SubmissionArtifact", back_populates="submission")
@@ -210,6 +212,8 @@ class StandaloneSubmission(Base):
     answer_key_text = Column(Text, nullable=True)
     # Optional free-text prompt (focus, learning goals) combined with rubric / sample in the grader.
     grading_instructions = Column(Text, nullable=True)
+
+    grading_report_s3_key = Column(String(1024), nullable=True)
 
     user = relationship("User")
     artifacts = relationship(

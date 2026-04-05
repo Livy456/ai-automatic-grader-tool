@@ -151,19 +151,28 @@ def get_object_bytes(cfg: Config, key: str) -> bytes:
     return r["Body"].read()
 
 
-def get_presigned_url(cfg: Config, key: str, method: str = "GET", expires: int = 3600) -> str:
+def get_presigned_url(
+    cfg: Config,
+    key: str,
+    method: str = "GET",
+    expires: int = 3600,
+    *,
+    bucket: str | None = None,
+) -> str:
+    """Presign GET/PUT. Use ``bucket`` when the object lives in ``S3_GRADING_REPORTS_BUCKET`` etc."""
+    b = (bucket or "").strip() or cfg.S3_BUCKET
     client = s3_client_for_presign(cfg)
     m = method.upper()
     if m == "GET":
         return client.generate_presigned_url(
             "get_object",
-            Params={"Bucket": cfg.S3_BUCKET, "Key": key},
+            Params={"Bucket": b, "Key": key},
             ExpiresIn=expires,
         )
     if m == "PUT":
         return client.generate_presigned_url(
             "put_object",
-            Params={"Bucket": cfg.S3_BUCKET, "Key": key},
+            Params={"Bucket": b, "Key": key},
             ExpiresIn=expires,
         )
     raise ValueError(f"unsupported presign method: {method}")

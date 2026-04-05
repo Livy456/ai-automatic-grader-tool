@@ -89,6 +89,11 @@ class Config:
         _presign_ep = "http://127.0.0.1:9000"
     S3_PRESIGN_ENDPOINT = _presign_ep
 
+    # Post-grading JSON reports (optional separate bucket; defaults to uploads bucket).
+    S3_GRADING_REPORTS_BUCKET = (
+        _env_str("S3_GRADING_REPORTS_BUCKET").strip() or _env_str("S3_BUCKET").strip()
+    )
+
     # Prefix for student submission objects (unique keys still include ids/uuids).
     UPLOADS_S3_PREFIX = _env_str("UPLOADS_S3_PREFIX").strip() or "assignments/by-id"
 
