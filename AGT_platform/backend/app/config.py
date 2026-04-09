@@ -211,6 +211,11 @@ class Config:
         _env_str("OLLAMA_EMBEDDINGS_MODEL").strip() or "nomic-embed-text"
     )
     RAG_EMBED_MAX_CHARS = _env_int("RAG_EMBED_MAX_CHARS", default=24000)
+    # auto | openai_first | ollama_first | openai_only | ollama_only
+    # auto: try OpenAI before Ollama when OPENAI_API_KEY is set (avoids Ollama /api/embed 404 noise).
+    RAG_EMBED_ORDER = _env_str("RAG_EMBED_ORDER").strip().lower() or "auto"
+    # auto | on | off — auto enables OpenAI notebook digest when OPENAI_API_KEY is set.
+    NOTEBOOK_OPENAI_DIGEST = _env_str("NOTEBOOK_OPENAI_DIGEST").strip().lower() or "auto"
 
     WHISPER_ENABLED = _env_bool("WHISPER_ENABLED")
 

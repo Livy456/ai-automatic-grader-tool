@@ -14,7 +14,10 @@ from typing import Any
 
 import numpy as np
 
-from .numpy_ops import confidence_from_entropy, entropy_natural_from_multiset_counts
+from .numpy_ops import (
+    confidence_from_entropy,
+    entropy_natural_from_multiset_counts,
+)
 
 
 def grading_semantic_fingerprint(sample: dict[str, Any]) -> str:
@@ -55,10 +58,7 @@ def semantic_entropy_natural(fingerprints: list[str]) -> tuple[float, int]:
         return 0.0, 0
     counts = Counter(fingerprints)
     n = len(fingerprints)
-    h = 0.0
-    for cnt in counts.values():
-        p = cnt / n
-        h -= p * math.log(p)
+    h = entropy_natural_from_multiset_counts(list(counts.values()), n)
     return h, len(counts)
 
 
@@ -67,7 +67,7 @@ def confidence_from_entropy_natural(entropy: float) -> float:
     if entropy <= 0:
         return 1.0
 
-    return max(0.0, min(1.0, math.exp(-entropy)))
+    return confidence_from_entropy(float(np.exp(-entropy)))
 
 
 def semantic_entropy_by_model(

@@ -111,4 +111,14 @@ def augment_prompt_for_modality_profile(
         parts.append(
             "\n\n---\nGrading context: Plain-text submission — use `artifacts.text` as the full answer."
         )
+    elif st in ("notebook", "mixed_notebook_pdf"):
+        parts.append(
+            "\n\n---\nGrading context: **Jupyter notebook** submission. Prefer "
+            "`submission.artifacts.notebook_qa`: an ordered list of segments with `role` "
+            "(question | response | code), `pair_id`, and `text` (links prompts to student work). "
+            "If `notebook_qa` is absent, use `submission.artifacts.code` and `.markdown`. "
+            "Respond with ONE JSON object whose top-level keys are exactly `overall` (object with "
+            "score, confidence, summary), `criteria` (array of scored rubric rows), and `flags`. "
+            "Do not use `status`, `result`, or notebook/kernel metadata as the top-level shape."
+        )
     return "\n".join(parts)

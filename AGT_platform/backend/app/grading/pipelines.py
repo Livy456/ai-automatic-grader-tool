@@ -1,4 +1,5 @@
 import hashlib
+import json
 import logging
 import time
 from collections import defaultdict
@@ -41,6 +42,7 @@ from .modality_resolution import (
     infer_modality_from_artifacts,
     resolve_modality_profile,
 )
+from .notebook_grader_context import build_notebook_grader_overlay
 from .submission_text import submission_text_from_artifacts
 from .tools import extract_from_ipynb, extract_text_from_pdf, run_python_tests, transcribe_video_stub
 
@@ -83,6 +85,70 @@ def _ensure_submission_artifacts_in_ctx(
 
     if "mp4" in artifacts_bytes and not tr.get("transcript"):
         tr["transcript"] = transcribe_video_stub(artifacts_bytes["mp4"])
+
+
+def _grade_submission_context(
+    ctx: dict[str, Any],
+    cfg,
+    *,
+    artifacts_bytes: dict[str, bytes] | None = None,
+    assignment_title: str = "",
+) -> dict[str, Any]:
+    """
+    Shallow copy of ``ctx`` with bounded artifact / tool_result strings for ``grade()``.
+
+    Full notebook sources can make ``json.dumps(submission)`` huge; small local models
+    then return non-schema JSON (e.g. ``status`` / ``result`` blobs). Staged mode uses
+    ``normalized_to_json_str`` caps instead; legacy / entropy / chunk_entropy use this.
+
+    For ``.ipynb``, :func:`build_notebook_grader_overlay` replaces raw code/markdown with
+    an ordered ``notebook_qa`` list (question/response/code + ``pair_id``) under the same
+    character budget, optionally structured by OpenAI when configured.
+    """
+    budget = int(getattr(cfg, "STAGED_PROMPT_MAX_CHARS", 28000) or 28000)
+    budget = max(8000, min(budget, 200_000))
+    per_field = max(4000, budget // 2)
+    suffix = (
+        "\n\n[... truncated for grader payload; full text is still used for modality "
+        "detection and RAG export ...]"
+    )
+    trim_len = max(1000, per_field - len(suffix))
+
+    arts_in = ctx.get("artifacts") or {}
+    arts = dict(arts_in)
+    nb_overlay: dict[str, Any] | None = None
+    if artifacts_bytes and "ipynb" in artifacts_bytes:
+        prof = ctx.get("_modality_resolution") or {}
+        nb_overlay = build_notebook_grader_overlay(
+            artifacts_bytes,
+            cfg,
+            modality_subtype=str(prof.get("modality_subtype") or ""),
+            assignment_title=(assignment_title or "").strip(),
+            budget_chars=budget,
+        )
+        if nb_overlay:
+            arts.update(nb_overlay)
+
+    for key in ("code", "markdown", "text"):
+        if nb_overlay and key in ("code", "markdown"):
+            continue
+        s = arts.get(key)
+        if isinstance(s, str) and len(s) > per_field:
+            arts[key] = s[:trim_len] + suffix
+
+    tr_in = ctx.get("tool_results") or {}
+    tr = dict(tr_in)
+    tests = tr.get("tests")
+    if isinstance(tests, dict):
+        ser = json.dumps(tests, default=str)
+        if len(ser) > per_field:
+            tr["tests"] = {
+                "truncated": True,
+                "char_len": len(ser),
+                "preview": ser[:trim_len] + suffix,
+            }
+
+    return {**ctx, "artifacts": arts, "tool_results": tr}
 
 
 def _plaintext_for_modality_profile(
@@ -725,6 +791,12 @@ def _run_chunk_entropy_grading_pipeline(
     k = max(1, int(getattr(cfg, "GRADING_SAMPLES_PER_MODEL", 1)))
     temp = float(getattr(cfg, "GRADING_SAMPLE_TEMPERATURE", 0.3))
     clients = build_grading_clients(cfg)
+    ctx_llm = _grade_submission_context(
+        ctx,
+        cfg,
+        artifacts_bytes=artifacts_bytes,
+        assignment_title=title,
+    )
     rubric_items = _coerce_rubric_items(rubric)
     if not rubric_items:
         rubric_items = [
@@ -762,7 +834,7 @@ def _run_chunk_entropy_grading_pipeline(
                         client=cl,
                         rubric=rubric,
                         assignment_prompt=prompt_u,
-                        submission_context=ctx,
+                        submission_context=ctx_llm,
                         temperature=temp,
                     )
                     labeled.append((res, label))
@@ -923,6 +995,7 @@ def _run_entropy_sampling_grading(
     assignment_prompt: str,
     *,
     fallback_client,
+    artifacts_bytes: dict[str, bytes] | None = None,
 ) -> dict[str, Any]:
     """
     k stochastic grade() calls per model in build_grading_clients(); aggregate scores by
@@ -945,6 +1018,7 @@ def _run_entropy_sampling_grading(
 
     t0 = time.perf_counter()
     grading_clients = build_grading_clients(cfg)
+    ctx_llm = _grade_submission_context(ctx, cfg)
     labeled: list[tuple[dict[str, Any], str]] = []
     attempted = 0
 
@@ -956,7 +1030,7 @@ def _run_entropy_sampling_grading(
                     client=grading_client,
                     rubric=rubric,
                     assignment_prompt=assignment_prompt,
-                    submission_context=ctx,
+                    submission_context=ctx_llm,
                     temperature=temp,
                 )
                 labeled.append((res, model_label))
@@ -975,7 +1049,7 @@ def _run_entropy_sampling_grading(
             fallback_client,
             rubric,
             assignment_prompt,
-            ctx,
+            ctx_llm,
             temperature=None,
         )
         om = (cfg.OLLAMA_MODEL or "llama3.2:3b").strip()
@@ -1139,9 +1213,16 @@ def run_grading_pipeline(
             rubric,
             assignment_prompt,
             fallback_client=client,
+            artifacts_bytes=artifacts_bytes,
         )
     else:
         grading_clients = build_grading_clients(cfg)
+        ctx_llm = _grade_submission_context(
+            ctx,
+            cfg,
+            artifacts_bytes=artifacts_bytes,
+            assignment_title=str(getattr(assignment, "title", "") or ""),
+        )
         grading_results: list[tuple[dict, str]] = []
 
         for grading_client, model_label in grading_clients:
@@ -1150,7 +1231,7 @@ def run_grading_pipeline(
                     client=grading_client,
                     rubric=rubric,
                     assignment_prompt=assignment_prompt,
-                    submission_context=ctx,
+                    submission_context=ctx_llm,
                 )
                 grading_results.append((res, model_label))
             except Exception:
@@ -1163,7 +1244,7 @@ def run_grading_pipeline(
                 client=client,
                 rubric=rubric,
                 assignment_prompt=assignment_prompt,
-                submission_context=ctx,
+                submission_context=ctx_llm,
             )
             om = (cfg.OLLAMA_MODEL or "llama3.2:3b").strip()
             result["_model_used"] = f"ollama:{om}"
@@ -1177,7 +1258,7 @@ def run_grading_pipeline(
                 secondary,
                 rubric,
                 assignment_prompt,
-                ctx,
+                ctx_llm,
                 result,
             )
             if result.get("_used_openai_arbitration"):

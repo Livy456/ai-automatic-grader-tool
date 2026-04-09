@@ -101,8 +101,9 @@ def _ollama_primary_chat_smoke(cfg: Config) -> tuple[bool, str]:
         return False, "OLLAMA_BASE_URL / INTERNAL_OLLAMA_URL is empty"
     model = (cfg.OLLAMA_MODEL or "llama3.2:3b").strip()
     raw = os.getenv("LOCAL_LLM_SMOKE_TIMEOUT_SEC", "").strip()
-    smoke_to = int(raw) if raw else 25
-    smoke_to = max(5, min(smoke_to, 120))
+    # Default 60s: first load of llama3.2 on CPU often exceeds 25s without being "broken".
+    smoke_to = int(raw) if raw else 60
+    smoke_to = max(5, min(smoke_to, 180))
     try:
         r = requests.post(
             f"{base}/api/chat",

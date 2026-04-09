@@ -114,6 +114,23 @@ def coerce_grading_output_shape(data: Any) -> dict[str, Any]:
             coerced = True
             break
 
+    if not isinstance(data.get("overall"), dict):
+        for nk in ("grading", "evaluation", "grade_output", "assessment"):
+            inner = data.get(nk)
+            if (
+                isinstance(inner, dict)
+                and isinstance(inner.get("overall"), dict)
+            ):
+                data["overall"] = inner["overall"]
+                if data.get("criteria") is None and isinstance(
+                    inner.get("criteria"), list
+                ):
+                    data["criteria"] = inner["criteria"]
+                if data.get("flags") is None and isinstance(inner.get("flags"), list):
+                    data["flags"] = inner["flags"]
+                coerced = True
+                break
+
     ov = data.get("overall")
     if isinstance(ov, (int, float)):
         data["overall"] = {
