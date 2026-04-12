@@ -9,6 +9,14 @@ from __future__ import annotations
 
 from .grading_output import multimodal_assignment_to_grading_dict
 from .model_runner import ChunkModelRunner, MockChunkModelRunner, MultiModelChunkRunner
+from .semantic_confidence import (
+    aggregate_assignment_confidence,
+    cluster_assignment,
+    compute_semantic_entropy,
+    estimate_cluster_distribution,
+    normalize_entropy_to_confidence,
+    summarize_chunk_confidence_from_counts,
+)
 from .pipeline import (
     MultimodalGradingPipeline,
     PipelineArtifactStore,
@@ -29,13 +37,19 @@ from .schemas import (
 )
 
 __all__ = [
+    "aggregate_assignment_confidence",
     "AssignmentGradeResult",
     "ChunkGradeOutcome",
     "ChunkModelRunner",
+    "cluster_assignment",
+    "compute_semantic_entropy",
+    "estimate_cluster_distribution",
     "GradingChunk",
     "MockChunkModelRunner",
     "MultiModelChunkRunner",
     "multimodal_assignment_to_grading_dict",
+    "normalize_entropy_to_confidence",
+    "summarize_chunk_confidence_from_counts",
     "Modality",
     "MultimodalGradingConfig",
     "MultimodalGradingPipeline",

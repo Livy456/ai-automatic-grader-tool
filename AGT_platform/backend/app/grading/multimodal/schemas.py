@@ -40,6 +40,7 @@ class RubricType(str, Enum):
 
 class ReviewStatus(str, Enum):
     AUTO_ACCEPTED = "auto_accepted"
+    CAUTION = "caution"
     FLAGGED = "flagged"
     ESCALATION = "escalation"
 
@@ -56,6 +57,13 @@ class MultimodalGradingConfig:
     parse_fail_rate_high: float = 0.35
     review_if_any_sample_flag: bool = True
     chunk_score_aggregator: str = "mean"  # mean | median
+    # Semantic cluster definition for confidence (see semantic_confidence module).
+    confidence_clustering_strong_pattern: bool = True
+    # AI confidence routing: normalized semantic entropy inverse (see semantic_confidence).
+    confidence_ai_auto_accept_min: float = 0.85
+    confidence_ai_caution_min: float = 0.50
+    # If True, high criterion disagreement can bump AUTO_ACCEPTED → CAUTION.
+    confidence_caution_on_high_criterion_disagreement: bool = True
 
 
 @dataclass
@@ -131,6 +139,8 @@ class ChunkGradeOutcome:
     chunk_id: str
     normalized_score_estimate: float
     semantic_entropy_nats: float
+    ai_confidence: float
+    entropy_max_reference_nats: float
     cluster_counts: dict[str, int]
     cluster_distribution: dict[str, float]
     samples: list[SampledChunkGrade]
@@ -146,6 +156,7 @@ class AssignmentGradeResult:
     assignment_id: str
     student_id: str
     assignment_normalized_score: float
+    assignment_ai_confidence: float
     chunk_results: list[ChunkGradeOutcome]
     chunk_weights: dict[str, float] = field(default_factory=dict)
     review_status: ReviewStatus = ReviewStatus.AUTO_ACCEPTED

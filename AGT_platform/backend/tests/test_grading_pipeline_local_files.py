@@ -501,15 +501,12 @@ class TestGradingPipelineLocalFiles(unittest.TestCase):
                     0,
                     f"Parsed submission text empty for {stem!r}; check artifact bytes and formats.",
                 )
-                modality_profile = resolve_modality_profile(
-                    assignment, artifacts, plain[:12000]
-                )
-                chunk_cap = int(getattr(cfg, "RAG_EMBED_MAX_CHARS", 4000) or 4000)
+                modality_profile = resolve_modality_profile(assignment, artifacts, plain)
                 chunks = build_submission_chunks(
                     plain,
                     assignment_title=stem,
                     modality_subtype=str(modality_profile.get("modality_subtype") or ""),
-                    max_chunk_chars=max(2000, min(chunk_cap, 12000)),
+                    max_chunk_chars=None,
                 )
                 write_chunks_json(
                     RAG_DIR / f"{stem}_chunks.json",
@@ -565,7 +562,6 @@ class TestGradingPipelineLocalFiles(unittest.TestCase):
                     task_description=task_description,
                 )
                 modality_hints = {
-                    "max_chunk_chars": max(2000, min(chunk_cap, 12000)),
                     "modality_subtype": str(
                         modality_profile.get("modality_subtype") or ""
                     ),

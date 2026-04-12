@@ -11,14 +11,17 @@ from typing import Any, Callable
 from .aggregator import aggregate_assignment, aggregate_chunk_samples
 from .chunker import default_chunker_build_units
 from .rag_embeddings import build_multimodal_grading_chunks, enrich_chunks_with_rag_embeddings
-from .entropy import semantic_entropy_from_cluster_counts
 from .ingestion import IngestionEnvelope, ingest_raw_submission
 from .model_runner import ChunkModelRunner, MultiModelChunkRunner
 from .parser import parse_chunk_grade_json
 from .prompts_chunk import SYSTEM_CHUNK_GRADER, build_chunk_grading_prompt
 from .review_router import evaluate_chunk_review
 from .rubric_router import route_rubric
-from .semantic_clusterer import assign_cluster
+from .semantic_confidence import (
+    chunk_question_point_weight,
+    cluster_assignment,
+    summarize_chunk_confidence_from_counts,
+)
 from .schemas import (
     AssignmentGradeResult,
     ChunkGradeOutcome,
@@ -48,12 +51,21 @@ class MultimodalGradingPipeline:
         rubric_rows_by_type: dict[RubricType, list[dict]] | None = None,
         classifier: Callable[[GradingChunk], Any] | None = None,
         task_description: str = "",
+        app_cfg: Any | None = None,
     ):
         self.config = config
         self.runner = runner
         self.rubric_rows_by_type = rubric_rows_by_type or {}
         self.classifier = classifier
         self.task_description = task_description
+        self._app_cfg = app_cfg
+
+    def _resolve_app_config(self) -> Any | None:
+        if self._app_cfg is not None:
+            return self._app_cfg
+        if isinstance(self.runner, MultiModelChunkRunner):
+            return self.runner.app_config
+        return None
 
     def run(
         self,
@@ -108,13 +120,15 @@ class MultimodalGradingPipeline:
             parsed_samples: list[SampledChunkGrade] = []
             cluster_counts: Counter[str] = Counter()
 
+            strong = bool(self.config.confidence_clustering_strong_pattern)
             for s in raw_samples:
                 parsed, warns = parse_chunk_grade_json(s.raw_text)
                 parse_ok = parsed is not None
                 pw = list(warns)
-                ck: str | None = None
-                if parsed:
-                    ck = assign_cluster(parsed)
+                ck: str | None = cluster_assignment(
+                    parsed, strong_pattern=strong
+                )
+                if ck is not None:
                     cluster_counts[ck] += 1
                 parsed_samples.append(
                     SampledChunkGrade(
@@ -128,31 +142,62 @@ class MultimodalGradingPipeline:
                     )
                 )
 
-            se = semantic_entropy_from_cluster_counts(dict(cluster_counts))
+            co = summarize_chunk_confidence_from_counts(dict(cluster_counts))
+            qp_w = chunk_question_point_weight(chunk.rubric_rows)
             outcome = aggregate_chunk_samples(
                 chunk.chunk_id,
                 parsed_samples,
                 cluster_counts=dict(cluster_counts),
-                semantic_entropy=se,
                 cfg=self.config,
+                question_point_weight=qp_w,
             )
-            outcome = evaluate_chunk_review(outcome, parsed_samples, self.config)
-            model_ids = sorted({s.model_id for s in raw_samples})
-            meta_spm: int | None = None
-            if isinstance(self.runner, MultiModelChunkRunner):
-                meta_spm = int(self.runner.app_config.GRADING_SAMPLES_PER_MODEL)
+            sample_details = [
+                {
+                    "model_id": s.model_id,
+                    "sample_index": s.sample_index,
+                    "parse_ok": s.parse_ok,
+                    "normalized_score": s.parsed.normalized_score
+                    if s.parsed
+                    else None,
+                    "cluster_key": s.cluster_key,
+                }
+                for s in parsed_samples
+            ]
             outcome.stage_artifacts = {
                 "system_prompt": SYSTEM_CHUNK_GRADER,
                 "user_prompt": user_prompt,
                 "raw_sample_count": len(raw_samples),
-                "model_ids": model_ids,
-                "samples_per_model": meta_spm,
+                "confidence_trace": {
+                    "clustering_strong_pattern": strong,
+                    "cluster_counts": dict(cluster_counts),
+                    "p_hat": co["p_hat"],
+                    "semantic_entropy_nats": co["semantic_entropy_nats"],
+                    "entropy_max_reference_nats": co["entropy_max_reference_nats"],
+                    "ai_confidence": co["ai_confidence"],
+                    "n_observed_clusters": co["n_observed_clusters"],
+                    "n_valid_samples": co["n_valid_samples"],
+                    "question_point_weight": qp_w,
+                    "samples": sample_details,
+                },
             }
+            outcome = evaluate_chunk_review(outcome, parsed_samples, self.config)
+            trace = outcome.stage_artifacts.get("confidence_trace")
+            if isinstance(trace, dict):
+                trace["review_status"] = outcome.review_status.value
+                trace["review_reasons"] = list(outcome.review_reasons)
+            model_ids = sorted({s.model_id for s in raw_samples})
+            meta_spm: int | None = None
+            if isinstance(self.runner, MultiModelChunkRunner):
+                meta_spm = int(self.runner.app_config.GRADING_SAMPLES_PER_MODEL)
+            outcome.stage_artifacts["model_ids"] = model_ids
+            outcome.stage_artifacts["samples_per_model"] = meta_spm
             art.append(
                 "grading",
                 {
                     "chunk_id": chunk.chunk_id,
-                    "semantic_entropy": se,
+                    "semantic_entropy": co["semantic_entropy_nats"],
+                    "ai_confidence": co["ai_confidence"],
+                    "entropy_max_reference_nats": co["entropy_max_reference_nats"],
                     "cluster_counts": dict(cluster_counts),
                     "review": outcome.review_status.value,
                     "model_ids": model_ids,

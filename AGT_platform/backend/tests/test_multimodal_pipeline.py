@@ -59,7 +59,8 @@ class MultimodalPipelineRunTests(unittest.TestCase):
             modality_hints={"modality": "notebook", "task_type": "free_response_short"},
         )
         cfg = MultimodalGradingConfig(
-            semantic_entropy_high=5.0,
+            confidence_ai_auto_accept_min=0.5,
+            confidence_ai_caution_min=0.25,
             score_spread_high=2.0,
         )
         runner = MockChunkModelRunner(
@@ -72,9 +73,16 @@ class MultimodalPipelineRunTests(unittest.TestCase):
         art = PipelineArtifactStore()
         result = pipe.run(env, artifacts=art)
         self.assertIsNotNone(result.assignment_normalized_score)
+        self.assertGreaterEqual(result.assignment_ai_confidence, 0.0)
+        self.assertLessEqual(result.assignment_ai_confidence, 1.0)
         self.assertTrue(result.chunk_results)
+        for ch in result.chunk_results:
+            self.assertGreaterEqual(ch.ai_confidence, 0.0)
+            self.assertLessEqual(ch.ai_confidence, 1.0)
+            self.assertIn("confidence_trace", ch.stage_artifacts)
         self.assertIn("chunking", art.stages)
         self.assertIn("pipeline_audit", result.stage_artifacts)
+        self.assertIn("assignment_confidence_trace", result.stage_artifacts)
 
 
 if __name__ == "__main__":

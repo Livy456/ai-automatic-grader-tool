@@ -8,6 +8,7 @@ import statistics
 from typing import Sequence
 
 from .entropy import criterion_disagreement_max
+from .semantic_confidence import aggregate_assignment_confidence, summarize_chunk_confidence_from_counts
 from .schemas import (
     AssignmentGradeResult,
     ChunkGradeOutcome,
@@ -44,8 +45,8 @@ def aggregate_chunk_samples(
     samples: list[SampledChunkGrade],
     *,
     cluster_counts: dict[str, int],
-    semantic_entropy: float,
     cfg: MultimodalGradingConfig,
+    question_point_weight: float = 1.0,
 ) -> ChunkGradeOutcome:
     valid_norms = [
         s.parsed.normalized_score
@@ -80,6 +81,8 @@ def aggregate_chunk_samples(
     total_draws = sum(cluster_counts.values()) or 1
     dist = {k: v / total_draws for k, v in cluster_counts.items()}
 
+    conf_state = summarize_chunk_confidence_from_counts(dict(cluster_counts))
+
     aux = {
         "score_std_across_samples": float(
             statistics.pstdev(valid_norms) if len(valid_norms) > 1 else 0.0
@@ -87,12 +90,15 @@ def aggregate_chunk_samples(
         "criterion_disagreement_max": criterion_disagreement_max(crit_maps),
         "parse_fail_rate": parse_fail_rate,
         "review_flag_rate": review_flag_rate,
+        "question_point_weight": float(question_point_weight),
     }
 
     return ChunkGradeOutcome(
         chunk_id=chunk_id,
         normalized_score_estimate=estimate,
-        semantic_entropy_nats=semantic_entropy,
+        semantic_entropy_nats=float(conf_state["semantic_entropy_nats"]),
+        ai_confidence=float(conf_state["ai_confidence"]),
+        entropy_max_reference_nats=float(conf_state["entropy_max_reference_nats"]),
         cluster_counts=dict(cluster_counts),
         cluster_distribution=dist,
         samples=samples,
@@ -117,18 +123,29 @@ def aggregate_assignment(
             assignment_id=assignment_id,
             student_id=student_id,
             assignment_normalized_score=0.0,
+            assignment_ai_confidence=0.0,
             chunk_results=[],
             review_status=ReviewStatus.FLAGGED,
             review_reasons=["no_chunks"],
         )
 
+    def _chunk_weight(c: ChunkGradeOutcome) -> float:
+        if c.chunk_id in wmap:
+            return float(wmap[c.chunk_id])
+        aux = c.auxiliary or {}
+        return float(aux.get("question_point_weight", 1.0) or 1.0)
+
     total_w = 0.0
     acc = 0.0
+    resolved_weights: dict[str, float] = {}
     for c in chunks:
-        w = float(wmap.get(c.chunk_id, 1.0))
+        w = _chunk_weight(c)
+        resolved_weights[c.chunk_id] = w
         total_w += w
         acc += w * c.normalized_score_estimate
     assign_score = acc / total_w if total_w else 0.0
+
+    assign_conf, conf_trace = aggregate_assignment_confidence(chunks, weights=wmap)
 
     reasons: list[str] = []
     statuses = [c.review_status for c in chunks]
@@ -138,16 +155,25 @@ def aggregate_assignment(
     elif any(s == ReviewStatus.FLAGGED for s in statuses):
         assign_status = ReviewStatus.FLAGGED
         reasons.append("chunk_flagged")
+    elif any(s == ReviewStatus.CAUTION for s in statuses):
+        assign_status = ReviewStatus.CAUTION
+        reasons.append("chunk_caution")
     else:
         assign_status = ReviewStatus.AUTO_ACCEPTED
+
+    stage = {
+        "assignment_confidence_trace": conf_trace,
+        "chunk_weights_resolved": resolved_weights,
+    }
 
     return AssignmentGradeResult(
         assignment_id=assignment_id,
         student_id=student_id,
         assignment_normalized_score=assign_score,
+        assignment_ai_confidence=assign_conf,
         chunk_results=chunks,
-        chunk_weights={c.chunk_id: float(wmap.get(c.chunk_id, 1.0)) for c in chunks},
+        chunk_weights=resolved_weights,
         review_status=assign_status,
         review_reasons=reasons,
-        stage_artifacts={},
+        stage_artifacts=stage,
     )

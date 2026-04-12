@@ -148,7 +148,7 @@ def _pack_text_by_paragraphs(
     *,
     role: str,
     pair_id: int | None,
-    max_chunk_chars: int,
+    max_chunk_chars: int | None,
     assignment_title: str,
     modality_subtype: str,
     chunk_index_start: int,
@@ -174,6 +174,11 @@ def _pack_text_by_paragraphs(
             }
         )
         idx += 1
+
+    # None or non-positive = no splitting; keep full question/answer body in one chunk.
+    if max_chunk_chars is None or max_chunk_chars <= 0:
+        emit_piece(text)
+        return out, idx
 
     if len(text) <= max_chunk_chars:
         emit_piece(text)
@@ -202,7 +207,7 @@ def _chunks_from_prose_section(
     section_banner: str,
     assignment_title: str,
     modality_subtype: str,
-    max_chunk_chars: int,
+    max_chunk_chars: int | None,
     chunk_index_start: int,
     pair_id_start: int,
 ) -> tuple[list[dict[str, Any]], int, int]:
@@ -302,12 +307,15 @@ def build_submission_chunks(
     *,
     assignment_title: str = "",
     modality_subtype: str = "",
-    max_chunk_chars: int = 4000,
+    max_chunk_chars: int | None = None,
 ) -> list[dict[str, Any]]:
     """
     Produce chunks with ``role`` of ``question``, ``response``, or ``code``.
 
     See module docstring for the full chunking explanation.
+
+    ``max_chunk_chars``: when ``None`` or ``<= 0``, each answer/response body is kept as a
+    single chunk (no paragraph packing split). Pass a positive int to cap piece size.
     """
     raw = (text or "").strip()
     if not raw:

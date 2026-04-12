@@ -8,7 +8,6 @@ from __future__ import annotations
 from typing import Any
 
 from app.grading.aggregation import weighted_overall_confidence, weighted_overall_score
-from app.grading.semantic_entropy import confidence_from_entropy_natural
 
 from .schemas import AssignmentGradeResult, ChunkGradeOutcome
 
@@ -95,7 +94,7 @@ def _chunk_to_question_grade(
                 "name": name,
                 "score": round(ratio_f * mp, 4),
                 "max_points": mp,
-                "confidence": 0.5,
+                "confidence": round(float(chunk.ai_confidence), 4),
             }
         )
     return {
@@ -103,11 +102,19 @@ def _chunk_to_question_grade(
         "criteria": criteria_rows,
         "overall": {
             "score": float(chunk.normalized_score_estimate),
-            "confidence": 0.5,
+            "confidence": round(float(chunk.ai_confidence), 4),
             "summary": "",
             "semantic_entropy": round(float(chunk.semantic_entropy_nats), 4),
+            "ai_confidence": round(float(chunk.ai_confidence), 4),
+            "entropy_max_reference_nats": round(
+                float(chunk.entropy_max_reference_nats), 6
+            ),
         },
         "semantic_entropy": float(chunk.semantic_entropy_nats),
+        "ai_confidence": float(chunk.ai_confidence),
+        "entropy_max_reference_nats": float(chunk.entropy_max_reference_nats),
+        "review_status": chunk.review_status.value,
+        "review_reasons": list(chunk.review_reasons),
         "flags": [],
     }
 
@@ -122,8 +129,10 @@ def multimodal_assignment_to_grading_dict(
     Build a dict suitable for :func:`~app.grading.output_schema.validate_grading_output`.
 
     Criteria are merged across chunks with **max** score per criterion name (same idea
-    as chunk-entropy assignment merge). ``overall.semantic_entropy`` is the mean of
-    chunk-level semantic entropies (nats).
+    as chunk-entropy assignment merge).     ``overall.confidence`` and ``overall.assignment_ai_confidence`` are the weighted
+    mean of chunk-level **Conf_AI** (inverse normalized semantic entropy over grading
+    clusters), not derived from the assignment score. ``overall.mean_chunk_semantic_entropy_nats``
+    is the mean of raw chunk entropies for diagnostics.
     """
     rubric_items = _coerce_rubric_items(rubric)
     max_by_name = {r["name"]: float(r["max_points"]) for r in rubric_items}
@@ -138,7 +147,7 @@ def multimodal_assignment_to_grading_dict(
 
     entropies = [float(c.semantic_entropy_nats) for c in result.chunk_results]
     avg_h = sum(entropies) / len(entropies) if entropies else 0.0
-    final_conf_ent = confidence_from_entropy_natural(avg_h)
+    assignment_ai_conf = float(getattr(result, "assignment_ai_confidence", 0.0))
 
     model_ids: list[str] = []
     audit = (result.stage_artifacts or {}).get("pipeline_audit") or {}
@@ -162,16 +171,18 @@ def multimodal_assignment_to_grading_dict(
     out: dict[str, Any] = {
         "overall": {
             "score": overall_score,
-            "confidence": round(final_conf_ent, 4),
+            "confidence": round(assignment_ai_conf, 4),
             "summary": summary,
             "semantic_entropy": round(avg_h, 4),
-            "confidence_from_entropy": round(final_conf_ent, 4),
-            "classical_confidence": round(wconf, 4),
+            "assignment_ai_confidence": round(assignment_ai_conf, 4),
+            "mean_chunk_semantic_entropy_nats": round(avg_h, 4),
+            "criteria_confidence_weighted_mean": round(wconf, 4),
         },
         "criteria": crit_out,
-        "flags": ["multimodal_pipeline"],
+        "flags": ["multimodal_pipeline", f"review_{result.review_status.value}"],
         "question_grades": question_grades,
         "_multimodal_pipeline_audit": result.stage_artifacts,
+        "_assignment_review_status": result.review_status.value,
     }
     if model_ids:
         out["_models_used"] = model_ids

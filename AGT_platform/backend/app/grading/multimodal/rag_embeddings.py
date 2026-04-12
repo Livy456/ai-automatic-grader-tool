@@ -83,7 +83,8 @@ def _chunks_from_ollama_qa_segmentation(
         request_json_format=getattr(cfg, "OLLAMA_CHAT_JSON_FORMAT", True),
         timeout_sec=min(180.0, _chat_timeout(cfg)),
     )
-    user = plain[:28000]
+    # Full submission text so Q/A segmentation sees the entire document (model context limits may still apply).
+    user = plain
     try:
         obj = client.chat_json(
             [

@@ -38,7 +38,7 @@ def task_type_from_hints(hints: dict[str, Any], default: TaskType = TaskType.UNK
 def default_chunker_build_units(
     envelope: IngestionEnvelope,
     *,
-    max_chunk_chars: int = 6000,
+    max_chunk_chars: int | None = None,
     modality_subtype: str = "",
 ) -> list[GradingChunk]:
     """
@@ -47,8 +47,8 @@ def default_chunker_build_units(
     Each unit becomes one ``GradingChunk`` with ``question_id`` = ``pair_X`` if
     instructor IDs are absent.
 
-    ``envelope.modality_hints`` may override sizing with ``max_chunk_chars`` (int)
-    and labeling with ``modality_subtype`` (str) when callers omit explicit kwargs.
+    ``envelope.modality_hints`` may override sizing with ``max_chunk_chars`` (int or
+    ``null``/omitted for no cap) and ``modality_subtype`` (str) when callers omit kwargs.
     Optional ``max_grading_units`` (positive int) keeps only the first N units (for
     tests or cost limits).
     """

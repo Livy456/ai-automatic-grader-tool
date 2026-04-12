@@ -770,12 +770,11 @@ def _run_chunk_entropy_grading_pipeline(
 
     title = str(getattr(assignment, "title", "") or "")
     st = str(profile.get("modality_subtype") or "")
-    chunk_cap = int(getattr(cfg, "RAG_EMBED_MAX_CHARS", 4000) or 4000)
     chunks = build_submission_chunks(
         plain,
         assignment_title=title,
         modality_subtype=st,
-        max_chunk_chars=max(2000, min(chunk_cap, 12000)),
+        max_chunk_chars=None,
     )
     units = build_grading_units_from_chunks(chunks)
     if not units:
@@ -1170,9 +1169,7 @@ def run_grading_pipeline(
     _ensure_submission_artifacts_in_ctx(ctx, artifacts_bytes)
 
     plain_profile = _plaintext_for_modality_profile(artifacts_bytes, ctx)
-    profile = resolve_modality_profile(
-        assignment, artifacts_bytes, plain_profile[:12000]
-    )
+    profile = resolve_modality_profile(assignment, artifacts_bytes, plain_profile)
     ctx["_modality_resolution"] = profile
     if profile.get("signals", {}).get("text_too_short_for_grading"):
         _log.warning(
