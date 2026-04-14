@@ -69,6 +69,7 @@ def parse_chunk_grade_json(
     c_scores: list[CriterionScore] = []
     inline_justifications: list[str] = []
     inline_evidence: list[str] = []
+    inline_reasoning: list[str] = []
     for i, row in enumerate(crit_raw):
         if not isinstance(row, dict):
             warnings.append(f"criterion_{i}_not_dict")
@@ -104,6 +105,13 @@ def parse_chunk_grade_json(
         else:
             ev_str = str(ev_raw)
         inline_evidence.append(ev_str)
+        reasoning_raw = str(
+            row.get("reasoning")
+            or row.get("chain_of_thought")
+            or row.get("partial_credit_reasoning")
+            or ""
+        )
+        inline_reasoning.append(reasoning_raw)
 
     just = obj.get("criterion_justifications")
     if isinstance(just, list):
@@ -152,6 +160,7 @@ def parse_chunk_grade_json(
         confidence_note=conf,
         review_flag=rf,
         criterion_evidence=inline_evidence,
+        criterion_reasoning=inline_reasoning,
         parse_warnings=list(warnings),
     )
     return parsed, warnings

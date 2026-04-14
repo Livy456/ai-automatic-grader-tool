@@ -16,8 +16,13 @@ from .schemas import AssignmentGradeResult, ChunkGradeOutcome
 def _merge_criteria_max_by_name(
     question_grades: list[dict[str, Any]],
 ) -> list[dict[str, Any]]:
-    """Pick the highest-scoring row per criterion name, preserving justification and evidence."""
+    """Pick the highest-scoring row per criterion name, preserving justification, evidence, and reasoning.
+
+    If the highest-scoring row lacks evidence or justification text,
+    backfill from other rows that do have it.
+    """
     best: dict[str, dict[str, Any]] = {}
+    backfill: dict[str, dict[str, str]] = {}
     for qg in question_grades:
         for c in qg.get("criteria") or []:
             if not isinstance(c, dict):
@@ -31,6 +36,16 @@ def _merge_criteria_max_by_name(
                 sc = 0.0
             if name not in best or sc > float(best[name].get("score", 0)):
                 best[name] = dict(c)
+            bf = backfill.setdefault(name, {})
+            for field in ("evidence", "justification", "reasoning"):
+                val = str(c.get(field) or "")
+                if val and not bf.get(field):
+                    bf[field] = val
+    for name, row in best.items():
+        bf = backfill.get(name) or {}
+        for field in ("evidence", "justification", "reasoning"):
+            if not row.get(field):
+                row[field] = bf.get(field, "")
     return [best[k] for k in sorted(best.keys())]
 
 
@@ -90,6 +105,7 @@ def _chunk_to_question_grade(
     aux = chunk.auxiliary or {}
     just_map: dict[str, str] = aux.get("criterion_justifications") or {}
     ev_map: dict[str, str] = aux.get("criterion_evidence") or {}
+    reason_map: dict[str, str] = aux.get("criterion_reasoning") or {}
     conf_note: str = aux.get("confidence_note") or ""
 
     se_confidence = round(float(chunk.ai_confidence), 4)
@@ -103,13 +119,10 @@ def _chunk_to_question_grade(
             "score": round(ratio_f * mp, 4),
             "max_points": mp,
             "confidence": se_confidence,
+            "justification": just_map.get(name) or "",
+            "evidence": ev_map.get(name) or "",
+            "reasoning": reason_map.get(name) or "",
         }
-        j = just_map.get(name) or ""
-        if j:
-            row["justification"] = j
-        ev = ev_map.get(name) or ""
-        if ev:
-            row["evidence"] = ev
         criteria_rows.append(row)
 
     evidence_parts: list[str] = []
@@ -195,6 +208,9 @@ def multimodal_assignment_to_grading_dict(
     for c in merged:
         row = dict(c)
         row.pop("weight", None)
+        row.setdefault("evidence", "")
+        row.setdefault("justification", "")
+        row.setdefault("reasoning", "")
         crit_out.append(row)
 
     summary = "; ".join(

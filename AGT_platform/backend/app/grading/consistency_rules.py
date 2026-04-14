@@ -40,4 +40,6 @@ def run_rule_checks(
                     )
             except (TypeError, ValueError):
                 issues.append(f"Non-numeric confidence for '{name}'")
+        if not str(c.get("evidence") or "").strip() and sc > 0:
+            issues.append(f"Missing evidence for '{name}' with score {sc}")
     return issues

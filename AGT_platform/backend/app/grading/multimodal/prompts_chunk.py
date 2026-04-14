@@ -14,24 +14,35 @@ from .schemas import GradingChunk
 SYSTEM_CHUNK_GRADER = """\
 You are an evidence-based evaluator grading **one question chunk** from a student assignment.
 
+CHAIN-OF-THOUGHT GRADING PROCESS — follow these steps IN ORDER for each criterion:
+  Step 1  EXTRACT: Copy the most relevant quote or excerpt from the student's response.
+  Step 2  REASON:  Explain what this evidence demonstrates and which rubric level it matches.
+          Consider partial-credit conditions — what did the student get right, and what is incomplete?
+  Step 3  SCORE:   Only now assign the integer score. The score must be consistent with your reasoning.
+
 RUBRIC SCORING RULES:
 - You will receive a list of rubric criteria, each with a `name`, `max_points`, and `description` (level descriptors).
-- For EACH criterion in the rubric, assign an integer `score` between 0 and that criterion's `max_points`.
-- Use the level descriptors in `description` to choose the correct score level.
-- Provide a brief justification for each score in `criterion_justifications` (same order as `criterion_scores`).
+- For EACH criterion, populate a `criterion_scores` entry with: `evidence` (Step 1), `reasoning` (Step 2), `score` (Step 3), plus `name`, `max_points`, and a final `justification`.
+- Also produce a parallel `criterion_justifications` list (one string per criterion, same order).
 - Compute `total_score` as the sum of all your criterion scores.
 - Compute `normalized_score` as `total_score` divided by the sum of all `max_points`. It must be a float in [0, 1].
 - Set `review_flag` to true only if the evidence is genuinely ambiguous or the chunk is too short to grade.
+
+PARTIAL CREDIT GUIDELINES (research-aligned):
+- Decompose each criterion into sub-skills or sub-expectations described by the rubric levels.
+- Award credit for **every sub-skill the student demonstrates**, even if other sub-skills are missing.
+- A response that addresses the right topic with partial correctness deserves **at least half** of `max_points`.
+- When the student's work falls between two rubric levels, round **up** if effort and intent are clear.
+- Reserve a score of **0 only** for missing, blank, or entirely off-topic responses.
 
 SCORING PHILOSOPHY:
 - Be **fair and generous** — reward what the student demonstrated rather than penalising what is missing.
 - When a student's response reasonably satisfies a level descriptor, **award that score level**.
 - Give the student the **benefit of the doubt**: partial credit is appropriate when the response shows genuine effort and understanding, even if imperfect.
-- A student who makes a sincere attempt at a criterion should typically receive **at least the midpoint** score for that criterion.
-- Reserve a score of **0 only** for missing, blank, or entirely off-topic responses.
 
 EVIDENCE RULES:
 - Use evidence present in the chunk content and any attached execution, test, chart, or transcript evidence.
+- The `evidence` field MUST contain a direct quote or concrete excerpt from the student's submission — never leave it empty unless the response is entirely blank.
 - Do **not** compare to a single model answer — accept multiple valid approaches.
 - Score **each criterion independently** based on evidence in the chunk.
 - If evidence is partial but the student clearly tried, lean toward the **higher** neighbouring score level and note what could improve.
@@ -50,10 +61,11 @@ OUTPUT_SCHEMA_HINT = {
     "criterion_scores": [
         {
             "name": "string — criterion name from rubric",
-            "score": "integer — between 0 and that criterion's max_points",
+            "evidence": "REQUIRED string — direct quote or excerpt from the student's submission (Step 1: EXTRACT)",
+            "reasoning": "REQUIRED string — chain-of-thought: what the evidence shows, which rubric level it matches, partial credit considerations (Step 2: REASON)",
+            "score": "integer — between 0 and that criterion's max_points (Step 3: SCORE, must follow from reasoning)",
             "max_points": "number — copied from rubric",
-            "justification": "string — 1-2 sentence evidence-based reason for this score",
-            "evidence": "string — specific quote or excerpt from the student's submission that supports this score",
+            "justification": "string — concise 1-2 sentence summary of the score rationale",
         }
     ],
     "criterion_justifications": [
@@ -82,9 +94,16 @@ def build_chunk_grading_prompt(
     )
     payload = {
         "instructions": (
-            "Grade this single chunk. Output JSON with keys: "
-            "rubric_type, criterion_scores, criterion_justifications, total_score, "
-            "normalized_score, confidence_note, review_flag."
+            "Grade this single chunk using chain-of-thought. Output a single JSON object.\n"
+            "Top-level keys: rubric_type, criterion_scores, criterion_justifications, "
+            "total_score, normalized_score, confidence_note, review_flag.\n"
+            "CRITICAL: each entry in criterion_scores MUST include these sub-fields in this order:\n"
+            '  1. "evidence" — direct quote or excerpt from the student submission\n'
+            '  2. "reasoning" — what the evidence shows, which rubric level it matches, '
+            "partial credit analysis\n"
+            '  3. "score" — integer consistent with your reasoning\n'
+            '  4. "name", "max_points", "justification" — standard fields\n'
+            "Never leave evidence or reasoning empty unless the student response is blank."
         ),
         "task_description": task_description or "(see assignment brief in LMS)",
         "chunk": chunk_dict,

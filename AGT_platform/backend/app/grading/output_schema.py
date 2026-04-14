@@ -279,8 +279,26 @@ def validate_grading_output(data: dict[str, Any]) -> dict[str, Any]:
         elif c.get("max_points") is not None:
             c["max_points"] = _coerce_float(c["max_points"])
         ev = c.get("evidence")
-        if ev is not None and not isinstance(ev, (str, dict)):
+        if ev is None:
+            c["evidence"] = ""
+        elif isinstance(ev, dict):
+            parts = [str(q) for q in (ev.get("quotes") or [])]
+            notes = str(ev.get("notes") or "")
+            if notes:
+                parts.append(notes)
+            c["evidence"] = " | ".join(parts) if parts else ""
+        elif not isinstance(ev, str):
             c["evidence"] = str(ev)
+
+        reasoning = c.get("reasoning")
+        if reasoning is None:
+            c["reasoning"] = ""
+        elif not isinstance(reasoning, str):
+            c["reasoning"] = str(reasoning)
+
+        if c.get("justification") is None:
+            c["justification"] = ""
+
         criteria_out.append(c)
     data["criteria"] = criteria_out
 
@@ -303,6 +321,11 @@ def validate_grading_output(data: dict[str, Any]) -> dict[str, Any]:
         for i, row in enumerate(qg):
             if not isinstance(row, dict):
                 raise GradingOutputValidationError(f"question_grades[{i}] must be a dict")
+            for crit in row.get("criteria") or []:
+                if isinstance(crit, dict):
+                    crit.setdefault("evidence", "")
+                    crit.setdefault("reasoning", "")
+                    crit.setdefault("justification", "")
         data["question_grades"] = qg
 
     mod = data.get("_modality")

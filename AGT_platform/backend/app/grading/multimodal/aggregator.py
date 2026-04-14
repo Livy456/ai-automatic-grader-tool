@@ -22,22 +22,24 @@ from .schemas import (
 def _pick_representative_sample(
     valid_parsed: list[SampledChunkGrade],
     consensus_score: float,
-) -> tuple[dict[str, str], dict[str, str], str]:
-    """Select justifications and evidence from the sample closest to the consensus score.
+) -> tuple[dict[str, str], dict[str, str], dict[str, str], str]:
+    """Select justifications, evidence, and reasoning from the sample closest to the consensus score.
 
-    Returns (criterion_name -> justification, criterion_name -> evidence, confidence_note).
+    Returns (criterion_name -> justification, criterion_name -> evidence,
+             criterion_name -> reasoning, confidence_note).
     """
     if not valid_parsed:
-        return {}, {}, ""
+        return {}, {}, {}, ""
     best = min(
         valid_parsed,
         key=lambda s: abs((s.parsed.normalized_score if s.parsed else 0.0) - consensus_score),
     )
     p = best.parsed
     if p is None:
-        return {}, {}, ""
+        return {}, {}, {}, ""
     just_map: dict[str, str] = {}
     ev_map: dict[str, str] = {}
+    reason_map: dict[str, str] = {}
     for i, cs in enumerate(p.criterion_scores):
         if i < len(p.criterion_justifications):
             just_map[cs.name] = p.criterion_justifications[i]
@@ -47,7 +49,11 @@ def _pick_representative_sample(
             ev_map[cs.name] = p.criterion_evidence[i]
         else:
             ev_map[cs.name] = ""
-    return just_map, ev_map, p.confidence_note
+        if i < len(p.criterion_reasoning):
+            reason_map[cs.name] = p.criterion_reasoning[i]
+        else:
+            reason_map[cs.name] = ""
+    return just_map, ev_map, reason_map, p.confidence_note
 
 
 def consensus_normalized_score(
@@ -102,7 +108,7 @@ def aggregate_chunk_samples(
             acc[k].append(v)
     consensus_crit = {k: sum(vs) / len(vs) for k, vs in acc.items()}
 
-    justifications, evidence, confidence_note = _pick_representative_sample(
+    justifications, evidence, reasoning, confidence_note = _pick_representative_sample(
         valid_parsed, estimate,
     )
 
@@ -127,6 +133,7 @@ def aggregate_chunk_samples(
         "question_point_weight": float(question_point_weight),
         "criterion_justifications": justifications,
         "criterion_evidence": evidence,
+        "criterion_reasoning": reasoning,
         "confidence_note": confidence_note,
     }
 

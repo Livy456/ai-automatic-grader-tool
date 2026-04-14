@@ -38,11 +38,25 @@ class ChunkModelRunner(Protocol):
 _DEFAULT_MOCK_RESPONSE = json.dumps({
     "rubric_type": "free_response",
     "criterion_scores": [
-        {"name": "Conceptual Correctness", "score": 3, "max_points": 4},
-        {"name": "Evidence & Justification", "score": 2, "max_points": 3},
+        {
+            "name": "Conceptual Correctness",
+            "score": 3,
+            "max_points": 4,
+            "evidence": "The student wrote: 'Data ethics ensures responsible handling of collected data.'",
+            "reasoning": "The student addresses the core concept of data ethics directly. The response covers responsible handling but lacks depth on specific frameworks. This matches rubric level 3 (mostly accurate with minor gaps). Partial credit: correct topic + clear intent = 3/4.",
+            "justification": "Solid understanding of the core concept with minor gaps.",
+        },
+        {
+            "name": "Evidence & Justification",
+            "score": 2,
+            "max_points": 3,
+            "evidence": "Student cites: 'as discussed in the reading on informed consent'",
+            "reasoning": "The student references the reading material and ties it to informed consent. However, only one example is cited and it lacks specificity. This falls between rubric levels 2 and 3; rounding up for clear effort gives level 2.",
+            "justification": "Two concrete examples cited from the reading; could be more specific.",
+        },
     ],
     "criterion_justifications": [
-        "Student demonstrates solid understanding of the core concept with minor gaps.",
+        "Solid understanding of the core concept with minor gaps.",
         "Two concrete examples cited from the reading; could be more specific.",
     ],
     "total_score": 5,
