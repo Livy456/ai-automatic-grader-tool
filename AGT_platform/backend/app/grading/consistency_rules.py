@@ -40,6 +40,12 @@ def run_rule_checks(
                     )
             except (TypeError, ValueError):
                 issues.append(f"Non-numeric confidence for '{name}'")
-        if not str(c.get("evidence") or "").strip() and sc > 0:
+        # Require at least one substantive text field (evidence preferred in prompts;
+        # allow justification/reasoning so we do not flag when narrative was stored there).
+        support = " ".join(
+            str(c.get(k) or "")
+            for k in ("evidence", "justification", "reasoning")
+        ).strip()
+        if sc > 0 and not support:
             issues.append(f"Missing evidence for '{name}' with score {sc}")
     return issues

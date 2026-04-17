@@ -26,7 +26,8 @@ class OutputSchemaTests(unittest.TestCase):
             "_model_used": "ollama:x",
         }
         out = validate_grading_output(d)
-        self.assertEqual(out["overall"]["score"], 80.0)
+        self.assertAlmostEqual(out["overall"]["score"], 0.8, places=5)
+        self.assertEqual(out["overall"]["max_score"], 1.0)
         self.assertEqual(out["criteria"][0]["name"], "A")
 
     def test_criterion_alias_max_score(self) -> None:
@@ -61,7 +62,8 @@ class OutputSchemaTests(unittest.TestCase):
         }
         coerce_grading_output_shape(d)
         out = validate_grading_output(d)
-        self.assertEqual(out["overall"]["score"], 85.0)
+        self.assertAlmostEqual(out["overall"]["score"], 0.85, places=5)
+        self.assertEqual(out["overall"]["max_score"], 1.0)
 
     def test_coerce_nested_grading(self) -> None:
         d = {
@@ -99,6 +101,8 @@ class OutputSchemaTests(unittest.TestCase):
         coerce_grading_output_shape(d)
         out = validate_grading_output(d)
         self.assertIsInstance(out["overall"]["score"], float)
+        self.assertAlmostEqual(out["overall"]["score"], 0.65, places=5)
+        self.assertEqual(out["overall"]["max_score"], 1.0)
 
     def test_allowed_criterion_names_removes_hallucinated_rows(self) -> None:
         allowed = frozenset({"Conceptual Correctness", "Clarity"})

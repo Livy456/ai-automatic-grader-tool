@@ -33,7 +33,7 @@ RUBRIC FIDELITY:
 - **EXACT NAMES ONLY:** `criterion_scores[].name` MUST match `rubric.rows[].name` **exactly**. No `criterion_1`, no extra criteria.
 - One object per rubric row; same order as `rubric.rows` when possible.
 - Put the raw level in **`raw_score`** (preferred) or **`score`**. Copy `max_points` from the rubric row.
-- Include `evidence`, `reasoning`, `justification` per criterion. `evidence` must be non-empty unless the submission is blank for that part.
+- Include `evidence`, `reasoning`, `justification` per criterion. **`evidence` must be a verbatim substring** (direct quote) from the student's response in this chunk — not a paraphrase, not a rubric phrase, not a grader summary. Use quotation marks around the excerpt when helpful. Leave empty only if the submission is truly blank for that criterion.
 - Also output `criterion_justifications` (one string per criterion, same order).
 - Optional `total_score` / `normalized_score`: the **server recomputes** the official score from your raw levels; do not trust self-computed linear ratios.
 - `review_flag`: true only if evidence is genuinely ambiguous or the chunk is too short to grade.
@@ -67,7 +67,7 @@ OUTPUT_SCHEMA_HINT = {
             "name": "string — must equal rubric.rows[].name (same as criterion_name)",
             "raw_score": "number — raw rubric level on 0..max_points in steps of 0.5 only (alias: score)",
             "max_points": "number — max ordinal R, copied from rubric",
-            "evidence": "REQUIRED string — quote/excerpt from submission only",
+            "evidence": "REQUIRED string — verbatim quote from the student's text in this chunk (substring of their answer)",
             "reasoning": "REQUIRED string — evidence-grounded; no invented student intent",
             "justification": "string — short summary tied to evidence",
         }
@@ -112,7 +112,9 @@ def build_chunk_grading_prompt(
             "each row. No other values. If you output an invalid decimal, the server will "
             "round **up** to the next valid half-step (capped at max_points); you should "
             "still emit a correct value yourself. Grade fairly: reward quoted partial work; "
-            "do not default to the lowest band when evidence fits a mid level."
+            "do not default to the lowest band when evidence fits a mid level.\n"
+            "Evidence: use a verbatim substring from the student's answer in this chunk (quote), "
+            "not a grader paraphrase."
         ),
         "task_description": task_description or "(see assignment brief in LMS)",
         "chunk": chunk_dict,

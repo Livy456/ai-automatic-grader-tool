@@ -715,6 +715,7 @@ class LocalAssignmentGradingTests(unittest.TestCase):
                     grading_dict, allowed_criterion_names=flat_allowed
                 )
                 self.assertIn("score", validated["overall"])
+                self.assertEqual(validated["overall"].get("max_score"), 1.0)
                 self.assertIn("question_grades", validated)
                 for row in validated.get("criteria") or []:
                     if isinstance(row, dict) and row.get("name"):
@@ -722,6 +723,19 @@ class LocalAssignmentGradingTests(unittest.TestCase):
                             row["name"], flat_allowed,
                             f"[{stem}] assignment criteria must be rubric-backed: {row!r}",
                         )
+                for idx, qg in enumerate(
+                    validated.get("question_grades") or [], start=1
+                ):
+                    cid = str(qg.get("chunk_id") or "")
+                    self.assertTrue(
+                        cid.endswith(f":pair_{idx}"),
+                        f"[{stem}] chunk_id should end with :pair_{idx}, got {cid!r}",
+                    )
+                    self.assertEqual(
+                        (qg.get("overall") or {}).get("max_score"),
+                        1.0,
+                        f"[{stem}] question overall.max_score",
+                    )
                 for qg in validated.get("question_grades") or []:
                     for c in (qg.get("criteria") or []) if isinstance(qg, dict) else []:
                         if isinstance(c, dict) and c.get("name"):

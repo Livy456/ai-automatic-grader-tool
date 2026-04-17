@@ -59,6 +59,54 @@ def ceiling_half_point_on_grid(raw: float, max_raw: float) -> float:
     return max(0.0, min(R, y))
 
 
+def snap_half_nearest_display(x: float, max_raw: float) -> float:
+    """
+    Round to the **nearest** valid half-step on ``[0, R]`` (for aggregated means).
+
+    Differs from :func:`ceiling_half_point_on_grid`, which is for invalid LLM outputs.
+    """
+    R = _snap_max_raw(max_raw)
+    if R <= 0:
+        return 0.0
+    xc = max(0.0, min(R, float(x)))
+    y = round(xc * 2.0) / 2.0
+    return max(0.0, min(R, y))
+
+
+def blended_display_points(
+    raw_on_scale: float,
+    calibrated_credit: float,
+    max_points: float,
+) -> float:
+    """
+    Combine consensus raw rubric level with calibrated credit on the same point scale.
+
+    ``points = raw + g * (M - raw)`` moves from the snapped raw level toward full ``M``
+    as ``g`` approaches 1 (``g`` is calibrated credit in ``[0, 1]``).
+    """
+    M = _snap_max_raw(max_points)
+    if M <= 0:
+        return 0.0
+    r = max(0.0, min(M, float(raw_on_scale)))
+    g = max(0.0, min(1.0, float(calibrated_credit)))
+    return r + g * (M - r)
+
+
+def finalize_criterion_display_scores(
+    raw_mean: float,
+    calibrated_credit: float,
+    max_points: float,
+) -> tuple[float, float]:
+    """
+    Return ``(raw_rubric_score_snapped, score_snapped)`` both on the half-point grid in ``[0, M]``.
+    """
+    M = _snap_max_raw(max_points)
+    raw_s = snap_half_nearest_display(raw_mean, M)
+    blended = blended_display_points(raw_s, calibrated_credit, M)
+    score_s = snap_half_nearest_display(blended, M)
+    return raw_s, score_s
+
+
 def _snap_max_raw(R: float) -> float:
     try:
         r = float(R)

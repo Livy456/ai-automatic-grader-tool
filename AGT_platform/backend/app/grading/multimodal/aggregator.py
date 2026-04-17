@@ -19,41 +19,104 @@ from .schemas import (
 )
 
 
-def _pick_representative_sample(
-    valid_parsed: list[SampledChunkGrade],
-    consensus_score: float,
-) -> tuple[dict[str, str], dict[str, str], dict[str, str], str]:
-    """Select justifications, evidence, and reasoning from the sample closest to the consensus score.
+def _triplet_for_criterion(
+    parsed: ParsedChunkGrade, name: str
+) -> tuple[str, str, str]:
+    """Return (justification, evidence, reasoning) for ``name`` from one parsed grade."""
+    for i, cs in enumerate(parsed.criterion_scores):
+        if cs.name != name:
+            continue
+        jt = (
+            str(parsed.criterion_justifications[i])
+            if i < len(parsed.criterion_justifications)
+            else ""
+        )
+        ev = (
+            str(parsed.criterion_evidence[i])
+            if i < len(parsed.criterion_evidence)
+            else ""
+        )
+        rs = (
+            str(parsed.criterion_reasoning[i])
+            if i < len(parsed.criterion_reasoning)
+            else ""
+        )
+        return jt, ev, rs
+    return "", "", ""
 
-    Returns (criterion_name -> justification, criterion_name -> evidence,
-             criterion_name -> reasoning, confidence_note).
+
+def align_criterion_text_maps_to_consensus(
+    valid_parsed: list[SampledChunkGrade],
+    consensus_crit: dict[str, float],
+) -> tuple[dict[str, str], dict[str, str], dict[str, str]]:
     """
-    if not valid_parsed:
-        return {}, {}, {}, ""
-    best = min(
-        valid_parsed,
-        key=lambda s: abs((s.parsed.normalized_score if s.parsed else 0.0) - consensus_score),
-    )
-    p = best.parsed
-    if p is None:
-        return {}, {}, {}, ""
+    For each criterion, pick the sample whose **calibrated_credit** is closest to the
+    consensus value (prefer non-empty evidence on ties). Aligns text with numeric
+    consensus so strong justifications are not paired with empty ``evidence`` from an
+    unrelated sample.
+    """
     just_map: dict[str, str] = {}
     ev_map: dict[str, str] = {}
     reason_map: dict[str, str] = {}
-    for i, cs in enumerate(p.criterion_scores):
-        if i < len(p.criterion_justifications):
-            just_map[cs.name] = p.criterion_justifications[i]
-        else:
-            just_map[cs.name] = ""
-        if i < len(p.criterion_evidence):
-            ev_map[cs.name] = p.criterion_evidence[i]
-        else:
-            ev_map[cs.name] = ""
-        if i < len(p.criterion_reasoning):
-            reason_map[cs.name] = p.criterion_reasoning[i]
-        else:
-            reason_map[cs.name] = ""
-    return just_map, ev_map, reason_map, p.confidence_note
+    for name, target in consensus_crit.items():
+        best_trip: tuple[str, str, str] = ("", "", "")
+        best_key: tuple[float, int, int] | None = None
+        for s in valid_parsed:
+            p = s.parsed
+            if p is None:
+                continue
+            g_here: float | None = None
+            for cs in p.criterion_scores:
+                if cs.name == name:
+                    g_here = float(cs.calibrated_credit)
+                    break
+            if g_here is None:
+                continue
+            jt, ev, rs = _triplet_for_criterion(p, name)
+            ev_n = str(ev).strip()
+            key = (abs(g_here - float(target)), 0 if ev_n else 1, -len(ev_n))
+            if best_key is None or key < best_key:
+                best_key = key
+                best_trip = (jt, ev, rs)
+        just_map[name], ev_map[name], reason_map[name] = best_trip
+    return just_map, ev_map, reason_map
+
+
+def _backfill_empty_evidence_from_any_sample(
+    valid_parsed: list[SampledChunkGrade],
+    consensus_crit: dict[str, float],
+    ev_map: dict[str, str],
+) -> None:
+    """If a criterion still has no evidence string, take the first non-empty from any sample."""
+    for name in consensus_crit:
+        if str(ev_map.get(name) or "").strip():
+            continue
+        for s in valid_parsed:
+            p = s.parsed
+            if p is None:
+                continue
+            _jt, ev, _rs = _triplet_for_criterion(p, name)
+            if str(ev).strip():
+                ev_map[name] = ev
+                break
+
+
+def _confidence_note_from_nearest_sample(
+    valid_parsed: list[SampledChunkGrade],
+    consensus_score: float,
+) -> str:
+    if not valid_parsed:
+        return ""
+    best = min(
+        valid_parsed,
+        key=lambda s: abs(
+            (s.parsed.normalized_score if s.parsed else 0.0) - consensus_score
+        ),
+    )
+    p = best.parsed
+    if p is None:
+        return ""
+    return str(p.confidence_note or "")
 
 
 def consensus_normalized_score(
@@ -120,9 +183,13 @@ def aggregate_chunk_samples(
             acc_raw[cs.name].append(float(cs.score))
     consensus_raw = {k: sum(vs) / len(vs) for k, vs in acc_raw.items()}
 
-    justifications, evidence, reasoning, confidence_note = _pick_representative_sample(
-        valid_parsed, estimate,
+    justifications, evidence, reasoning = align_criterion_text_maps_to_consensus(
+        valid_parsed, consensus_crit
     )
+    _backfill_empty_evidence_from_any_sample(
+        valid_parsed, consensus_crit, evidence
+    )
+    confidence_note = _confidence_note_from_nearest_sample(valid_parsed, estimate)
 
     n = max(1, len(samples))
     parse_fail_rate = sum(1 for s in samples if not s.parse_ok) / n

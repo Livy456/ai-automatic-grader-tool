@@ -9,6 +9,7 @@ from app.grading.rubric_credit_calibration import (
     anchor_map_monotone_increasing,
     ceiling_half_point_on_grid,
     compute_weighted_question_score,
+    finalize_criterion_display_scores,
     get_anchor_map_for_criterion,
     interpolate_anchor_map_for_scale,
     map_raw_score_to_calibrated_credit,
@@ -59,6 +60,11 @@ class RubricCreditCalibrationTests(unittest.TestCase):
         g = map_raw_score_to_calibrated_credit(1.25, m)
         self.assertGreater(g, m[1.0])
         self.assertLess(g, m[1.5])
+
+    def test_finalize_blended_display_scores(self) -> None:
+        raw_s, pts = finalize_criterion_display_scores(1.9375, 0.51875, 4.0)
+        self.assertEqual(raw_s, 2.0)
+        self.assertEqual(pts, 3.0)
 
     def test_weighted_question_score(self) -> None:
         pct, audit = compute_weighted_question_score(

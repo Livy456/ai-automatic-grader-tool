@@ -67,7 +67,24 @@ def criteria_rows_to_arrays(
     s = np.zeros(n, dtype=np.float64)
     c = np.full(n, default_confidence, dtype=np.float64)
     for i, row in enumerate(rows):
-        w[i] = float(row.get("weight") or 0.0)
+        wf: float | None = None
+        wt = row.get("weight")
+        if wt is not None:
+            try:
+                t = float(wt)
+                if t > 0.0:
+                    wf = t
+            except (TypeError, ValueError):
+                pass
+        if wf is None:
+            mp = row.get("max_points")
+            if mp is None:
+                mp = row.get("max_score")
+            try:
+                wf = float(mp) if mp is not None else 0.0
+            except (TypeError, ValueError):
+                wf = 0.0
+        w[i] = wf
         s[i] = float(row.get("score", 0.0))
         try:
             c[i] = float(row.get("confidence", default_confidence))

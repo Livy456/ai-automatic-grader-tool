@@ -7,34 +7,29 @@ from __future__ import annotations
 
 from typing import Any
 
-from app.grading.aggregation import weighted_overall_confidence, weighted_overall_score
+from app.grading.aggregation import weighted_overall_confidence
 from app.grading.consistency_rules import run_rule_checks
 from app.grading.rubric_allowlist import filter_criteria_dicts_to_allowlist
+from app.grading.rubric_credit_calibration import finalize_criterion_display_scores
 
 from .schemas import AssignmentGradeResult, ChunkGradeOutcome
 
 
-def _weighted_calibrated_overall_pct(merged: list[dict[str, Any]]) -> float | None:
-    """``100 * sum(w*g) / sum(w)`` when rows expose ``calibrated_credit``; else None."""
-    wt = 0.0
-    acc = 0.0
-    n = 0
-    for r in merged:
+def _rubric_point_fraction(rows: list[dict[str, Any]]) -> float:
+    """``sum(score) / sum(max_points)`` clipped to ``[0, 1]`` (matches blended criterion rows)."""
+    earned = 0.0
+    cap = 0.0
+    for r in rows:
         if not isinstance(r, dict):
             continue
-        if "calibrated_credit" not in r:
-            return None
         try:
-            w = float(r.get("weight") or r.get("max_points") or 0)
-            g = float(r["calibrated_credit"])
+            earned += float(r.get("score", 0))
+            cap += float(r.get("max_points", 0))
         except (TypeError, ValueError):
-            return None
-        wt += w
-        acc += w * g
-        n += 1
-    if n == 0 or wt <= 0:
-        return None
-    return round(100.0 * acc / wt, 2)
+            continue
+    if cap <= 0:
+        return 0.0
+    return max(0.0, min(1.0, earned / cap))
 
 
 def _merge_criteria_max_by_name(
@@ -82,7 +77,34 @@ def _merge_criteria_max_by_name(
         for field in ("evidence", "justification", "reasoning"):
             if not row.get(field):
                 row[field] = bf.get(field, "")
+        _sync_blended_scores_row(row)
     return [best[k] for k in sorted(best.keys())]
+
+
+def _refresh_qg_overall_rubric_totals(qg: dict[str, Any]) -> None:
+    """After per-chunk allowlist + blend sync, align ``overall`` with criterion point totals."""
+    crits = [c for c in (qg.get("criteria") or []) if isinstance(c, dict)]
+    earned = sum(float(c.get("score", 0)) for c in crits)
+    cap = sum(float(c.get("max_points", 0)) for c in crits)
+    frac = _rubric_point_fraction(crits)
+    o = qg.setdefault("overall", {})
+    o["score"] = round(frac, 6)
+    o["max_score"] = 1.0
+    o["max_points"] = round(cap, 4)
+    o["rubric_points_earned"] = round(earned, 4)
+
+
+def _sync_blended_scores_row(row: dict[str, Any]) -> None:
+    """Recompute ``raw_rubric_score`` and ``score`` from consensus fields (half-step grid)."""
+    try:
+        mp = float(row.get("max_points") or 0)
+        raw_m = float(row.get("raw_rubric_score", 0))
+        g = float(row.get("calibrated_credit", 0))
+    except (TypeError, ValueError):
+        return
+    raw_s, pts = finalize_criterion_display_scores(raw_m, g, mp)
+    row["raw_rubric_score"] = raw_s
+    row["score"] = pts
 
 
 def _apply_rubric_weights_to_criteria(
@@ -159,11 +181,12 @@ def _chunk_to_question_grade(
         mp = float(max_by_name.get(name) or 100.0)
         ratio_f = max(0.0, min(1.0, float(ratio)))
         raw_consensus = float(raw_map.get(name, 0.0))
+        raw_s, pts = finalize_criterion_display_scores(raw_consensus, ratio_f, mp)
         row: dict[str, Any] = {
             "name": name,
-            "raw_rubric_score": raw_consensus,
+            "raw_rubric_score": raw_s,
             "calibrated_credit": ratio_f,
-            "score": round(ratio_f * mp, 4),
+            "score": pts,
             "max_points": mp,
             "confidence": se_confidence,
             "justification": just_map.get(name) or "",
@@ -171,6 +194,10 @@ def _chunk_to_question_grade(
             "reasoning": reason_map.get(name) or "",
         }
         criteria_rows.append(row)
+
+    earned = sum(float(r["score"]) for r in criteria_rows)
+    cap = sum(float(r["max_points"]) for r in criteria_rows)
+    frac = _rubric_point_fraction(criteria_rows)
 
     evidence_parts: list[str] = []
     if conf_note:
@@ -184,12 +211,18 @@ def _chunk_to_question_grade(
         "chunk_id": chunk.chunk_id,
         "criteria": criteria_rows,
         "overall": {
-            "score": round(float(chunk.normalized_score_estimate) * 100.0, 4),
+            "score": round(frac, 6),
+            "max_score": 1.0,
+            "max_points": round(cap, 4),
+            "rubric_points_earned": round(earned, 4),
             "confidence": se_confidence,
             "summary": evidence_summary,
             "semantic_entropy": round(float(chunk.semantic_entropy_nats), 4),
             "entropy_max_reference_nats": round(
                 float(chunk.entropy_max_reference_nats), 6
+            ),
+            "normalized_chunk_estimate": round(
+                float(chunk.normalized_score_estimate), 6
             ),
         },
         "semantic_entropy": float(chunk.semantic_entropy_nats),
@@ -220,24 +253,16 @@ def multimodal_assignment_to_grading_dict(
     question_grades = [
         _chunk_to_question_grade(c, max_by_name) for c in result.chunk_results
     ]
-
-    # --- Consistency checks per chunk ---
-    all_consistency_issues: list[str] = []
-    for qg in question_grades:
-        issues = run_rule_checks(qg.get("criteria") or [])
-        if issues:
-            qg["flags"] = list(dict.fromkeys(qg.get("flags", []) + issues))
-            all_consistency_issues.extend(issues)
-
-    merged = _merge_criteria_max_by_name(question_grades)
-    _apply_rubric_weights_to_criteria(merged, rubric_items)
+    for i, (qg, ch) in enumerate(
+        zip(question_grades, result.chunk_results, strict=True), start=1
+    ):
+        qg["chunk_id"] = f"{ch.student_id}:{ch.assignment_id}:pair_{i}"
+        qg["_source_chunk_id"] = ch.chunk_id
 
     allowed = frozenset(r["name"] for r in rubric_items)
-    merged, allow_issues = filter_criteria_dicts_to_allowlist(
-        merged, allowed, context="assignment_merged"
-    )
-    all_consistency_issues.extend(allow_issues)
 
+    # --- Per-chunk allowlist, blend sync, rubric-aligned overall, then consistency ---
+    all_consistency_issues: list[str] = []
     for qg in question_grades:
         cid = str(qg.get("chunk_id") or "chunk")
         crits = qg.get("criteria") or []
@@ -248,18 +273,35 @@ def multimodal_assignment_to_grading_dict(
         )
         qg["criteria"] = filtered
         all_consistency_issues.extend(q_issues)
+        for c in qg.get("criteria") or []:
+            if isinstance(c, dict):
+                _sync_blended_scores_row(c)
+        _refresh_qg_overall_rubric_totals(qg)
+        issues = run_rule_checks(qg.get("criteria") or [])
+        if issues:
+            qg["flags"] = list(dict.fromkeys(qg.get("flags", []) + issues))
+            all_consistency_issues.extend(issues)
+
+    merged = _merge_criteria_max_by_name(question_grades)
+    _apply_rubric_weights_to_criteria(merged, rubric_items)
+    merged, allow_issues = filter_criteria_dicts_to_allowlist(
+        merged, allowed, context="assignment_merged"
+    )
+    all_consistency_issues.extend(allow_issues)
+    for row in merged:
+        _sync_blended_scores_row(row)
 
     # --- Consistency checks on merged assignment-level criteria ---
     assignment_issues = run_rule_checks(merged)
     all_consistency_issues.extend(assignment_issues)
 
-    calib_overall = _weighted_calibrated_overall_pct(merged)
-    overall_score = (
-        calib_overall
-        if calib_overall is not None
-        else weighted_overall_score(merged)
-    )
+    overall_frac = _rubric_point_fraction(merged)
+    overall_score = round(overall_frac, 6)
     wconf = weighted_overall_confidence(merged)
+    earned_assign = sum(float(r.get("score", 0)) for r in merged if isinstance(r, dict))
+    cap_assign = sum(
+        float(r.get("max_points", 0)) for r in merged if isinstance(r, dict)
+    )
 
     entropies = [float(c.semantic_entropy_nats) for c in result.chunk_results]
     avg_h = sum(entropies) / len(entropies) if entropies else 0.0
@@ -280,6 +322,7 @@ def multimodal_assignment_to_grading_dict(
         row.setdefault("evidence", "")
         row.setdefault("justification", "")
         row.setdefault("reasoning", "")
+        _sync_blended_scores_row(row)
         crit_out.append(row)
 
     summary = "; ".join(
@@ -294,6 +337,9 @@ def multimodal_assignment_to_grading_dict(
     out: dict[str, Any] = {
         "overall": {
             "score": overall_score,
+            "max_score": 1.0,
+            "max_points": round(cap_assign, 4),
+            "rubric_points_earned": round(earned_assign, 4),
             "confidence": round(assignment_conf, 4),
             "summary": summary,
             "semantic_entropy": round(avg_h, 4),

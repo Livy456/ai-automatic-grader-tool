@@ -93,14 +93,21 @@ def default_chunker_build_units(
     modality = modality_from_hints(envelope.modality_hints)
     task = task_type_from_hints(envelope.modality_hints)
     out: list[GradingChunk] = []
-    for u in units:
-        pid = u.get("pair_id")
-        qid = f"pair_{pid}" if pid is not None else "orphan"
+    for i, u in enumerate(units, start=1):
+        # Stable 1-based labels for outputs/APIs; original segmentation pair_id is kept
+        # under evidence for auditing (may be None for preamble / undetected-prompt blobs).
+        qid = f"pair_{i}"
         text_parts = [
             u.get("question_text") or "",
             u.get("response_text") or "",
         ]
         extracted = "\n\n".join(p for p in text_parts if str(p).strip()).strip()
+        ev = {
+            "chunk_ids": u.get("chunk_ids"),
+            "unit": u,
+            "source_pair_id": u.get("pair_id"),
+            "canonical_pair_index": i,
+        }
         out.append(
             GradingChunk(
                 chunk_id=f"{envelope.student_id}:{envelope.assignment_id}:{qid}",
@@ -110,10 +117,7 @@ def default_chunker_build_units(
                 modality=modality,
                 task_type=task,
                 extracted_text=extracted,
-                evidence={
-                    "chunk_ids": u.get("chunk_ids"),
-                    "unit": u,
-                },
+                evidence=ev,
             )
         )
     cap = hints.get("max_grading_units")

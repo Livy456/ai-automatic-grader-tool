@@ -14,7 +14,7 @@ import json
 import logging
 from typing import Any
 
-from app.grading.aggregation import weighted_overall_confidence, weighted_overall_score
+from app.grading.aggregation import weighted_overall_confidence
 from app.grading.rubric_allowlist import filter_criteria_dicts_to_allowlist
 
 _log = logging.getLogger(__name__)
@@ -35,6 +35,35 @@ def _coerce_float(v: Any, default: float | None = None) -> float:
 def _coerce_confidence(v: Any) -> float:
     x = _coerce_float(v, 0.5)
     return max(0.0, min(1.0, x))
+
+
+def _rubric_point_fraction(rows: list[dict[str, Any]]) -> float:
+    """``sum(score) / sum(max_points)`` in ``[0, 1]`` (assignment-style rubric rows)."""
+    earned = 0.0
+    cap = 0.0
+    for r in rows:
+        if not isinstance(r, dict):
+            continue
+        try:
+            earned += float(r.get("score", 0))
+            mp = r.get("max_points")
+            if mp is None:
+                mp = r.get("max_score")
+            cap += float(mp if mp is not None else 0.0)
+        except (TypeError, ValueError):
+            continue
+    if cap <= 0:
+        return 0.0
+    return max(0.0, min(1.0, earned / cap))
+
+
+def _normalize_overall_score_fraction(overall: dict[str, Any]) -> None:
+    """Mutates ``overall``: ``score`` is a fraction in ``[0, 1]``; ``max_score`` is ``1``."""
+    sc = _coerce_float(overall.get("score"))
+    if sc > 1.0:
+        sc /= 100.0
+    overall["score"] = max(0.0, min(1.0, sc))
+    overall["max_score"] = 1.0
 
 
 def _criteria_rows_for_overall_synthesis(criteria: Any) -> list[dict[str, Any]]:
@@ -182,7 +211,7 @@ def coerce_grading_output_shape(data: Any) -> dict[str, Any]:
     if isinstance(data.get("overall"), dict) and "score" not in data["overall"]:
         rows = _criteria_rows_for_overall_synthesis(data.get("criteria"))
         if rows:
-            data["overall"]["score"] = weighted_overall_score(rows)
+            data["overall"]["score"] = _rubric_point_fraction(rows)
             data["overall"].setdefault(
                 "confidence", weighted_overall_confidence(rows)
             )
@@ -198,7 +227,7 @@ def coerce_grading_output_shape(data: Any) -> dict[str, Any]:
         rows = _criteria_rows_for_overall_synthesis(data.get("criteria"))
         if rows:
             data["overall"] = {
-                "score": weighted_overall_score(rows),
+                "score": _rubric_point_fraction(rows),
                 "confidence": weighted_overall_confidence(rows),
                 "summary": "",
             }
@@ -224,6 +253,14 @@ def coerce_grading_output_shape(data: Any) -> dict[str, Any]:
             data["flags"] = list(dict.fromkeys([*(data.get("flags") or []), tag]))
         _log.info("Adjusted grader JSON to match expected overall/criteria shape")
 
+    o_end = data.get("overall")
+    if isinstance(o_end, dict) and "score" in o_end:
+        try:
+            o_end["score"] = float(o_end["score"])
+        except (TypeError, ValueError):
+            o_end["score"] = 0.0
+        _normalize_overall_score_fraction(o_end)
+
     return data
 
 
@@ -240,8 +277,10 @@ def validate_grading_output(
     When ``allowed_criterion_names`` is set (canonical LMS rubric names for this
     assignment), criteria rows are **filtered** to that set and remapped to canonical
     spelling; unknown names are removed and ``flags`` gain ``rubric_allowlist:*`` entries.
-    ``overall.score`` is recomputed from the filtered assignment-level criteria when any
-    filtering occurs.
+    ``overall.score`` is a **fraction in ``[0, 1]``** (earned rubric points over total cap);
+    legacy producers may send a **percent in ``[0, 100]``**, which is divided by ``100``.
+    ``overall.max_score`` is always ``1``. When allowlist filtering runs, ``overall.score``
+    is recomputed from the filtered assignment-level criteria.
 
     Returns the same ``data`` dict after light normalization (e.g. ``criterion`` → ``name``).
     """
@@ -254,6 +293,7 @@ def validate_grading_output(
     if "score" not in overall:
         raise GradingOutputValidationError("overall.score is required")
     overall["score"] = _coerce_float(overall.get("score"))
+    _normalize_overall_score_fraction(overall)
     overall["confidence"] = _coerce_confidence(overall.get("confidence", 0.5))
     if overall.get("semantic_entropy") is not None:
         overall["semantic_entropy"] = float(overall["semantic_entropy"])
@@ -337,6 +377,26 @@ def validate_grading_output(
         for i, row in enumerate(qg):
             if not isinstance(row, dict):
                 raise GradingOutputValidationError(f"question_grades[{i}] must be a dict")
+            qov = row.get("overall")
+            if isinstance(qov, dict) and "score" in qov:
+                qov["score"] = _coerce_float(qov.get("score"))
+                _normalize_overall_score_fraction(qov)
+                if qov.get("max_points") is not None:
+                    qov["max_points"] = _coerce_float(qov["max_points"])
+                if qov.get("rubric_points_earned") is not None:
+                    qov["rubric_points_earned"] = _coerce_float(
+                        qov["rubric_points_earned"]
+                    )
+                if qov.get("semantic_entropy") is not None:
+                    qov["semantic_entropy"] = float(qov["semantic_entropy"])
+                if qov.get("entropy_max_reference_nats") is not None:
+                    qov["entropy_max_reference_nats"] = float(
+                        qov["entropy_max_reference_nats"]
+                    )
+                if qov.get("normalized_chunk_estimate") is not None:
+                    qov["normalized_chunk_estimate"] = float(
+                        qov["normalized_chunk_estimate"]
+                    )
             for crit in row.get("criteria") or []:
                 if isinstance(crit, dict):
                     crit.setdefault("evidence", "")
@@ -413,7 +473,8 @@ def validate_grading_output(
                     if t2 not in fl:
                         fl.append(t2)
         if crit_top:
-            data["overall"]["score"] = weighted_overall_score(crit_top)
+            data["overall"]["score"] = _rubric_point_fraction(crit_top)
+            _normalize_overall_score_fraction(data["overall"])
             data["overall"]["confidence"] = _coerce_confidence(
                 weighted_overall_confidence(crit_top)
             )

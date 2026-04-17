@@ -118,16 +118,16 @@ def _chunks_from_ollama_qa_segmentation(
     modality = modality_from_hints(hints)
     task = task_type_from_hints(hints)
     out: list[GradingChunk] = []
-    for i, u in enumerate(units):
+    for i, u in enumerate(units, start=1):
         if not isinstance(u, dict):
             continue
-        key = str(u.get("key") or f"q{i + 1}").strip() or f"q{i + 1}"
+        key = str(u.get("key") or f"q{i}").strip() or f"q{i}"
         q = str(u.get("question") or "").strip()
         r = str(u.get("response") or "").strip()
         extracted = "\n\n".join(p for p in (q, r) if p).strip()
         if not extracted:
             continue
-        qid = key.replace(" ", "_")[:120]
+        qid = f"pair_{i}"
         out.append(
             GradingChunk(
                 chunk_id=f"{envelope.student_id}:{envelope.assignment_id}:{qid}",
@@ -142,6 +142,7 @@ def _chunks_from_ollama_qa_segmentation(
                     "question_text": q,
                     "response_text": r,
                     "chunker": "ollama_qa_segment",
+                    "canonical_pair_index": i,
                 },
             )
         )
