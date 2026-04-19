@@ -7,12 +7,43 @@ from __future__ import annotations
 
 from typing import Any
 
-from app.grading.aggregation import weighted_overall_confidence
 from app.grading.consistency_rules import run_rule_checks
 from app.grading.rubric_allowlist import filter_criteria_dicts_to_allowlist
 from app.grading.rubric_credit_calibration import finalize_criterion_display_scores
 
 from .schemas import AssignmentGradeResult, ChunkGradeOutcome
+
+
+def _mean_criterion_score_fractions(rows: list[dict[str, Any]]) -> float:
+    """Mean of ``score / max_points`` over criteria with positive cap (each criterion equal)."""
+    parts: list[float] = []
+    for r in rows:
+        if not isinstance(r, dict):
+            continue
+        try:
+            mp = float(r.get("max_points") or 0)
+            if mp <= 0:
+                continue
+            parts.append(float(r.get("score", 0)) / mp)
+        except (TypeError, ValueError):
+            continue
+    if not parts:
+        return 0.0
+    return max(0.0, min(1.0, sum(parts) / len(parts)))
+
+
+def _mean_criterion_confidence(rows: list[dict[str, Any]]) -> float:
+    vals: list[float] = []
+    for r in rows:
+        if not isinstance(r, dict):
+            continue
+        try:
+            vals.append(float(r.get("confidence", 0.5)))
+        except (TypeError, ValueError):
+            continue
+    if not vals:
+        return 0.5
+    return round(sum(vals) / len(vals), 4)
 
 
 def _rubric_point_fraction(rows: list[dict[str, Any]]) -> float:
@@ -82,11 +113,11 @@ def _merge_criteria_max_by_name(
 
 
 def _refresh_qg_overall_rubric_totals(qg: dict[str, Any]) -> None:
-    """After per-chunk allowlist + blend sync, align ``overall`` with criterion point totals."""
+    """After per-chunk allowlist + blend sync, set ``overall.score`` = mean criterion fractions."""
     crits = [c for c in (qg.get("criteria") or []) if isinstance(c, dict)]
     earned = sum(float(c.get("score", 0)) for c in crits)
     cap = sum(float(c.get("max_points", 0)) for c in crits)
-    frac = _rubric_point_fraction(crits)
+    frac = _mean_criterion_score_fractions(crits)
     o = qg.setdefault("overall", {})
     o["score"] = round(frac, 6)
     o["max_score"] = 1.0
@@ -107,16 +138,16 @@ def _sync_blended_scores_row(row: dict[str, Any]) -> None:
     row["score"] = pts
 
 
-def _apply_rubric_weights_to_criteria(
+def _sync_rubric_caps_on_criteria_rows(
     rows: list[dict[str, Any]], rubric_items: list[dict[str, Any]]
 ) -> None:
+    """Fill missing ``max_points`` / ``min_points`` from the rubric; no weights."""
     by = {r["name"]: r for r in rubric_items}
     for c in rows:
         n = c.get("name")
         if n not in by:
             continue
         r = by[n]
-        c["weight"] = r.get("weight", r["max_points"])
         if c.get("max_points") is None:
             c["max_points"] = r["max_points"]
         if c.get("min_points") is None:
@@ -144,16 +175,7 @@ def _coerce_rubric_items(rubric: list) -> list[dict[str, Any]]:
             lo = float(x.get("min_points", 0.0))
         except (TypeError, ValueError):
             lo = 0.0
-        wt = x.get("weight")
-        if wt is None:
-            wt = mp
-        try:
-            wtf = float(wt)
-        except (TypeError, ValueError):
-            wtf = mp
-        out.append(
-            {"name": name, "max_points": mp, "min_points": lo, "weight": wtf}
-        )
+        out.append({"name": name, "max_points": mp, "min_points": lo})
     return out
 
 
@@ -197,7 +219,7 @@ def _chunk_to_question_grade(
 
     earned = sum(float(r["score"]) for r in criteria_rows)
     cap = sum(float(r["max_points"]) for r in criteria_rows)
-    frac = _rubric_point_fraction(criteria_rows)
+    frac = _mean_criterion_score_fractions(criteria_rows)
 
     evidence_parts: list[str] = []
     if conf_note:
@@ -221,9 +243,6 @@ def _chunk_to_question_grade(
             "entropy_max_reference_nats": round(
                 float(chunk.entropy_max_reference_nats), 6
             ),
-            "normalized_chunk_estimate": round(
-                float(chunk.normalized_score_estimate), 6
-            ),
         },
         "semantic_entropy": float(chunk.semantic_entropy_nats),
         "review_status": chunk.review_status.value,
@@ -242,10 +261,10 @@ def multimodal_assignment_to_grading_dict(
     Build a dict suitable for :func:`~app.grading.output_schema.validate_grading_output`.
 
     Criteria are merged across chunks with **max** score per criterion name (same idea
-    as chunk-entropy assignment merge).  ``overall.confidence`` is the weighted mean of
-    chunk-level semantic-entropy-derived confidence (inverse normalized entropy over
-    grading clusters).  ``overall.mean_chunk_semantic_entropy_nats`` is the mean of raw
-    chunk entropies for diagnostics.
+    as chunk-entropy assignment merge).  Top-level ``overall.score`` is the **mean** of
+    each question’s ``overall.score``, where each question score is the **mean** of
+    ``criterion.score / criterion.max_points`` (equal weight per criterion). Assignment
+    ``criteria_confidence_mean`` is the unweighted mean of merged criterion confidences.
     """
     rubric_items = _coerce_rubric_items(rubric)
     max_by_name = {r["name"]: float(r["max_points"]) for r in rubric_items}
@@ -253,10 +272,12 @@ def multimodal_assignment_to_grading_dict(
     question_grades = [
         _chunk_to_question_grade(c, max_by_name) for c in result.chunk_results
     ]
+    sid = str(getattr(result, "student_id", "") or "")
+    aid = str(getattr(result, "assignment_id", "") or "")
     for i, (qg, ch) in enumerate(
         zip(question_grades, result.chunk_results, strict=True), start=1
     ):
-        qg["chunk_id"] = f"{ch.student_id}:{ch.assignment_id}:pair_{i}"
+        qg["chunk_id"] = f"{sid}:{aid}:pair_{i}"
         qg["_source_chunk_id"] = ch.chunk_id
 
     allowed = frozenset(r["name"] for r in rubric_items)
@@ -275,6 +296,7 @@ def multimodal_assignment_to_grading_dict(
         all_consistency_issues.extend(q_issues)
         for c in qg.get("criteria") or []:
             if isinstance(c, dict):
+                c.pop("weight", None)
                 _sync_blended_scores_row(c)
         _refresh_qg_overall_rubric_totals(qg)
         issues = run_rule_checks(qg.get("criteria") or [])
@@ -283,7 +305,7 @@ def multimodal_assignment_to_grading_dict(
             all_consistency_issues.extend(issues)
 
     merged = _merge_criteria_max_by_name(question_grades)
-    _apply_rubric_weights_to_criteria(merged, rubric_items)
+    _sync_rubric_caps_on_criteria_rows(merged, rubric_items)
     merged, allow_issues = filter_criteria_dicts_to_allowlist(
         merged, allowed, context="assignment_merged"
     )
@@ -295,13 +317,25 @@ def multimodal_assignment_to_grading_dict(
     assignment_issues = run_rule_checks(merged)
     all_consistency_issues.extend(assignment_issues)
 
-    overall_frac = _rubric_point_fraction(merged)
-    overall_score = round(overall_frac, 6)
-    wconf = weighted_overall_confidence(merged)
-    earned_assign = sum(float(r.get("score", 0)) for r in merged if isinstance(r, dict))
     cap_assign = sum(
         float(r.get("max_points", 0)) for r in merged if isinstance(r, dict)
     )
+    per_q_scores: list[float] = []
+    for qg in question_grades:
+        ov = qg.get("overall")
+        if isinstance(ov, dict):
+            try:
+                per_q_scores.append(float(ov.get("score", 0.0)))
+            except (TypeError, ValueError):
+                continue
+    if per_q_scores:
+        overall_score = round(sum(per_q_scores) / len(per_q_scores), 6)
+    else:
+        overall_score = round(_rubric_point_fraction(merged), 6)
+    earned_assign = (
+        round(overall_score * cap_assign, 4) if cap_assign > 0 else 0.0
+    )
+    conf_mean = _mean_criterion_confidence(merged)
 
     entropies = [float(c.semantic_entropy_nats) for c in result.chunk_results]
     avg_h = sum(entropies) / len(entropies) if entropies else 0.0
@@ -344,7 +378,7 @@ def multimodal_assignment_to_grading_dict(
             "summary": summary,
             "semantic_entropy": round(avg_h, 4),
             "mean_chunk_semantic_entropy_nats": round(avg_h, 4),
-            "criteria_confidence_weighted_mean": round(wconf, 4),
+            "criteria_confidence_mean": conf_mean,
         },
         "criteria": crit_out,
         "flags": flags,

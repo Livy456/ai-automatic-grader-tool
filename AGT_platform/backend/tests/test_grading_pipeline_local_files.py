@@ -72,6 +72,7 @@ from app.grading.multimodal import (
 )
 from app.grading.multimodal.ingestion import ingest_raw_submission
 from app.grading.multimodal.schemas import RubricType
+from app.grading.answer_key_resolve import resolve_answer_key_plaintext
 from app.grading.output_schema import validate_grading_output
 from app.grading.pipelines import DEFAULT_STANDALONE_RUBRIC
 from app.grading.rag_embeddings import compute_submission_embedding, save_rag_embedding_bundle
@@ -84,6 +85,7 @@ ASSIGNMENTS_DIR = REPO_ROOT / "assignments_to_grade"
 RUBRIC_DIR = REPO_ROOT / "rubric"
 OUTPUT_DIR = REPO_ROOT / "grading_output"
 RAG_DIR = REPO_ROOT / "RAG_embedding"
+ANSWER_KEY_DIR = REPO_ROOT / "answer_key"
 
 _GENERIC_BASENAMES = ("default", "generic", "rubric")
 
@@ -626,6 +628,9 @@ class TestGradingPipelineLocalFiles(unittest.TestCase):
                     "modality_subtype": str(
                         modality_profile.get("modality_subtype") or ""
                     ),
+                    "answer_key_plaintext": resolve_answer_key_plaintext(
+                        stem, ANSWER_KEY_DIR
+                    )[0],
                 }
                 unit_cap = _multimodal_local_test_max_grading_units()
                 if unit_cap is not None:

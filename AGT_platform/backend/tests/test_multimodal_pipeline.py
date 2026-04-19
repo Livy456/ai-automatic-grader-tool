@@ -15,12 +15,15 @@ a chunking issue.
   2. ``phi3.5:3.8b``
   3. ``deepseek-r1:1.5b``
 
-  Saves per-assignment:
+  For **each** assignment, in order (never “all RAG then all grades”):
 
-  - ``grading_output/<stem>_grade_output.json``
-  - ``RAG_embedding/<stem>_chunks.json``
-  - ``RAG_embedding/<stem>_embedding.json``
-  - ``RAG_embedding/<stem>_parsed_preview.txt``
+  1. Chunk + embedding artifacts → ``RAG_embedding/`` (``*_chunks.json``, ``*_embedding.json``,
+     ``*_parsed_preview.txt``).
+  2. Run multimodal grading, validate, then write ``grading_output/<stem>_grade_output.json``.
+  3. Run stricter assertions; then continue to the next stem.
+
+  Optional **answer_key/** (same stem as assignment: ``<stem>.txt``, ``.md``, or ``.json``)
+  is loaded into ``modality_hints["answer_key_plaintext"]`` for grading prompts.
 """
 
 from __future__ import annotations
@@ -29,6 +32,7 @@ import json
 import logging
 import os
 import re
+import tempfile
 import unittest
 from collections import defaultdict
 from pathlib import Path
@@ -60,6 +64,8 @@ from app.grading.multimodal.model_runner import MockChunkModelRunner
 from app.grading.multimodal.rubric_router import route_rubric
 from app.grading.multimodal.entropy import semantic_entropy_from_cluster_counts
 from app.grading.multimodal.parser import parse_chunk_grade_json
+from app.grading.multimodal.prompts_chunk import build_chunk_grading_prompt
+from app.grading.answer_key_resolve import resolve_answer_key_plaintext
 from app.grading.output_schema import validate_grading_output
 from app.grading.rag_embeddings import (
     compute_submission_embedding,
@@ -76,6 +82,7 @@ ASSIGNMENTS_DIR = REPO_ROOT / "assignments_to_grade"
 RUBRIC_DIR = REPO_ROOT / "rubric"
 OUTPUT_DIR = REPO_ROOT / "grading_output"
 RAG_DIR = REPO_ROOT / "RAG_embedding"
+ANSWER_KEY_DIR = REPO_ROOT / "answer_key"
 
 _SUPPORTED_SUFFIXES = {".ipynb", ".py", ".pdf", ".txt", ".md", ".mp4"}
 _SUFFIX_TO_ARTIFACT_KEY = {
@@ -351,6 +358,30 @@ def _make_sample_json(norm: float, *, confidence_note: str = "") -> str:
     })
 
 
+class AnswerKeyResolveTests(unittest.TestCase):
+    def test_fuzzy_match_student_prefix_vs_answer_key_suffix(self) -> None:
+        with tempfile.TemporaryDirectory() as d:
+            root = Path(d)
+            (root / "Week 1 PSet Part 1 [Answer_Key].txt").write_text(
+                "expected solution body", encoding="utf-8"
+            )
+            text, fn = resolve_answer_key_plaintext(
+                "[Student 1] Week 1 PSet Part 1", root
+            )
+            self.assertEqual(text, "expected solution body")
+            self.assertTrue(fn.endswith(".txt"))
+
+    def test_exact_stem_preferred(self) -> None:
+        with tempfile.TemporaryDirectory() as d:
+            root = Path(d)
+            stem = "My Assignment"
+            (root / f"{stem}.md").write_text("exact", encoding="utf-8")
+            (root / "My Assignment Alt.txt").write_text("other", encoding="utf-8")
+            text, fn = resolve_answer_key_plaintext(stem, root)
+            self.assertEqual(text, "exact")
+            self.assertTrue(fn.endswith(".md"))
+
+
 class MultimodalRoutingTests(unittest.TestCase):
     def test_deterministic_routing_programming(self) -> None:
         ch = GradingChunk(
@@ -404,6 +435,50 @@ class MultimodalPipelineRunTests(unittest.TestCase):
             aux = ch.auxiliary or {}
             self.assertIn("criterion_justifications", aux)
             self.assertIn("confidence_note", aux)
+
+    def test_assignment_overall_score_is_mean_of_question_overall_scores(self) -> None:
+        result, _ = self._run_pipeline()
+        grading_dict = multimodal_assignment_to_grading_dict(
+            result, rubric=_FREE_RESPONSE_RUBRIC
+        )
+        qg = grading_dict.get("question_grades") or []
+        self.assertTrue(qg)
+        scores = [float((x.get("overall") or {}).get("score", 0)) for x in qg]
+        expected = sum(scores) / len(scores)
+        self.assertAlmostEqual(
+            float(grading_dict["overall"]["score"]),
+            expected,
+            places=5,
+        )
+        for x in qg:
+            self.assertNotIn(
+                "normalized_chunk_estimate",
+                x.get("overall") or {},
+            )
+
+    def test_chunk_prompt_includes_reference_answer_key(self) -> None:
+        ch = GradingChunk(
+            chunk_id="s1:a1:pair_1",
+            assignment_id="a1",
+            student_id="s1",
+            question_id="pair_1",
+            modality=Modality.NOTEBOOK,
+            task_type=TaskType.FREE_RESPONSE_SHORT,
+            extracted_text="Student says ethics matter.",
+            rubric_type=RubricType.FREE_RESPONSE,
+            rubric_rows=list(_FREE_RESPONSE_RUBRIC),
+        )
+        raw = build_chunk_grading_prompt(
+            ch,
+            task_description="Week 1 journal",
+            answer_key_text="Sample: cite dataset limitations and fairness.",
+            dataset_context_text="col1,col2\n1,2\n",
+        )
+        data = json.loads(raw)
+        self.assertIn("reference_answer_key", data)
+        self.assertIn("Sample:", data["reference_answer_key"])
+        self.assertIn("matched_dataset_preview", data)
+        self.assertIn("col1", data["matched_dataset_preview"])
 
 
 # ---------------------------------------------------------------------------
@@ -561,14 +636,16 @@ class LocalAssignmentGradingTests(unittest.TestCase):
     Uses ``rubric/default.json`` (per-section rubric) and three local Ollama models:
     llama3.2:3b, phi3.5:3.8b, deepseek-r1:1.5b (no OpenAI).
 
-    For each assignment the test:
+    For each assignment the test runs **sequentially**:
 
-    1. Extracts plaintext from the submission file (PDF / ipynb).
-    2. Builds submission chunks → ``RAG_embedding/<stem>_chunks.json``.
-    3. Computes embedding → ``RAG_embedding/<stem>_embedding.json``.
-    4. Runs the multimodal pipeline with real LLM grading.
-    5. Validates output: unique per-chunk justifications, criteria scores.
-    6. Writes ``grading_output/<stem>_grade_output.json``.
+    1. Extract plaintext; resolve modality.
+    2. **Finish and save** RAG/chunk artifacts under ``RAG_embedding/`` (chunks JSON,
+       embedding JSON, parsed preview).
+    3. **Then** run the multimodal grading pipeline (LLM), build the grading dict,
+       validate, and **write** ``grading_output/<stem>_grade_output.json``.
+       If ``answer_key/<stem>.{txt,md,json}`` exists, its text is passed as
+       ``answer_key_plaintext`` for grading.
+    4. Assert rubric alignment, justifications, etc., before moving to the next stem.
     """
 
     @classmethod
@@ -640,7 +717,11 @@ class LocalAssignmentGradingTests(unittest.TestCase):
 
         for stem, paths in sorted(self.groups.items()):
             with self.subTest(assignment=stem):
-                _log.warning("--- Grading %r (%d file(s)) ---", stem, len(paths))
+                _log.warning(
+                    "--- %r (%d file(s)): save RAG → grade → save output ---",
+                    stem,
+                    len(paths),
+                )
 
                 # -- 1. Artifacts & plaintext --
                 artifacts = _build_artifacts(paths)
@@ -653,23 +734,22 @@ class LocalAssignmentGradingTests(unittest.TestCase):
                 )
                 modality_profile = resolve_modality_profile(assignment_ns, artifacts, plain)
 
-                # -- 2. Chunks → RAG_embedding/ --
+                # -- 2. Chunking + RAG embedding: complete and persist before grading --
                 chunks = build_submission_chunks(
                     plain, assignment_title=stem,
                     modality_subtype=str(modality_profile.get("modality_subtype") or ""),
                     max_chunk_chars=None,
                 )
                 self.assertGreater(len(chunks), 0, f"No chunks for {stem!r}")
+                chunks_path = RAG_DIR / f"{stem}_chunks.json"
                 write_chunks_json(
-                    RAG_DIR / f"{stem}_chunks.json",
+                    chunks_path,
                     chunks=chunks, assignment_title=stem,
                     source_file=",".join(p.name for p in paths),
                     profile=modality_profile,
                 )
-
-                # -- 3. Embedding → RAG_embedding/ --
                 vec, vec_src = compute_submission_embedding(plain, self.cfg)
-                save_rag_embedding_bundle(
+                emb_path = save_rag_embedding_bundle(
                     RAG_DIR, assignment_stem=stem,
                     artifacts_keys=sorted(artifacts.keys()),
                     plaintext_chars=len(plain), embedding=vec,
@@ -677,12 +757,34 @@ class LocalAssignmentGradingTests(unittest.TestCase):
                     parsed_preview=plain[:8000],
                     extra={"paths": [p.name for p in paths]},
                 )
+                preview_path = RAG_DIR / f"{stem}_parsed_preview.txt"
+                self.assertTrue(chunks_path.is_file(), f"Missing {chunks_path}")
+                self.assertTrue(emb_path.is_file(), f"Missing {emb_path}")
+                self.assertTrue(preview_path.is_file(), f"Missing {preview_path}")
+                _log.warning(
+                    "  [%s] RAG + chunking saved (%s, %s, %s); starting grading",
+                    stem,
+                    chunks_path.name,
+                    emb_path.name,
+                    preview_path.name,
+                )
 
-                # -- 4. Pipeline with real LLM calls --
+                # -- 3. Multimodal grading pipeline (LLM) --
                 task_desc = f"Local fixture: {stem}"
                 llm_grading_instr = self.rubric_raw.get("llm_grading_instructions")
                 if isinstance(llm_grading_instr, str) and llm_grading_instr.strip():
                     task_desc += "\n\n" + llm_grading_instr.strip()
+
+                answer_key_text, answer_key_match = resolve_answer_key_plaintext(
+                    stem, ANSWER_KEY_DIR
+                )
+                if answer_key_text:
+                    _log.warning(
+                        "  [%s] Loaded answer key (%d chars) matched=%r",
+                        stem,
+                        len(answer_key_text),
+                        answer_key_match,
+                    )
 
                 pipeline = create_multimodal_pipeline_from_app_config(
                     self.cfg,
@@ -696,12 +798,14 @@ class LocalAssignmentGradingTests(unittest.TestCase):
                     modality_hints={
                         "modality_subtype": str(modality_profile.get("modality_subtype") or ""),
                         "max_grading_units": 8,
+                        "answer_key_plaintext": answer_key_text,
+                        "answer_key_matched_file": answer_key_match,
                     },
                 )
                 result = pipeline.run(envelope)
                 self.assertTrue(result.chunk_results, f"No chunk results for {stem!r}")
 
-                # -- 5. Grading dict → validate --
+                # -- 4. Build grading JSON, validate, persist to grading_output/ --
                 grading_dict = multimodal_assignment_to_grading_dict(
                     result, rubric=self.rubric_flat,
                     modality_profile=modality_profile,
@@ -714,6 +818,15 @@ class LocalAssignmentGradingTests(unittest.TestCase):
                 validated = validate_grading_output(
                     grading_dict, allowed_criterion_names=flat_allowed
                 )
+                out_path = OUTPUT_DIR / f"{stem}_grade_output.json"
+                out_path.write_text(
+                    json.dumps(grading_dict, indent=2, ensure_ascii=False, default=str),
+                    encoding="utf-8",
+                )
+                self.assertTrue(out_path.is_file(), f"Missing {out_path}")
+                _log.warning("  [%s] Grading output saved: %s", stem, out_path.name)
+
+                # -- 5. Assertions (after RAG + grade artifacts are on disk) --
                 self.assertIn("score", validated["overall"])
                 self.assertEqual(validated["overall"].get("max_score"), 1.0)
                 self.assertIn("question_grades", validated)
@@ -743,13 +856,6 @@ class LocalAssignmentGradingTests(unittest.TestCase):
                                 c["name"], flat_allowed,
                                 f"[{stem}] chunk criteria must be rubric-backed: {c!r}",
                             )
-
-                # -- 5b. Always write output before assertions --
-                out_path = OUTPUT_DIR / f"{stem}_grade_output.json"
-                out_path.write_text(
-                    json.dumps(grading_dict, indent=2, ensure_ascii=False, default=str),
-                    encoding="utf-8",
-                )
 
                 # Check justifications + evidence are present and content-specific
                 chunk_summaries: list[str] = []

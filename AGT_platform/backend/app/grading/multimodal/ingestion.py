@@ -21,6 +21,7 @@ class IngestionEnvelope:
     """e.g. ipynb_bytes, pdf_bytes, mp4_ref, transcripts, rubric_bundle refs"""
     extracted_plaintext: str = ""
     modality_hints: dict[str, Any] = field(default_factory=dict)
+    """May include ``answer_key_plaintext`` (str): sample solution text passed to chunk graders."""
 
 
 def ingest_raw_submission(

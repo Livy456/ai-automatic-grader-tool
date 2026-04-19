@@ -57,6 +57,13 @@ MODALITY GUIDANCE:
 - **Oral/interview:** transcript/summary only — do not invent delivery traits.
 
 Ignore other questions; grade **only** this chunk.
+
+REFERENCE ANSWER / ANSWER KEY (when provided in the user payload as ``reference_answer_key``):
+- Use it to **calibrate** expectations for **conceptual correctness**, **depth**, and **evidence quality** — not as a template for verbatim matching.
+- The **student's response does not need to match** the reference wording, structure, length, or examples. Different valid approaches, notation, or ordering should receive **fair credit** when they satisfy the rubric.
+- Prefer the rubric + **quoted student evidence** as the primary basis for scores; use the reference to resolve ambiguity about what “adequate” or “complete” looks like for this assignment.
+- If the reference covers content not present in this chunk, **ignore** that part for this chunk. If the chunk has no reference section, grade from the rubric and student text alone.
+
 Return **only** one JSON object (no markdown fences, no prose outside JSON)."""
 
 
@@ -80,7 +87,7 @@ OUTPUT_SCHEMA_HINT = {
     "confidence_note": "string — brief note if uncertain",
     "review_flag": "boolean — true only if evidence is genuinely ambiguous",
     "note": (
-        "Server adds calibrated_credit and weighted question score. "
+        "Server adds calibrated_credit and mean calibrated question score. "
         "If raw_score is not on 0,0.5,…,R, server ceils to the next half-step capped at R."
     ),
 }
@@ -90,8 +97,10 @@ def build_chunk_grading_prompt(
     chunk: GradingChunk,
     *,
     task_description: str = "",
+    answer_key_text: str = "",
+    dataset_context_text: str = "",
 ) -> str:
-    """Construct user message: task + rubric + chunk + strict instructions."""
+    """Construct user message: task + optional answer key + rubric + chunk + strict instructions."""
     rubric = {
         "rubric_type": chunk.rubric_type.value if chunk.rubric_type else None,
         "rows": chunk.rubric_rows,
@@ -100,25 +109,49 @@ def build_chunk_grading_prompt(
     chunk_dict["evidence"] = sanitize_evidence_for_grading_prompt(
         chunk_dict.get("evidence") or {}
     )
-    payload = {
-        "instructions": (
-            "Grade this single chunk. Output one JSON object.\n"
-            "Keys: rubric_type, criterion_scores, criterion_justifications, confidence_note, "
-            "review_flag; optional total_score, normalized_score (server may override).\n"
-            "Rubric fidelity: criterion_scores MUST list only rubric.rows names, exact spelling.\n"
-            "Each criterion row MUST include: evidence, reasoning, raw_score (or score), "
-            "name, max_points, justification.\n"
-            "RAW SCORES — critical: use **only** the ladder 0, 0.5, 1, 1.5, …, max_points for "
-            "each row. No other values. If you output an invalid decimal, the server will "
-            "round **up** to the next valid half-step (capped at max_points); you should "
-            "still emit a correct value yourself. Grade fairly: reward quoted partial work; "
-            "do not default to the lowest band when evidence fits a mid level.\n"
-            "Evidence: use a verbatim substring from the student's answer in this chunk (quote), "
-            "not a grader paraphrase."
-        ),
+    ak = (answer_key_text or "").strip()
+    ds = (dataset_context_text or "").strip()
+    instr_parts = [
+        "Grade this single chunk. Output one JSON object.\n",
+        "Keys: rubric_type, criterion_scores, criterion_justifications, confidence_note, ",
+        "review_flag; optional total_score, normalized_score (server may override).\n",
+        "Rubric fidelity: criterion_scores MUST list only rubric.rows names, exact spelling.\n",
+        "Each criterion row MUST include: evidence, reasoning, raw_score (or score), ",
+        "name, max_points, justification.\n",
+        "RAW SCORES — critical: use **only** the ladder 0, 0.5, 1, 1.5, …, max_points for ",
+        "each row. No other values. If you output an invalid decimal, the server will ",
+        "round **up** to the next valid half-step (capped at max_points); you should ",
+        "still emit a correct value yourself. Grade fairly: reward quoted partial work; ",
+        "do not default to the lowest band when evidence fits a mid level.\n",
+        "Evidence: use a verbatim substring from the student's answer in this chunk (quote), ",
+        "not a grader paraphrase.",
+    ]
+    if ak:
+        instr_parts.append(
+            "\nA reference answer key is provided under reference_answer_key. "
+            "Use it to judge correctness and depth as described in the system prompt; "
+            "the student need not match it exactly."
+        )
+    if ds:
+        instr_parts.append(
+            "\nA matched dataset preview is provided under matched_dataset_preview. "
+            "Use it only as factual context for interpreting the student’s outputs; "
+            "it is not part of the student’s submission."
+        )
+    payload: dict[str, Any] = {
+        "instructions": "".join(instr_parts),
         "task_description": task_description or "(see assignment brief in LMS)",
         "chunk": chunk_dict,
         "rubric": rubric,
         "output_schema_hint": OUTPUT_SCHEMA_HINT,
     }
+    max_chars = 24_000
+    if ak:
+        payload["reference_answer_key"] = ak[:max_chars] if len(ak) > max_chars else ak
+        if len(ak) > max_chars:
+            payload["reference_answer_key_truncated"] = True
+    if ds:
+        payload["matched_dataset_preview"] = ds[:max_chars] if len(ds) > max_chars else ds
+        if len(ds) > max_chars:
+            payload["matched_dataset_preview_truncated"] = True
     return json.dumps(payload, ensure_ascii=True, indent=2)

@@ -13,6 +13,9 @@ from typing import Any, Callable
 
 from .aggregator import aggregate_assignment, aggregate_chunk_samples
 from .rag_embeddings import build_multimodal_grading_chunks, enrich_chunks_with_rag_embeddings
+from app.config import Config
+from app.grading.dataset_resolve import attach_dataset_context_for_notebook
+
 from .ingestion import IngestionEnvelope, ingest_raw_submission
 from .model_runner import ChunkModelRunner, MultiModelChunkRunner
 from .parser import parse_chunk_grade_json
@@ -20,7 +23,6 @@ from .prompts_chunk import SYSTEM_CHUNK_GRADER, build_chunk_grading_prompt
 from .review_router import evaluate_chunk_review
 from .rubric_router import route_rubric
 from .semantic_confidence import (
-    chunk_question_point_weight,
     cluster_assignment,
     summarize_chunk_confidence_from_counts,
 )
@@ -76,12 +78,28 @@ class MultimodalGradingPipeline:
         artifacts: PipelineArtifactStore | None = None,
     ) -> AssignmentGradeResult:
         art = artifacts or PipelineArtifactStore()
-        art.append("ingestion", {"envelope": envelope.artifacts.keys()})
+        answer_key_plain = str(
+            envelope.modality_hints.get("answer_key_plaintext") or ""
+        ).strip()
+        dataset_plain = str(
+            envelope.modality_hints.get("dataset_context_plaintext") or ""
+        ).strip()
+        ingest_meta: dict[str, Any] = {
+            "envelope": envelope.artifacts.keys(),
+            "answer_key_chars": len(answer_key_plain),
+        }
+        ak_match = str(envelope.modality_hints.get("answer_key_matched_file") or "").strip()
+        if ak_match:
+            ingest_meta["answer_key_matched_file"] = ak_match
+        art.append("ingestion", ingest_meta)
 
         app_cfg = self._resolve_app_config()
         chunks, chunker_mode = build_multimodal_grading_chunks(envelope, app_cfg)
         if app_cfg is not None:
             enrich_chunks_with_rag_embeddings(chunks, app_cfg)
+        embed_cfg = app_cfg if app_cfg is not None else Config()
+        if envelope.artifacts.get("ipynb"):
+            attach_dataset_context_for_notebook(envelope, embed_cfg, art)
         art.append(
             "chunking",
             {
@@ -109,7 +127,12 @@ class MultimodalGradingPipeline:
                 },
             )
 
-            user_prompt = build_chunk_grading_prompt(chunk, task_description=self.task_description)
+            user_prompt = build_chunk_grading_prompt(
+                chunk,
+                task_description=self.task_description,
+                answer_key_text=answer_key_plain,
+                dataset_context_text=dataset_plain,
+            )
             raw_samples = self.runner.run_chunk_samples(
                 chunk,
                 system_prompt=SYSTEM_CHUNK_GRADER,
@@ -159,13 +182,11 @@ class MultimodalGradingPipeline:
                 )
 
             co = summarize_chunk_confidence_from_counts(dict(cluster_counts))
-            qp_w = chunk_question_point_weight(chunk.rubric_rows)
             outcome = aggregate_chunk_samples(
                 chunk.chunk_id,
                 parsed_samples,
                 cluster_counts=dict(cluster_counts),
                 cfg=self.config,
-                question_point_weight=qp_w,
             )
             sample_details = [
                 {
@@ -192,7 +213,6 @@ class MultimodalGradingPipeline:
                     "ai_confidence": co["ai_confidence"],
                     "n_observed_clusters": co["n_observed_clusters"],
                     "n_valid_samples": co["n_valid_samples"],
-                    "question_point_weight": qp_w,
                     "samples": sample_details,
                 },
             }

@@ -16,7 +16,7 @@ from app.grading.rubric_allowlist import (
 from app.grading.rubric_credit_calibration import (
     anchor_map_monotone_increasing,
     ceiling_half_point_on_grid,
-    compute_weighted_question_score,
+    compute_mean_calibrated_question_score,
     format_anchor_map_for_log,
     get_anchor_map_for_criterion,
     map_raw_score_to_calibrated_credit,
@@ -107,7 +107,7 @@ def _align_parsed_to_rubric_rows(
                 name=nm,
                 score=sc,
                 max_points=mx,
-                weight=best_cs.weight,
+                weight=1.0,
                 calibrated_credit=0.0,
             )
         )
@@ -162,7 +162,7 @@ def _finalize_rubric_calibration(
     invalid_raw_score_policy: str = "regenerate",
 ) -> tuple[ParsedChunkGrade | None, list[str]]:
     """
-    Validate half-step raw scores, map to calibrated credits, set weighted question score.
+    Validate half-step raw scores, map to calibrated credits, set question score (mean credit).
 
     On ``regenerate`` policy, any invalid raw score fails the whole parse (returns None).
     """
@@ -173,15 +173,6 @@ def _finalize_rubric_calibration(
             f"calibration_rubric_row_count_mismatch:{len(ordered_rr)}"
             f"!={len(parsed.criterion_scores)}"
         )
-    w_sum_all = 0.0
-    for x in ordered_rr:
-        try:
-            w_sum_all += float(x.get("weight") or x.get("max_points") or 1.0)
-        except (TypeError, ValueError):
-            w_sum_all += 1.0
-    if w_sum_all <= 0:
-        w_sum_all = float(len(parsed.criterion_scores) or 1)
-
     by_name: dict[str, dict[str, Any]] = {}
     for r in rubric_rows:
         if not isinstance(r, dict):
@@ -225,34 +216,26 @@ def _finalize_rubric_calibration(
         if not anchor_map_monotone_increasing(anchor):
             extra.append(f"anchor_map_non_monotone:{cs.name!r}")
         g = map_raw_score_to_calibrated_credit(raw, anchor)
-        try:
-            w = float(rr.get("weight") or rr.get("max_points") or cs.weight or 1.0)
-        except (TypeError, ValueError):
-            w = float(cs.weight or 1.0)
         rebuilt.append(
             CriterionScore(
                 name=cs.name,
                 score=raw,
                 max_points=float(R or cs.max_points or 0),
-                weight=w,
+                weight=1.0,
                 calibrated_credit=float(g),
             )
         )
-        pct_contrib = (w * g / w_sum_all * 100.0) if w_sum_all > 0 else 0.0
         _log.info(
-            "rubric_calibration name=%s R=%.3f raw=%.2f credit=%.4f weight=%.3f "
-            "pct_contrib=%.4f anchor=%s",
+            "rubric_calibration name=%s R=%.3f raw=%.2f credit=%.4f anchor=%s",
             cs.name,
             R,
             raw,
             g,
-            w,
-            pct_contrib,
             format_anchor_map_for_log(anchor),
         )
 
-    sq_100, audit = compute_weighted_question_score(
-        [(c.weight, c.calibrated_credit) for c in rebuilt],
+    sq_100, audit = compute_mean_calibrated_question_score(
+        [c.calibrated_credit for c in rebuilt],
         scale_to_100=True,
     )
     raw_sum = sum(c.score for c in rebuilt)
@@ -362,16 +345,12 @@ def parse_chunk_grade_json(
         except (TypeError, ValueError):
             warnings.append(f"criterion_{i}_non_numeric")
             score, mx = 0.0, 0.0
-        try:
-            w = float(row.get("weight", 1.0))
-        except (TypeError, ValueError):
-            w = 1.0
         c_scores.append(
             CriterionScore(
                 name=name,
                 score=score,
                 max_points=mx,
-                weight=w,
+                weight=1.0,
                 calibrated_credit=0.0,
             )
         )

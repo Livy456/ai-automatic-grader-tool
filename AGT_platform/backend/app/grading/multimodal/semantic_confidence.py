@@ -119,59 +119,20 @@ def summarize_chunk_confidence_from_counts(
 
 def aggregate_assignment_confidence(
     chunk_results: list[Any],
-    *,
-    weights: dict[str, float] | None = None,
 ) -> tuple[float, dict[str, Any]]:
-    """
-    Weighted mean of chunk ``ai_confidence`` values.
-
-    For each chunk, uses ``weights[chunk_id]`` when that key is present; otherwise
-    ``auxiliary["question_point_weight"]`` (fallback ``1.0``). Does **not** use
-    assignment score.
-    """
-    wmap = dict(weights or {})
-    num = 0.0
-    den = 0.0
+    """Arithmetic mean of chunk ``ai_confidence`` values."""
+    if not chunk_results:
+        return 0.0, {"assignment_ai_confidence": 0.0, "per_chunk": []}
     per_chunk: list[dict[str, Any]] = []
-    explicit_any = bool(wmap)
+    total = 0.0
     for c in chunk_results:
         cid = str(getattr(c, "chunk_id", "") or "")
-        if cid in wmap:
-            w = float(wmap[cid])
-        else:
-            aux = getattr(c, "auxiliary", None) or {}
-            w = float(aux.get("question_point_weight", 1.0) or 1.0)
         conf = float(getattr(c, "ai_confidence", 0.0))
-        num += w * conf
-        den += w
-        per_chunk.append(
-            {
-                "chunk_id": cid,
-                "weight": w,
-                "ai_confidence": conf,
-                "weight_from_explicit_map": cid in wmap,
-            }
-        )
-    agg = (num / den) if den > 0 else 0.0
+        total += conf
+        per_chunk.append({"chunk_id": cid, "ai_confidence": conf})
+    agg = total / len(chunk_results)
     trace = {
         "assignment_ai_confidence": float(agg),
         "per_chunk": per_chunk,
-        "weighting": "mixed_explicit_and_question_points"
-        if explicit_any
-        else "question_point_weight_or_uniform",
     }
     return float(agg), trace
-
-
-def chunk_question_point_weight(rubric_rows: list[dict[str, Any]]) -> float:
-    """Sum of rubric ``max_points`` (or ``max_score``) for the chunk; at least ``1.0``."""
-    total = 0.0
-    for r in rubric_rows:
-        mp = r.get("max_points")
-        if mp is None:
-            mp = r.get("max_score")
-        try:
-            total += float(mp or 0.0)
-        except (TypeError, ValueError):
-            continue
-    return float(total) if total > 0 else 1.0

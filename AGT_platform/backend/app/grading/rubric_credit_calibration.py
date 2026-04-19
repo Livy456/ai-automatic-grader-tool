@@ -318,6 +318,21 @@ def compute_weighted_question_score(
     return (float(s), audit)
 
 
+def compute_mean_calibrated_question_score(
+    calibrated_credits: list[float],
+    *,
+    scale_to_100: bool = True,
+) -> tuple[float, list[dict[str, float]]]:
+    """Unweighted mean of calibrated credits in ``[0, 1]``, optionally scaled to 0–100."""
+    if not calibrated_credits:
+        return 0.0, []
+    g_vals = [max(0.0, min(1.0, float(g))) for g in calibrated_credits]
+    m = sum(g_vals) / len(g_vals)
+    s = m * 100.0 if scale_to_100 else m
+    audit = [{"calibrated_credit": g} for g in g_vals]
+    return float(s), audit
+
+
 def anchor_map_monotone_increasing(anchor_map: dict[float, float], *, eps: float = 1e-6) -> bool:
     keys = sorted(anchor_map.keys())
     last = -1.0

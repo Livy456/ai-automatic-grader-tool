@@ -174,7 +174,6 @@ class AssignmentGradeResult:
     assignment_normalized_score: float
     assignment_ai_confidence: float
     chunk_results: list[ChunkGradeOutcome]
-    chunk_weights: dict[str, float] = field(default_factory=dict)
     review_status: ReviewStatus = ReviewStatus.AUTO_ACCEPTED
     review_reasons: list[str] = field(default_factory=list)
     stage_artifacts: dict[str, Any] = field(default_factory=dict)

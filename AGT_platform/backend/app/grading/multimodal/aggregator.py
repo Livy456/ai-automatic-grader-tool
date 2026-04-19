@@ -149,7 +149,6 @@ def aggregate_chunk_samples(
     *,
     cluster_counts: dict[str, int],
     cfg: MultimodalGradingConfig,
-    question_point_weight: float = 1.0,
 ) -> ChunkGradeOutcome:
     valid_norms = [
         s.parsed.normalized_score
@@ -209,7 +208,6 @@ def aggregate_chunk_samples(
         "criterion_disagreement_max": criterion_disagreement_max(crit_maps),
         "parse_fail_rate": parse_fail_rate,
         "review_flag_rate": review_flag_rate,
-        "question_point_weight": float(question_point_weight),
         "criterion_justifications": justifications,
         "criterion_evidence": evidence,
         "criterion_reasoning": reasoning,
@@ -238,10 +236,7 @@ def aggregate_assignment(
     assignment_id: str,
     student_id: str,
     chunks: list[ChunkGradeOutcome],
-    *,
-    weights: dict[str, float] | None = None,
 ) -> AssignmentGradeResult:
-    wmap = dict(weights or {})
     if not chunks:
         return AssignmentGradeResult(
             assignment_id=assignment_id,
@@ -253,23 +248,10 @@ def aggregate_assignment(
             review_reasons=["no_chunks"],
         )
 
-    def _chunk_weight(c: ChunkGradeOutcome) -> float:
-        if c.chunk_id in wmap:
-            return float(wmap[c.chunk_id])
-        aux = c.auxiliary or {}
-        return float(aux.get("question_point_weight", 1.0) or 1.0)
+    acc = sum(float(c.normalized_score_estimate) for c in chunks)
+    assign_score = acc / len(chunks) if chunks else 0.0
 
-    total_w = 0.0
-    acc = 0.0
-    resolved_weights: dict[str, float] = {}
-    for c in chunks:
-        w = _chunk_weight(c)
-        resolved_weights[c.chunk_id] = w
-        total_w += w
-        acc += w * c.normalized_score_estimate
-    assign_score = acc / total_w if total_w else 0.0
-
-    assign_conf, conf_trace = aggregate_assignment_confidence(chunks, weights=wmap)
+    assign_conf, conf_trace = aggregate_assignment_confidence(chunks)
 
     reasons: list[str] = []
     statuses = [c.review_status for c in chunks]
@@ -285,10 +267,7 @@ def aggregate_assignment(
     else:
         assign_status = ReviewStatus.AUTO_ACCEPTED
 
-    stage = {
-        "assignment_confidence_trace": conf_trace,
-        "chunk_weights_resolved": resolved_weights,
-    }
+    stage = {"assignment_confidence_trace": conf_trace}
 
     return AssignmentGradeResult(
         assignment_id=assignment_id,
@@ -296,7 +275,6 @@ def aggregate_assignment(
         assignment_normalized_score=assign_score,
         assignment_ai_confidence=assign_conf,
         chunk_results=chunks,
-        chunk_weights=resolved_weights,
         review_status=assign_status,
         review_reasons=reasons,
         stage_artifacts=stage,

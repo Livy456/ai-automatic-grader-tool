@@ -57,6 +57,37 @@ def _rubric_point_fraction(rows: list[dict[str, Any]]) -> float:
     return max(0.0, min(1.0, earned / cap))
 
 
+def _mean_criterion_fraction_from_crits(crits: list[dict[str, Any]]) -> float:
+    parts: list[float] = []
+    for c in crits:
+        if not isinstance(c, dict):
+            continue
+        try:
+            mp = float(c.get("max_points") or 0)
+            if mp <= 0:
+                continue
+            parts.append(float(c.get("score", 0)) / mp)
+        except (TypeError, ValueError):
+            continue
+    if not parts:
+        return 0.0
+    return max(0.0, min(1.0, sum(parts) / len(parts)))
+
+
+def _mean_criterion_confidence_from_rows(rows: list[dict[str, Any]]) -> float:
+    vals: list[float] = []
+    for r in rows:
+        if not isinstance(r, dict):
+            continue
+        try:
+            vals.append(float(r.get("confidence", 0.5)))
+        except (TypeError, ValueError):
+            continue
+    if not vals:
+        return 0.5
+    return float(sum(vals) / len(vals))
+
+
 def _normalize_overall_score_fraction(overall: dict[str, Any]) -> None:
     """Mutates ``overall``: ``score`` is a fraction in ``[0, 1]``; ``max_score`` is ``1``."""
     sc = _coerce_float(overall.get("score"))
@@ -64,6 +95,31 @@ def _normalize_overall_score_fraction(overall: dict[str, Any]) -> None:
         sc /= 100.0
     overall["score"] = max(0.0, min(1.0, sc))
     overall["max_score"] = 1.0
+
+
+def _sync_question_grade_overall_from_criteria(qg_row: dict[str, Any]) -> None:
+    """After criteria are filtered, recompute ``overall.score`` from remaining rows."""
+    crits = [c for c in (qg_row.get("criteria") or []) if isinstance(c, dict)]
+    if not crits:
+        return
+    earned = 0.0
+    cap = 0.0
+    for c in crits:
+        try:
+            earned += float(c.get("score", 0))
+            mp = c.get("max_points")
+            if mp is not None:
+                cap += float(mp)
+        except (TypeError, ValueError):
+            continue
+    frac = _mean_criterion_fraction_from_crits(crits)
+    ov = qg_row.setdefault("overall", {})
+    ov["score"] = round(frac, 6)
+    ov["max_score"] = 1.0
+    if cap > 0:
+        ov["max_points"] = round(cap, 4)
+        ov["rubric_points_earned"] = round(earned, 4)
+    _normalize_overall_score_fraction(ov)
 
 
 def _criteria_rows_for_overall_synthesis(criteria: Any) -> list[dict[str, Any]]:
@@ -277,10 +333,12 @@ def validate_grading_output(
     When ``allowed_criterion_names`` is set (canonical LMS rubric names for this
     assignment), criteria rows are **filtered** to that set and remapped to canonical
     spelling; unknown names are removed and ``flags`` gain ``rubric_allowlist:*`` entries.
-    ``overall.score`` is a **fraction in ``[0, 1]``** (earned rubric points over total cap);
-    legacy producers may send a **percent in ``[0, 100]``**, which is divided by ``100``.
-    ``overall.max_score`` is always ``1``. When allowlist filtering runs, ``overall.score``
-    is recomputed from the filtered assignment-level criteria.
+    ``overall.score`` is a **fraction in ``[0, 1]``**; legacy **percent in ``[0, 100]``**
+    is divided by ``100``. ``overall.max_score`` is always ``1``. When allowlist filtering
+    runs and ``question_grades`` are present, ``overall.score`` is the **mean** of each
+    question’s ``overall.score`` (each of those is the mean of ``score/max_points`` per
+    criterion). Otherwise it uses the mean criterion fraction on filtered top-level
+    ``criteria``.
 
     Returns the same ``data`` dict after light normalization (e.g. ``criterion`` → ``name``).
     """
@@ -304,6 +362,14 @@ def validate_grading_output(
     if overall.get("classical_confidence") is not None:
         overall["classical_confidence"] = _coerce_confidence(
             overall["classical_confidence"]
+        )
+    if "criteria_confidence_weighted_mean" in overall:
+        overall["criteria_confidence_mean"] = _coerce_float(
+            overall.pop("criteria_confidence_weighted_mean"), 0.5
+        )
+    elif overall.get("criteria_confidence_mean") is not None:
+        overall["criteria_confidence_mean"] = _coerce_float(
+            overall["criteria_confidence_mean"], 0.5
         )
     data["overall"] = overall
 
@@ -354,6 +420,7 @@ def validate_grading_output(
             c["calibrated_credit"] = _coerce_float(c["calibrated_credit"])
         if c.get("raw_rubric_score") is not None:
             c["raw_rubric_score"] = _coerce_float(c["raw_rubric_score"])
+        c.pop("weight", None)
 
         criteria_out.append(c)
     data["criteria"] = criteria_out
@@ -393,12 +460,9 @@ def validate_grading_output(
                     qov["entropy_max_reference_nats"] = float(
                         qov["entropy_max_reference_nats"]
                     )
-                if qov.get("normalized_chunk_estimate") is not None:
-                    qov["normalized_chunk_estimate"] = float(
-                        qov["normalized_chunk_estimate"]
-                    )
             for crit in row.get("criteria") or []:
                 if isinstance(crit, dict):
+                    crit.pop("weight", None)
                     crit.setdefault("evidence", "")
                     crit.setdefault("reasoning", "")
                     crit.setdefault("justification", "")
@@ -468,15 +532,42 @@ def validate_grading_output(
                     context=cid,
                 )
                 row["criteria"] = qf
+                _sync_question_grade_overall_from_criteria(row)
                 for msg in al_q[:40]:
                     t2 = f"rubric_allowlist:{msg}"
                     if t2 not in fl:
                         fl.append(t2)
         if crit_top:
-            data["overall"]["score"] = _rubric_point_fraction(crit_top)
+            qg_scores: list[float] = []
+            if isinstance(data.get("question_grades"), list):
+                for row in data["question_grades"]:
+                    if not isinstance(row, dict):
+                        continue
+                    qov = row.get("overall")
+                    if isinstance(qov, dict) and "score" in qov:
+                        try:
+                            qg_scores.append(float(qov["score"]))
+                        except (TypeError, ValueError):
+                            continue
+            if qg_scores:
+                data["overall"]["score"] = round(
+                    sum(qg_scores) / len(qg_scores), 6
+                )
+            else:
+                data["overall"]["score"] = _mean_criterion_fraction_from_crits(crit_top)
             _normalize_overall_score_fraction(data["overall"])
+            cap_top = sum(
+                float(r.get("max_points", 0))
+                for r in crit_top
+                if isinstance(r, dict)
+            )
+            if cap_top > 0:
+                data["overall"]["max_points"] = round(cap_top, 4)
+                data["overall"]["rubric_points_earned"] = round(
+                    float(data["overall"]["score"]) * cap_top, 4
+                )
             data["overall"]["confidence"] = _coerce_confidence(
-                weighted_overall_confidence(crit_top)
+                _mean_criterion_confidence_from_rows(crit_top)
             )
 
     return data

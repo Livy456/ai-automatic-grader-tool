@@ -39,15 +39,14 @@ class DistributionTests(unittest.TestCase):
 
 
 class AggregateAssignmentConfidenceTests(unittest.TestCase):
-    def test_equal_weights_when_no_explicit_map(self) -> None:
+    def test_mean_of_chunk_ai_confidence(self) -> None:
         class _C:
-            def __init__(self, cid: str, conf: float, qw: float) -> None:
+            def __init__(self, cid: str, conf: float) -> None:
                 self.chunk_id = cid
                 self.ai_confidence = conf
-                self.auxiliary = {"question_point_weight": qw}
 
-        chunks = [_C("a", 1.0, 2.0), _C("b", 0.0, 2.0)]
-        agg, trace = aggregate_assignment_confidence(chunks, weights={})
+        chunks = [_C("a", 1.0), _C("b", 0.0)]
+        agg, trace = aggregate_assignment_confidence(chunks)
         self.assertAlmostEqual(agg, 0.5, places=6)
         self.assertEqual(len(trace["per_chunk"]), 2)
 
