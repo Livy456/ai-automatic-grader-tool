@@ -93,6 +93,7 @@ env.production.gpu
 **/multi-modal_assignments_to_grade/*
 **/multi-modal_RAG_embeding/*
 **/answer_key/*
+**/grading_output copy/*
 
 # Cursor implementation prompt (local only)
 /multi_llm_semantic_entropy.md

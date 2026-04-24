@@ -7,9 +7,13 @@ per-chunk grading, not notebook or RAG chunking.
 Chunking is recorded under ``pipeline_audit`` → ``chunking``; failures there would indicate
 a chunking issue.
 
-- **Unit tests** (routing, entropy, mock pipeline): fast, no LLM required.
-- **Integration test** (``LocalAssignmentGradingTests``): grades every file in
-  ``assignments_to_grade/`` using the real rubric from ``rubric/default.json``.
+- **Unit tests** (routing, entropy, etc.): fast where marked; no live LLM.
+- **Mock pipeline** (``MultimodalPipelineRunTests``): uses ``MockChunkModelRunner`` and
+  synthetic plaintext — **not** ``assignments_to_grade/``. Set
+  ``SKIP_MOCK_MULTIMODAL_PIPELINE_TESTS=1`` to skip this class when running the whole module.
+- **Integration — real grading** (``LocalAssignmentGradingTests``): grades **every**
+  assignment under ``assignments_to_grade/`` (grouped by stem) using the real rubric from
+  ``rubric/default.json`` and ``create_multimodal_pipeline_from_app_config`` (no mock runner).
   By default the **chat / structure LLM** is **OpenAI** (``gpt-5.4-nano``) when
   ``OPENAI_API_KEY`` is set in the environment; otherwise **Hugging Face** Maverick
   (``Llama-4-Maverick-17B-128E-Instruct:fp8``). Set ``MULTIMODAL_INTEGRATION_LLM_BACKEND=huggingface``
@@ -33,6 +37,7 @@ import os
 import re
 import tempfile
 import unittest
+from unittest.mock import MagicMock, patch
 from collections import defaultdict
 from pathlib import Path
 from types import SimpleNamespace
@@ -71,6 +76,7 @@ from app.grading.multimodal.rubric_router import RubricRouteResult, route_rubric
 from app.grading.multimodal.entropy import semantic_entropy_from_cluster_counts
 from app.grading.multimodal.parser import parse_chunk_grade_json
 from app.grading.multimodal.answer_key_chunk_enrich import (
+    code_reference_matches_student,
     enrich_chunks_with_per_question_answer_key,
     split_answer_key_sections,
 )
@@ -751,6 +757,88 @@ def _make_sample_json(norm: float, *, confidence_note: str = "") -> str:
     })
 
 
+class AnswerKeyCodeMatchTests(unittest.TestCase):
+    def test_strip_assignment_placeholder_lines(self) -> None:
+        from app.grading.multimodal.notebook_chunker import strip_assignment_placeholder_lines
+
+        raw = (
+            "# write code for problem 1.1 here\n"
+            "import csv\n\n"
+            "# your code here\n"
+            "x = 1\n"
+        )
+        cleaned = strip_assignment_placeholder_lines(raw)
+        self.assertIn("import csv", cleaned)
+        self.assertIn("x = 1", cleaned)
+        self.assertNotIn("write code", cleaned.lower())
+
+    def test_code_reference_matches_single_line_in_longer_key(self) -> None:
+        self.assertTrue(
+            code_reference_matches_student(
+                student="import csv\n",
+                reference="## 1.1\n# placeholder\nimport csv\n",
+            )
+        )
+        self.assertFalse(
+            code_reference_matches_student(
+                student="import json\n",
+                reference="import csv\n",
+            )
+        )
+
+    @patch("app.grading.multimodal.answer_key_chunk_enrich.compute_submission_embedding")
+    def test_enrich_prefers_trio_answer_key_when_it_matches_student(
+        self, mock_emb: MagicMock,
+    ) -> None:
+        mock_emb.return_value = ([0.1] * 16, "mock_embed")
+        cfg = SimpleNamespace()
+        ch = GradingChunk(
+            chunk_id="c1",
+            assignment_id="a1",
+            student_id="s1",
+            question_id="1.1",
+            modality=Modality.NOTEBOOK,
+            task_type=TaskType.SCAFFOLDED_CODING,
+            extracted_text="# write code for problem 1.1 here\nimport csv",
+            evidence={
+                "trio": {
+                    "question": "Problem 1.1",
+                    "student_response": "import csv",
+                    "answer_key_segment": "import csv",
+                },
+            },
+        )
+        ak_plain = "## 1.1\n# write code for problem 1.1 here\nimport pandas as pd\nimport csv\n"
+        enrich_chunks_with_per_question_answer_key([ch], ak_plain, cfg)
+        unit = (ch.evidence or {}).get("answer_key_unit") or {}
+        self.assertEqual(unit.get("snippet"), "import csv")
+        trio = (ch.evidence or {}).get("trio") or {}
+        self.assertEqual(trio.get("answer_key_segment"), "import csv")
+
+    def test_build_chunk_grading_prompt_sets_exact_scaffolded_match_flag(self) -> None:
+        ch = GradingChunk(
+            chunk_id="s1:a1:1.1",
+            assignment_id="a1",
+            student_id="s1",
+            question_id="1.1",
+            modality=Modality.NOTEBOOK,
+            task_type=TaskType.SCAFFOLDED_CODING,
+            extracted_text="# write code for problem 1.1 here\nimport csv",
+            rubric_type=RubricType.PROGRAMMING_SCAFFOLDED,
+            rubric_rows=list(_SCAFFOLDED_RUBRIC),
+            evidence={
+                "trio": {
+                    "question": "1.1",
+                    "student_response": "import csv",
+                    "answer_key_segment": "import csv",
+                },
+            },
+        )
+        raw = build_chunk_grading_prompt(ch, answer_key_text="import csv\n")
+        data = json.loads(raw)
+        self.assertTrue(data.get("exact_scaffolded_code_matches_reference"))
+
+
 class AnswerKeyResolveTests(unittest.TestCase):
     def test_fuzzy_match_student_prefix_vs_answer_key_suffix(self) -> None:
         with tempfile.TemporaryDirectory() as d:
@@ -874,8 +962,13 @@ class MultimodalRoutingTests(unittest.TestCase):
         self.assertGreater(h, 0.0)
 
 
+@unittest.skipIf(
+    os.getenv("SKIP_MOCK_MULTIMODAL_PIPELINE_TESTS", "").strip().lower()
+    in ("1", "true", "yes"),
+    "SKIP_MOCK_MULTIMODAL_PIPELINE_TESTS=1 — use ::LocalAssignmentGradingTests for real grading.",
+)
 class MultimodalPipelineRunTests(unittest.TestCase):
-    """Core pipeline run with mock runner — no LLM, fast."""
+    """Core pipeline run with mock runner — no LLM, fast (not assignments_to_grade)."""
 
     def _run_pipeline(self):
         env = build_envelope_from_plaintext(
@@ -1277,6 +1370,16 @@ class LocalAssignmentGradingTests(unittest.TestCase):
             raise unittest.SkipTest("No criteria parsed from rubric.")
 
         _integration_log("phase=fixtures: scan %s …", ASSIGNMENTS_DIR)
+        resolved_assignments = ASSIGNMENTS_DIR.resolve()
+        if resolved_assignments.name != "assignments_to_grade":
+            _integration_log(
+                "SKIP: ASSIGNMENTS_DIR must be the repo assignments_to_grade folder, got %s",
+                resolved_assignments,
+            )
+            raise unittest.SkipTest(
+                f"Integration expects ASSIGNMENTS_DIR name assignments_to_grade; got "
+                f"{resolved_assignments!r}"
+            )
         cls.groups = _assignment_groups()
         if not cls.groups:
             _integration_log("SKIP: no assignment files under %s", ASSIGNMENTS_DIR)

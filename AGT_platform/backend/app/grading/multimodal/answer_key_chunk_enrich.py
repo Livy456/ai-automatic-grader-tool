@@ -24,6 +24,7 @@ from typing import Any
 
 from app.grading.rag_embeddings import compute_submission_embedding
 
+from .notebook_chunker import strip_assignment_placeholder_lines
 from .schemas import GradingChunk
 
 _log = logging.getLogger(__name__)
@@ -62,6 +63,78 @@ def split_answer_key_sections(answer_plain: str) -> list[tuple[str, str]]:
         else:
             out.append(("", block))
     return out if out else [("", text)]
+
+
+def _norm_code_line(line: str) -> str:
+    return " ".join((line or "").strip().split())
+
+
+def _executable_code_lines(text: str) -> list[str]:
+    """Non-empty source lines, dropping full-line ``#`` comments only."""
+    out: list[str] = []
+    for raw in (text or "").splitlines():
+        t = raw.strip()
+        if not t or t.startswith("#"):
+            continue
+        out.append(_norm_code_line(t))
+    return out
+
+
+def code_reference_matches_student(*, student: str, reference: str) -> bool:
+    """
+    True when the student's code is the same **executable line sequence** as the reference,
+    or (for a one-line student answer) that line appears as one executable line in the reference.
+
+    Used to detect ``import csv`` == ``import csv`` even when ``reference`` is a longer section.
+    """
+    s_lines = _executable_code_lines(student)
+    r_lines = _executable_code_lines(reference)
+    if not s_lines:
+        return False
+    if s_lines == r_lines:
+        return True
+    if len(s_lines) == 1 and s_lines[0] in r_lines:
+        return True
+    if len(r_lines) == 1 and r_lines[0] in s_lines:
+        return True
+    joined_s, joined_r = "\n".join(s_lines), "\n".join(r_lines)
+    if len(joined_s) <= 800 and joined_s and joined_s in joined_r:
+        return True
+    if len(joined_r) <= 800 and joined_r and joined_r in joined_s:
+        return True
+    return False
+
+
+def grading_student_code_blob(chunk: GradingChunk) -> str:
+    """Best-effort student code string for reference matching (trio → previews → chunk text)."""
+    ev = chunk.evidence or {}
+    trio = ev.get("trio")
+    if isinstance(trio, dict):
+        s = str(trio.get("student_response") or "").strip()
+        if s:
+            return s
+    prev = str(ev.get("response_preview") or "").strip()
+    if prev:
+        return prev
+    return (chunk.extracted_text or "").strip()
+
+
+def narrow_answer_key_snippet_to_student_line(student: str, snippet: str) -> str | None:
+    """
+    If the student submission is effectively one executable line, return that same line
+    from ``snippet`` when present (stabilizes prompts against huge matched sections).
+    """
+    s_lines = _executable_code_lines(student)
+    if len(s_lines) != 1:
+        return None
+    want = s_lines[0]
+    for raw in snippet.splitlines():
+        t = raw.strip()
+        if not t or t.startswith("#"):
+            continue
+        if _norm_code_line(t) == want:
+            return t.strip()
+    return None
 
 
 def _normalize_qid(q: str) -> str:
@@ -154,6 +227,9 @@ def enrich_chunks_with_per_question_answer_key(
     """
     if not chunks or not str(answer_key_plain or "").strip() or cfg is None:
         return
+    answer_key_plain = strip_assignment_placeholder_lines(str(answer_key_plain))
+    if not answer_key_plain.strip():
+        return
     sections = split_answer_key_sections(answer_key_plain)
     if not sections:
         return
@@ -162,6 +238,24 @@ def enrich_chunks_with_per_question_answer_key(
         snippet, method, hdr, cos = _pick_section_for_chunk(ch, sections, cfg)
         if not snippet.strip():
             continue
+        student_blob = grading_student_code_blob(ch)
+        ev0 = dict(ch.evidence or {})
+        trio0 = ev0.get("trio")
+        prior_seg = ""
+        if isinstance(trio0, dict):
+            prior_seg = str(trio0.get("answer_key_segment") or "").strip()
+        if (
+            prior_seg
+            and student_blob.strip()
+            and code_reference_matches_student(student=student_blob, reference=prior_seg)
+        ):
+            snippet = prior_seg
+            method = f"{method};trio_answer_key_preferred"
+        else:
+            narrowed = narrow_answer_key_snippet_to_student_line(student_blob, snippet)
+            if narrowed:
+                snippet = narrowed
+                method = f"{method};narrowed_to_student_matching_line"
         try:
             emb_vec, emb_src = compute_submission_embedding(snippet[:20_000], cfg)
         except Exception:

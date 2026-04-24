@@ -65,6 +65,22 @@ _STUDENT_WORK_RE = [
     re.compile(r"END\s+OF\s+INSTRUCTOR\s+CODE", re.IGNORECASE),
 ]
 
+# Whole-line assignment boilerplate (code cells) — strip so similarity / RAG / grading
+# are not skewed by matching these to the answer key.
+_ASSIGNMENT_PLACEHOLDER_LINE = re.compile(
+    r"^\s*#\s*(?:"
+    r"write\s+code\s+here\b"
+    r"|write\s+code\s+for\b[^\n#]*"
+    r"|write\s+your\s+code\s+here\b"
+    r"|your\s+code\s+here\b"
+    r"|your\s+answer\s+here\b"
+    r"|insert\s+(?:your\s+)?code\b[^\n#]*"
+    r"|put\s+(?:your\s+)?(?:code|answer)\s+here\b"
+    r"|fill\s+in\s+(?:your\s+)?code\b[^\n#]*"
+    r")\s*$",
+    re.IGNORECASE,
+)
+
 _TEST_CODE_RE = [
     re.compile(r"^\s*#\s*[Tt]est\s+(?:code\s+)?for\s+(?:problem|question)", re.MULTILINE),
 ]
@@ -115,6 +131,55 @@ def _is_instructor_code(src: str) -> bool:
 
 def _has_student_work_marker(src: str) -> bool:
     return _matches_any(_STUDENT_WORK_RE, src)
+
+
+def _line_is_assignment_placeholder(line: str) -> bool:
+    t = (line or "").strip()
+    if not t.startswith("#") or len(t) > 240:
+        return False
+    if _ASSIGNMENT_PLACEHOLDER_LINE.match(line):
+        return True
+    return _has_student_work_marker(t + "\n")
+
+
+def strip_assignment_placeholder_lines(text: str) -> str:
+    """
+    Remove full-line scaffold comments such as ``# write code here`` or
+    ``# write code for problem 1.1 here`` so chunk text aligns with real student code
+    and does not spuriously match the answer key.
+    """
+    if not (text or "").strip():
+        return (text or "").strip()
+    kept: list[str] = []
+    for line in text.splitlines():
+        if _line_is_assignment_placeholder(line):
+            continue
+        kept.append(line)
+    out = "\n".join(kept)
+    out = re.sub(r"\n{3,}", "\n\n", out)
+    return out.strip()
+
+
+def sanitize_grading_chunks_placeholders(chunks: list[GradingChunk]) -> None:
+    """In-place: strip boilerplate ``# write code …`` lines from chunk text and trio fields."""
+    for ch in chunks:
+        ch.extracted_text = strip_assignment_placeholder_lines(ch.extracted_text or "")
+        ev = dict(ch.evidence or {})
+        qt = ev.get("question_text")
+        if isinstance(qt, str) and qt.strip():
+            ev["question_text"] = strip_assignment_placeholder_lines(qt)[:2000]
+        rp = ev.get("response_preview")
+        if isinstance(rp, str) and rp.strip():
+            ev["response_preview"] = strip_assignment_placeholder_lines(rp)[:500]
+        trio = ev.get("trio")
+        if isinstance(trio, dict):
+            trio = dict(trio)
+            for k in ("question", "student_response", "instructor_context", "answer_key_segment"):
+                v = trio.get(k)
+                if isinstance(v, str) and v.strip():
+                    trio[k] = strip_assignment_placeholder_lines(v)
+            ev["trio"] = trio
+        ch.evidence = ev
 
 
 def _is_test_code(src: str) -> bool:
@@ -240,6 +305,9 @@ def _unit_trio_payload(unit: dict[str, Any]) -> dict[str, str]:
     q = "\n\n".join(p for p in unit["question_parts"] if p.strip()).strip()
     r = "\n\n".join(p for p in unit["response_parts"] if p.strip()).strip()
     ctx = "\n\n".join(p for p in unit.get("context_parts", []) if p.strip()).strip()
+    q = strip_assignment_placeholder_lines(q)
+    r = strip_assignment_placeholder_lines(r)
+    ctx = strip_assignment_placeholder_lines(ctx)
     return {
         "question": q,
         "student_response": r,
@@ -264,7 +332,7 @@ def _unit_to_extracted_text(unit: dict[str, Any]) -> str:
     if r.strip():
         parts.append(r.strip())
 
-    return "\n\n".join(parts).strip()
+    return strip_assignment_placeholder_lines("\n\n".join(parts).strip())
 
 
 def build_notebook_qa_chunks(
@@ -365,7 +433,7 @@ def build_notebook_qa_chunks(
             s = src.strip()
             if s:
                 full_text_parts.append(s)
-        full = "\n\n".join(full_text_parts).strip()
+        full = strip_assignment_placeholder_lines("\n\n".join(full_text_parts).strip())
         if full:
             units = [
                 {
@@ -392,6 +460,12 @@ def build_notebook_qa_chunks(
         if not extracted:
             continue
         trio = _unit_trio_payload(unit)
+        qtxt = strip_assignment_placeholder_lines(
+            "\n\n".join(unit["question_parts"]).strip()
+        )[:2000]
+        rprev = strip_assignment_placeholder_lines(
+            "\n\n".join(unit["response_parts"]).strip()
+        )[:500]
         out.append(
             GradingChunk(
                 chunk_id=f"{student_id}:{assignment_id}:{qid}",
@@ -404,12 +478,8 @@ def build_notebook_qa_chunks(
                 evidence={
                     "chunker": "notebook_cell_order",
                     "question_id": qid,
-                    "question_text": "\n\n".join(
-                        unit["question_parts"]
-                    ).strip()[:2000],
-                    "response_preview": "\n\n".join(
-                        unit["response_parts"]
-                    ).strip()[:500],
+                    "question_text": qtxt,
+                    "response_preview": rprev,
                     "trio": trio,
                 },
             )

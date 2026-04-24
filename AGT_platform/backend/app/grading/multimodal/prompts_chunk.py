@@ -8,8 +8,12 @@ import json
 import os
 from typing import Any
 
+from .answer_key_chunk_enrich import (
+    code_reference_matches_student,
+    grading_student_code_blob,
+)
 from .rag_embeddings import sanitize_evidence_for_grading_prompt
-from .schemas import GradingChunk
+from .schemas import GradingChunk, RubricType
 
 
 SYSTEM_CHUNK_GRADER = """\
@@ -73,7 +77,23 @@ PER-CHUNK REFERENCE (``matched_answer_key_for_question`` / ``trio_reference_answ
 - When present, these are the instructor / answer-key excerpts **scoped to this question only**. Prefer them over the global ``reference_answer_key`` when they conflict or when the global key is truncated.
 - If they show a **minimal** expected solution (e.g. a single import line, one expression) and the student’s submission **matches** that solution (allowing trivial whitespace or harmless comments), treat the work as **complete for that scope**: award the **top** rubric level for **conceptual correctness** (and for “evidence” / “depth” rows when the prompt for that item only required that minimal output—do **not** punish brevity). Quote the student’s matching line as ``evidence``.
 
+PROGRAMMING / SCAFFOLDED RUBRIC — **MANDATORY** WHEN ``exact_scaffolded_code_matches_reference`` IS TRUE:
+- The user payload may set ``exact_scaffolded_code_matches_reference``: true when the student’s executable code **matches** the instructor reference for this chunk (same non-comment lines, or a one-line submission that appears as a required line in the reference).
+- When that field is **true**, you **must** output **raw_score = max_points** (the top of the 0…R ladder, i.e. **R**) for **every** criterion in ``rubric.rows`` for this chunk — including **Functional Correctness**, **Logical Implementation**, **Code Quality**, and **Edge Case Awareness**. At this scope, “no extra edge-case code” means **not applicable**: award **full** Edge Case Awareness. Do **not** deduct for missing setup, runtime hooks, or commentary that the reference does not show.
+- ``reasoning`` / ``justification`` must state explicitly that the student code matches the reference for the required lines; ``evidence`` must still quote only the student’s submission.
+
 Return **only** one JSON object (no markdown fences, no prose outside JSON)."""
+
+
+def _is_programming_scaffolded_rubric(chunk: GradingChunk) -> bool:
+    if chunk.rubric_type == RubricType.PROGRAMMING_SCAFFOLDED:
+        return True
+    for row in chunk.rubric_rows or []:
+        if not isinstance(row, dict):
+            continue
+        if str(row.get("name") or "").strip() == "Functional Correctness":
+            return True
+    return False
 
 
 OUTPUT_SCHEMA_HINT = {
@@ -152,6 +172,21 @@ def build_chunk_grading_prompt(
         matched_ak = str(aku.get("snippet") or "").strip()
     if not matched_ak and trio_ak:
         matched_ak = trio_ak
+
+    student_code = grading_student_code_blob(chunk)
+    exact_scaffolded = False
+    if _is_programming_scaffolded_rubric(chunk) and student_code.strip():
+        for ref in (trio_ak, matched_ak):
+            if ref and code_reference_matches_student(
+                student=student_code, reference=ref
+            ):
+                exact_scaffolded = True
+                break
+        if not exact_scaffolded and ak:
+            cap_cmp = min(len(ak), 12_000)
+            if code_reference_matches_student(student=student_code, reference=ak[:cap_cmp]):
+                exact_scaffolded = True
+
     if ak:
         instr_parts.append(
             "\nA reference answer key is provided under reference_answer_key. "
@@ -186,6 +221,13 @@ def build_chunk_grading_prompt(
             "e.g. where the submission agrees or diverges. Do not leave the reference unused "
             "when it applies to that criterion."
         )
+    if exact_scaffolded:
+        instr_parts.append(
+            "\n``exact_scaffolded_code_matches_reference`` is **true**: the student’s code "
+            "matches the instructor reference for this chunk. Follow the system prompt: "
+            "output **raw_score = max_points** for **every** row in ``rubric.rows`` (all four "
+            "scaffolded criteria including Edge Case Awareness)."
+        )
     payload: dict[str, Any] = {
         "instructions": "".join(instr_parts),
         "task_description": task_description or "(see assignment brief in LMS)",
@@ -216,4 +258,6 @@ def build_chunk_grading_prompt(
         payload["matched_dataset_preview"] = ds[:max_chars] if len(ds) > max_chars else ds
         if len(ds) > max_chars:
             payload["matched_dataset_preview_truncated"] = True
+    if exact_scaffolded:
+        payload["exact_scaffolded_code_matches_reference"] = True
     return json.dumps(payload, ensure_ascii=True, indent=2)

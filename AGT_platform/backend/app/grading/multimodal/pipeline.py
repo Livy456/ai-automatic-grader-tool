@@ -32,6 +32,11 @@ chunks and (when embeddings are present in the file) skip per-unit embedding cal
 (slim trio text per chunk, no embedding vectors). Set ``skip_trio_chunks_json_export`` in hints
 to disable.
 
+**Placeholder strip:** after chunking (and optional trio LLM), boilerplate lines such as
+``# write code for problem 1.1 here`` / ``# your code here`` are removed from chunk text and
+trio fields (see :func:`app.grading.multimodal.notebook_chunker.sanitize_grading_chunks_placeholders`)
+before answer-key alignment and grading.
+
 **Agentic trace:** ordered phases are stored on the result as
 ``stage_artifacts["agentic_workflow"]`` and copied into grading JSON as ``_agentic_workflow``.
 
@@ -72,6 +77,7 @@ from .semantic_confidence import (
     cluster_assignment,
     summarize_chunk_confidence_from_counts,
 )
+from .notebook_chunker import sanitize_grading_chunks_placeholders
 from .openai_trio_rag_frontload import (
     multimodal_openai_trio_rag_frontload_enabled,
     run_openai_trio_rag_frontload,
@@ -338,6 +344,10 @@ class MultimodalGradingPipeline:
                     reason="openai_trio_rag_frontload",
                     n_chunks=len(chunks),
                 )
+
+        if chunks:
+            sanitize_grading_chunks_placeholders(chunks)
+            wf("chunk_text_strip_assignment_placeholders", n_chunks=len(chunks))
 
         if openai_frontload_ok and openai_trio_rag_frontload_audit:
             wf(
