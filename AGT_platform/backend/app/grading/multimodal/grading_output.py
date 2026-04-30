@@ -9,7 +9,7 @@ from typing import Any
 
 from app.grading.consistency_rules import run_rule_checks
 from app.grading.rubric_allowlist import filter_criteria_dicts_to_allowlist
-from app.grading.rubric_credit_calibration import finalize_criterion_display_scores
+from app.grading.rubric_credit_calibration import snap_half_nearest_display
 
 from .schemas import AssignmentGradeResult, ChunkGradeOutcome
 
@@ -81,21 +81,21 @@ def _merge_criteria_max_by_name(
             if not name:
                 continue
             try:
-                cc = float(c.get("calibrated_credit", -1.0))
-            except (TypeError, ValueError):
-                cc = -1.0
-            try:
+                mp = float(c.get("max_points") or 0)
                 sc = float(c.get("score", 0))
+                frac = (sc / mp) if mp > 0 else 0.0
             except (TypeError, ValueError):
-                sc = 0.0
-            cur_cc = -1.0
+                frac, sc = 0.0, 0.0
+            cur_frac = -1.0
             if name in best:
                 try:
-                    cur_cc = float(best[name].get("calibrated_credit", -1.0))
+                    bmp = float(best[name].get("max_points") or 0)
+                    bsc = float(best[name].get("score", 0))
+                    cur_frac = (bsc / bmp) if bmp > 0 else 0.0
                 except (TypeError, ValueError):
-                    cur_cc = -1.0
-            if name not in best or cc > cur_cc or (
-                abs(cc - cur_cc) < 1e-9 and sc > float(best[name].get("score", 0))
+                    cur_frac = 0.0
+            if name not in best or frac > cur_frac + 1e-12 or (
+                abs(frac - cur_frac) < 1e-9 and sc > float(best[name].get("score", 0))
             ):
                 best[name] = dict(c)
             bf = backfill.setdefault(name, {})
@@ -108,7 +108,7 @@ def _merge_criteria_max_by_name(
         for field in ("evidence", "justification", "reasoning"):
             if not row.get(field):
                 row[field] = bf.get(field, "")
-        _sync_blended_scores_row(row)
+        _snap_criterion_score_row(row)
     return [best[k] for k in sorted(best.keys())]
 
 
@@ -125,17 +125,16 @@ def _refresh_qg_overall_rubric_totals(qg: dict[str, Any]) -> None:
     o["rubric_points_earned"] = round(earned, 4)
 
 
-def _sync_blended_scores_row(row: dict[str, Any]) -> None:
-    """Recompute ``raw_rubric_score`` and ``score`` from consensus fields (half-step grid)."""
+def _snap_criterion_score_row(row: dict[str, Any]) -> None:
+    """Snap ``score`` to the nearest valid half-step on ``[0, max_points]``; drop legacy keys."""
     try:
         mp = float(row.get("max_points") or 0)
-        raw_m = float(row.get("raw_rubric_score", 0))
-        g = float(row.get("calibrated_credit", 0))
+        raw = float(row.get("score", 0))
     except (TypeError, ValueError):
         return
-    raw_s, pts = finalize_criterion_display_scores(raw_m, g, mp)
-    row["raw_rubric_score"] = raw_s
-    row["score"] = pts
+    row["score"] = float(snap_half_nearest_display(raw, mp))
+    row.pop("raw_rubric_score", None)
+    row.pop("calibrated_credit", None)
 
 
 def _sync_rubric_caps_on_criteria_rows(
@@ -199,16 +198,13 @@ def _chunk_to_question_grade(
     se_confidence = round(float(chunk.ai_confidence), 4)
 
     criteria_rows: list[dict[str, Any]] = []
-    for name, ratio in (chunk.criterion_consensus or {}).items():
+    for name in (chunk.criterion_consensus or {}):
         mp = float(max_by_name.get(name) or 100.0)
-        ratio_f = max(0.0, min(1.0, float(ratio)))
         raw_consensus = float(raw_map.get(name, 0.0))
-        raw_s, pts = finalize_criterion_display_scores(raw_consensus, ratio_f, mp)
+        raw_s = float(snap_half_nearest_display(raw_consensus, mp))
         row: dict[str, Any] = {
             "name": name,
-            "raw_rubric_score": raw_s,
-            "calibrated_credit": ratio_f,
-            "score": pts,
+            "score": raw_s,
             "max_points": mp,
             "confidence": se_confidence,
             "justification": just_map.get(name) or "",
@@ -297,7 +293,7 @@ def multimodal_assignment_to_grading_dict(
         for c in qg.get("criteria") or []:
             if isinstance(c, dict):
                 c.pop("weight", None)
-                _sync_blended_scores_row(c)
+                _snap_criterion_score_row(c)
         _refresh_qg_overall_rubric_totals(qg)
         issues = run_rule_checks(qg.get("criteria") or [])
         if issues:
@@ -311,7 +307,7 @@ def multimodal_assignment_to_grading_dict(
     )
     all_consistency_issues.extend(allow_issues)
     for row in merged:
-        _sync_blended_scores_row(row)
+        _snap_criterion_score_row(row)
 
     # --- Consistency checks on merged assignment-level criteria ---
     assignment_issues = run_rule_checks(merged)
@@ -356,7 +352,7 @@ def multimodal_assignment_to_grading_dict(
         row.setdefault("evidence", "")
         row.setdefault("justification", "")
         row.setdefault("reasoning", "")
-        _sync_blended_scores_row(row)
+        _snap_criterion_score_row(row)
         crit_out.append(row)
 
     summary = "; ".join(

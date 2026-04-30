@@ -416,10 +416,9 @@ def validate_grading_output(
         if c.get("justification") is None:
             c["justification"] = ""
 
-        if c.get("calibrated_credit") is not None:
-            c["calibrated_credit"] = _coerce_float(c["calibrated_credit"])
-        if c.get("raw_rubric_score") is not None:
-            c["raw_rubric_score"] = _coerce_float(c["raw_rubric_score"])
+        c.pop("calibrated_credit", None)
+        c.pop("raw_rubric_score", None)
+
         c.pop("weight", None)
 
         criteria_out.append(c)
@@ -466,14 +465,8 @@ def validate_grading_output(
                     crit.setdefault("evidence", "")
                     crit.setdefault("reasoning", "")
                     crit.setdefault("justification", "")
-                    if crit.get("calibrated_credit") is not None:
-                        crit["calibrated_credit"] = _coerce_float(
-                            crit["calibrated_credit"]
-                        )
-                    if crit.get("raw_rubric_score") is not None:
-                        crit["raw_rubric_score"] = _coerce_float(
-                            crit["raw_rubric_score"]
-                        )
+                    crit.pop("calibrated_credit", None)
+                    crit.pop("raw_rubric_score", None)
         data["question_grades"] = qg
 
     mod = data.get("_modality")

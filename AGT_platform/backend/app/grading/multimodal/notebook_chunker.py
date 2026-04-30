@@ -2,6 +2,12 @@
 Notebook-aware chunker: parse ipynb cell structure directly, preserving cell
 order so that each question/prompt is paired with the student's actual response.
 
+Question boundaries are **not** limited to ``### Question 1.1``-style headings: substantive
+``##`` / ``###`` lines (e.g. ``## Step 4: …``), plain titles with time estimates
+(``Loading CSV … (5 min)``), and instructional markdown that references ``code block below``
+stay with the prompt until the next code cell. When a **blank** instructor copy is aligned
+(:mod:`template_aligned_notebook_chunks`), the same classification applies to both notebooks.
+
 The text-based heuristic chunker receives pre-flattened plaintext where code
 and markdown are split into separate sections (destroying Q/A pairing).  This
 module parses the raw notebook JSON to produce accurate ``GradingChunk`` objects.
@@ -28,10 +34,20 @@ _QUESTION_RE = [
         r"^\s*#{1,4}\s*(?:Question|Problem|Exercise|Task)\s+[\w.\-]+",
         re.IGNORECASE | re.MULTILINE,
     ),
+    # ## Part 1, ### Part A — intro (Part without requiring a digit)
+    re.compile(
+        r"^\s*#{1,6}\s*Part\s+[:\.]?\s*[\w.\-/]+",
+        re.IGNORECASE | re.MULTILINE,
+    ),
     # ##1.1 ..., # 1.4.2 ..., ### 2.3 ... (numbered sub-sections)
     re.compile(
         r"^\s*#{1,4}\s*\d+\.\d+[\.\d]*\b",
         re.MULTILINE,
+    ),
+    # **Problem 1** / **Question 2** at line start (common in converted notebooks)
+    re.compile(
+        r"^\s*\*{2}\s*(?:Problem|Question|Exercise|Part|Task)\s+[\w.\-]+",
+        re.IGNORECASE | re.MULTILINE,
     ),
 ]
 
@@ -96,6 +112,48 @@ _QID_RE = re.compile(
     re.IGNORECASE,
 )
 
+# Instructional prose (markdown) that continues a prompt before student code — not a "response".
+_PROMPT_EXTENSION_CUES = re.compile(
+    r"\b("
+    r"use\s+the\s+code|code\s+block\s+below|in\s+this\s+cell|first\s+code\s+cell|"
+    r"second\s+code\s+cell|third\s+code\s+cell|fourth\s+code\s+cell|"
+    r"your\s+task|you\s+should|let\'?s\s+|we\s+want\s+to|print\s+out|"
+    r"follow\s+the|complete\s+the|fill\s+in\s+the|dataframe|column\s+names|"
+    r"explore|familiar\s+with|loading\s+csv|into\s+pandas|now\s+that\s+we"
+    r")\b",
+    re.IGNORECASE,
+)
+
+_SUBSTANTIVE_HASH_HEADING = re.compile(
+    r"^\s*(#{2,6})\s+(\S.{5,})\s*$",
+    re.MULTILINE,
+)
+
+_PLAIN_TITLE_WITH_TIME_ESTIMATE = re.compile(
+    r"^\s*.{10,}\(\s*\d+\s*min\s*\)\s*$",
+    re.IGNORECASE | re.MULTILINE,
+)
+
+
+def ipynb_to_plaintext_for_structure_llm(ipynb_bytes: bytes) -> str:
+    """
+    Flatten an ``.ipynb`` to labeled plaintext for structure LLMs (blank template parsing).
+
+    Preserves cell order and cell type so the model can infer distinct questions.
+    """
+    try:
+        nb = json.loads(ipynb_bytes.decode("utf-8", errors="replace"))
+    except (json.JSONDecodeError, UnicodeDecodeError):
+        return ""
+    parts: list[str] = []
+    for i, cell in enumerate(nb.get("cells") or []):
+        ct = str(cell.get("cell_type") or "")
+        src = _cell_source(cell).strip()
+        if not src:
+            continue
+        parts.append(f"\n--- cell {i} ({ct}) ---\n{src}")
+    return "\n".join(parts).strip()
+
 
 def _cell_source(cell: dict) -> str:
     src = cell.get("source", "")
@@ -106,11 +164,100 @@ def _cell_source(cell: dict) -> str:
 
 def _extract_question_id(source: str) -> str:
     """Pull a short question identifier like ``1.4.1`` from a heading line."""
-    for line in source.splitlines()[:3]:
+    head = (source or "")[:800]
+    # Prefer dotted numbering (4.1, 2.3.1) when present anywhere in the heading block.
+    m = re.search(r"\b(\d+(?:\.\d+)+[a-zA-Z]?)\b", head)
+    if m:
+        return m.group(1).strip()
+    for line in head.splitlines()[:6]:
         m = _QID_RE.search(line)
         if m:
             return m.group(1).strip()
     return ""
+
+
+def _slug_from_instruction_text(source: str, ordinal: int) -> str:
+    """Stable id from heading / instruction prose when no numbering exists (Week-4 style labs)."""
+    lines = (source or "").strip().splitlines()
+    head = lines[0] if lines else ""
+    t = re.sub(r"^#{1,6}\s*", "", head).strip()
+    t = re.sub(r"^\*+\s*|\s*\*+$", "", t)
+    t = re.sub(r"<[^>]+>", " ", t)
+    t = re.sub(r"[^\w\s-]", " ", t, flags=re.UNICODE)
+    t = re.sub(r"\s+", "_", t).strip("_").lower()[:72]
+    if len(t) >= 6:
+        return t
+    return f"instr_{ordinal}"
+
+
+def resolve_question_cell_id(source: str, *, ordinal: int) -> str:
+    """Numeric / dotted id when present; else slug from first line; else ``instr_{ordinal}``."""
+    nid = _extract_question_id(source)
+    if nid:
+        return nid
+    slug = _slug_from_instruction_text(source, ordinal)
+    if slug and not slug.startswith("instr_"):
+        return slug
+    return f"instr_{ordinal}"
+
+
+def _markdown_leads_with_substantive_heading(src: str) -> bool:
+    """True for ``## Step 4: …``, ``### Choose one column…``, etc. (no ``Question 1.1`` required)."""
+    s = (src or "").strip()
+    if not s:
+        return False
+    first = s.splitlines()[0].strip()
+    m = _SUBSTANTIVE_HASH_HEADING.match(first)
+    if not m:
+        return False
+    body = m.group(2).strip()
+    if len(body) < 6:
+        return False
+    # Single-line mega heading is usually not a lab step boundary.
+    if len(first) > 220 and "\n" not in s[:221]:
+        return False
+    return True
+
+
+def _plain_instruction_title_cell(src: str, cell_idx: int) -> bool:
+    """Titles like ``Loading CSV Into pandas (5 min)`` without ``#`` markdown."""
+    if cell_idx == 0:
+        return False
+    s = (src or "").strip()
+    if not s or len(s) > 600:
+        return False
+    if "#" in s.splitlines()[0]:
+        return False
+    first = s.splitlines()[0].strip()
+    if _PLAIN_TITLE_WITH_TIME_ESTIMATE.match(first):
+        return True
+    if len(first) >= 12 and len(first) <= 140 and first.count("\n") == 0:
+        if "**" in first or "__" in first:
+            return True
+    return False
+
+
+def _markdown_looks_like_prompt_extension(src: str) -> bool:
+    """
+    Long instructional markdown before the next code cell (rubric text, not student prose).
+    """
+    s = (src or "").strip()
+    if not s:
+        return False
+    if s.count("```") >= 2:
+        return False
+    if re.search(
+        r"^\s*(import |from \w+ import |def |class |plt\.|sns\.|pd\.read_)",
+        s,
+        re.MULTILINE,
+    ):
+        return False
+    low = s.lower()
+    if _PROMPT_EXTENSION_CUES.search(low):
+        return True
+    if len(s) > 220 and s.count("\n") <= 14:
+        return True
+    return False
 
 
 def _matches_any(patterns: list[re.Pattern], text: str) -> bool:
@@ -212,6 +359,10 @@ def _classify_markdown(src: str, cell_idx: int) -> str:
         return "section_header"
     if cell_idx == 0 and _TITLE_RE.search(src):
         return "preamble"
+    if _markdown_leads_with_substantive_heading(src):
+        return "question"
+    if _plain_instruction_title_cell(src, cell_idx):
+        return "question"
     if _is_section_label(src):
         return "section_header"
     return "student_text"
@@ -382,11 +533,11 @@ def build_notebook_qa_chunks(
                     units.append(current)
                 else:
                     question_prefix = current["question_parts"]
-                    qid = _extract_question_id(src) or current["question_id"]
+                    qid = resolve_question_cell_id(src, ordinal=len(units) + 1)
                     current = _new_unit(qid)
                     current["question_parts"] = question_prefix + [src]
                     continue
-            qid = _extract_question_id(src) or f"q{len(units) + 1}"
+            qid = resolve_question_cell_id(src, ordinal=len(units) + 1)
             current = _new_unit(qid)
             current["question_parts"].append(src)
 
@@ -399,8 +550,11 @@ def build_notebook_qa_chunks(
         elif role == "student_text":
             if current is None:
                 current = _new_unit("preamble")
-            current["response_parts"].append(src)
-            current["has_student_content"] = True
+            if _markdown_looks_like_prompt_extension(src):
+                current["question_parts"].append(src)
+            else:
+                current["response_parts"].append(src)
+                current["has_student_content"] = True
 
         elif role == "preamble":
             if current is None:
@@ -487,6 +641,172 @@ def build_notebook_qa_chunks(
 
     _log.info(
         "notebook_chunker: %d cells → %d Q/A chunks for %s",
+        len(cells),
+        len(out),
+        assignment_id,
+    )
+    return out
+
+
+def build_notebook_question_boundary_chunks(
+    ipynb_bytes: bytes,
+    *,
+    assignment_id: str,
+    student_id: str,
+    modality: Modality = Modality.NOTEBOOK,
+    task_type: TaskType = TaskType.UNKNOWN,
+    max_grading_units: int | None = None,
+) -> list[GradingChunk]:
+    """
+    One unit per **question** or **section** heading (flush on each), including
+    question-only cells (no student answer required).
+
+    Used to chunk a **blank** instructor template: boundaries follow headings so
+    :mod:`template_aligned_notebook_chunks` can align student work by ``question_id``.
+    """
+    try:
+        nb = json.loads(ipynb_bytes.decode("utf-8", errors="replace"))
+    except (json.JSONDecodeError, UnicodeDecodeError):
+        _log.warning("notebook_chunker: could not parse ipynb JSON (boundary mode)")
+        return []
+
+    cells = nb.get("cells", [])
+    if not cells:
+        return []
+
+    classified: list[tuple[dict, str, str, str]] = []
+    for idx, cell in enumerate(cells):
+        src = _cell_source(cell)
+        role = _classify_cell(cell, idx)
+        classified.append((cell, src, cell.get("cell_type", ""), role))
+
+    units: list[dict[str, Any]] = []
+    current: dict[str, Any] | None = None
+    preamble_parts: list[str] = []
+
+    def flush_current() -> None:
+        nonlocal current
+        if current is None:
+            return
+        if (
+            current["question_parts"]
+            or current["response_parts"]
+            or current.get("context_parts", [])
+        ):
+            units.append(current)
+        current = None
+
+    for _cell, src, _ctype, role in classified:
+        if not src.strip() and role == "empty":
+            continue
+
+        if role in ("question", "section_header"):
+            flush_current()
+            qid = resolve_question_cell_id(src, ordinal=len(units) + 1)
+            current = _new_unit(qid)
+            if preamble_parts:
+                current["question_parts"].extend(preamble_parts)
+                preamble_parts.clear()
+            current["question_parts"].append(src)
+            continue
+
+        if role == "preamble":
+            preamble_parts.append(src)
+            continue
+
+        if current is None:
+            current = _new_unit("preamble")
+            if preamble_parts:
+                current["question_parts"].extend(preamble_parts)
+                preamble_parts.clear()
+
+        if role == "student_text":
+            if _markdown_looks_like_prompt_extension(src):
+                current["question_parts"].append(src)
+            else:
+                current["response_parts"].append(src)
+                current["has_student_content"] = True
+        elif role == "student_code":
+            current["response_parts"].append(src)
+            current["has_student_content"] = True
+        elif role == "instructor_code":
+            inst, stud = _split_instructor_prefix_and_student_suffix(src)
+            if stud.strip():
+                if inst.strip():
+                    current["context_parts"].append(inst.strip())
+                current["response_parts"].append(stud.strip())
+                current["has_student_content"] = True
+            else:
+                current["context_parts"].append(src)
+        elif role == "test_code":
+            current["context_parts"].append(src)
+
+    flush_current()
+
+    if preamble_parts and not units:
+        u = _new_unit("preamble")
+        u["question_parts"].extend(preamble_parts)
+        units.append(u)
+        preamble_parts.clear()
+
+    if not units:
+        full_text_parts: list[str] = []
+        for _cell, src, _ctype, _role in classified:
+            s = src.strip()
+            if s:
+                full_text_parts.append(s)
+        full = strip_assignment_placeholder_lines("\n\n".join(full_text_parts).strip())
+        if full:
+            units = [
+                {
+                    "question_id": "full",
+                    "question_parts": ["(full notebook — no question headings detected)"],
+                    "response_parts": [full],
+                    "context_parts": [],
+                    "has_student_content": True,
+                }
+            ]
+
+    if not units:
+        return []
+
+    if max_grading_units is not None and max_grading_units >= 1:
+        units = units[:max_grading_units]
+
+    out: list[GradingChunk] = []
+    for unit in units:
+        qid = unit["question_id"]
+        extracted = _unit_to_extracted_text(unit)
+        if not extracted:
+            continue
+        trio = _unit_trio_payload(unit)
+        qtxt = strip_assignment_placeholder_lines(
+            "\n\n".join(unit["question_parts"]).strip()
+        )[:2000]
+        rprev = strip_assignment_placeholder_lines(
+            "\n\n".join(unit["response_parts"]).strip()
+        )[:500]
+        out.append(
+            GradingChunk(
+                chunk_id=f"{student_id}:{assignment_id}:{qid}:question_boundary",
+                assignment_id=assignment_id,
+                student_id=student_id,
+                question_id=qid,
+                modality=modality,
+                task_type=task_type,
+                extracted_text=extracted,
+                evidence={
+                    "chunker": "notebook_question_boundaries",
+                    "question_id": qid,
+                    "question_text": qtxt,
+                    "response_preview": rprev,
+                    "trio": trio,
+                },
+            )
+        )
+
+    _log.info(
+        "notebook_chunker (boundary): %d cells → %d template chunks for %s",
         len(cells),
         len(out),
         assignment_id,

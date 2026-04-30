@@ -24,10 +24,10 @@ def cluster_key_pattern(parsed: ParsedChunkGrade, ndigits: int = 2) -> str:
     base = cluster_key_score_only(parsed.normalized_score, ndigits=ndigits)
     parts = []
     for c in parsed.criterion_scores:
-        g = float(getattr(c, "calibrated_credit", 0.0) or 0.0)
-        if g <= 0.0 and c.max_points:
-            g = c.score / c.max_points
-        ratio = max(0.0, min(1.0, g))
+        if c.max_points:
+            ratio = max(0.0, min(1.0, float(c.score) / float(c.max_points)))
+        else:
+            ratio = 0.0
         parts.append(f"{c.name}:{round(ratio, ndigits)}")
     pat = "|".join(parts) if parts else ""
     return f"{base}|{pat}"

@@ -7,7 +7,11 @@ Aligns with :mod:`app.grading.rag_embeddings` — per-chunk vectors from
 
 **Chunking stack** (see ``new_chunking_method.md``):
 
-1. Raw **ipynb** bytes → :func:`notebook_chunker.build_notebook_qa_chunks` (cell-order Q/A).
+1. Raw **ipynb** bytes — when ``modality_hints["blank_assignment_ipynb_bytes"]`` resolves and
+   ``MULTIMODAL_BLANK_TEMPLATE_CHUNKING`` is not ``off``, try LLM question inventory
+   (:mod:`blank_llm_question_chunker`) then heuristic blank/student alignment
+   (:mod:`template_aligned_notebook_chunks`); otherwise
+   :func:`notebook_chunker.build_notebook_qa_chunks` (cell-order Q/A).
 2. Otherwise **PDF plaintext** is reflowed via
    :func:`app.grading.submission_chunks.reflow_pdf_sections_in_plaintext` before any LLM
    segmentation so verticalized extractors do not confuse the model.
@@ -52,6 +56,7 @@ from .chunker import default_chunker_build_units, modality_from_hints, task_type
 from .ingestion import IngestionEnvelope
 from .notebook_chunker import build_notebook_qa_chunks
 from .schemas import GradingChunk, Modality, TaskType
+from .template_aligned_notebook_chunks import try_build_blank_template_aligned_chunks
 
 _log = logging.getLogger(__name__)
 
@@ -499,6 +504,9 @@ def build_multimodal_grading_chunks(
 
     ipynb_bytes = _get_ipynb_bytes(envelope)
     if ipynb_bytes is not None:
+        tpl = try_build_blank_template_aligned_chunks(envelope, cfg)
+        if tpl:
+            return tpl
         nb_mod = modality_from_hints(hints)
         if nb_mod == Modality.UNKNOWN:
             nb_mod = Modality.NOTEBOOK

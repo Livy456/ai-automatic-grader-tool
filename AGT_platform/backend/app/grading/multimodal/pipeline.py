@@ -23,6 +23,16 @@ embeddings API without frontload) / ``SENTENCE_TRANSFORMERS_MODEL``.
 :func:`app.grading.answer_key_resolve.resolve_answer_key_plaintext` against
 ``modality_hints["answer_key_dir"]`` or the repository ``answer_key/`` folder.
 
+**Blank template (optional):** when the submission is an ``.ipynb``, the pipeline resolves a
+matching blank instructor notebook via :func:`app.grading.blank_assignment_resolve.resolve_blank_assignment_ipynb`
+under ``modality_hints["blank_assignments_dir"]`` or the repository ``blank_assignments/`` folder
+and stores bytes in ``modality_hints["blank_assignment_ipynb_bytes"]``. Chunking then aligns
+question text from that template with the student's cells (``MULTIMODAL_BLANK_TEMPLATE_CHUNKING``).
+When ``MULTIMODAL_BLANK_LLM_QUESTIONS`` is not ``off`` and a structure LLM is available, distinct
+questions are inferred from the blank via LLM JSON before student/answer-key pairing.
+OpenAI trio+RAG frontload is skipped when that blank-template path is active so chunk boundaries
+stay consistent with the three-source model.
+
 **Chunk cache:** set ``modality_hints["multimodal_chunk_cache_path"]`` to a JSON file produced
 by :func:`app.grading.multimodal.chunk_cache.save_grading_chunks_cache` to skip rebuilding
 chunks and (when embeddings are present in the file) skip per-unit embedding calls.
@@ -31,6 +41,12 @@ chunks and (when embeddings are present in the file) skip per-unit embedding cal
 ``modality_hints["rag_embedding_output_dir"]`` or the repository ``RAG_embedding/`` folder
 (slim trio text per chunk, no embedding vectors). Set ``skip_trio_chunks_json_export`` in hints
 to disable.
+
+**Notebook chunking export:** for ``.ipynb`` submissions, after chunking the pipeline also
+writes ``{assignment_id}_{student_id}_chunking.json`` under
+``modality_hints["assignment_chunking_output_dir"]`` or ``assignment_chunking/`` at the repo
+root (full chunk metadata with sanitized ``evidence``, no raw embedding vectors). Set
+``skip_assignment_chunking_json_export`` in hints to disable.
 
 **Placeholder strip:** after chunking (and optional trio LLM), boilerplate lines such as
 ``# write code for problem 1.1 here`` / ``# your code here`` are removed from chunk text and
@@ -58,6 +74,7 @@ from typing import Any, Callable
 
 from app.config import Config
 from app.grading.answer_key_resolve import resolve_answer_key_plaintext
+from app.grading.blank_assignment_resolve import resolve_blank_assignment_ipynb
 from app.grading.llm_router import multimodal_structure_llm_trace_label
 from app.grading.dataset_resolve import attach_dataset_context_for_notebook
 
@@ -82,6 +99,7 @@ from .openai_trio_rag_frontload import (
     multimodal_openai_trio_rag_frontload_enabled,
     run_openai_trio_rag_frontload,
 )
+from .template_aligned_notebook_chunks import blank_template_chunking_requested
 from .rag_embeddings import (
     build_multimodal_grading_chunks,
     enrich_chunks_with_rag_embeddings,
@@ -109,6 +127,16 @@ def default_answer_key_dir() -> Path:
 def default_rag_embedding_dir() -> Path:
     """``…/ai-automatic-grader-tool/RAG_embedding`` (repo root)."""
     return Path(__file__).resolve().parents[5] / "RAG_embedding"
+
+
+def default_blank_assignments_dir() -> Path:
+    """``…/ai-automatic-grader-tool/blank_assignments`` (repo root)."""
+    return Path(__file__).resolve().parents[5] / "blank_assignments"
+
+
+def default_assignment_chunking_dir() -> Path:
+    """``…/ai-automatic-grader-tool/assignment_chunking`` (repo root)."""
+    return Path(__file__).resolve().parents[5] / "assignment_chunking"
 
 
 def _safe_trio_export_stem(assignment_id: str) -> str:
@@ -170,6 +198,71 @@ def _try_persist_trio_chunks_json(
         wf("persist_trio_chunks_json", path=str(path))
     except OSError as exc:
         _log.warning("Could not write trio chunks export %s: %s", path, exc)
+
+
+def _assignment_chunking_export_payload(
+    chunks: list[GradingChunk],
+    *,
+    chunker_mode: str,
+    envelope: IngestionEnvelope,
+) -> dict[str, Any]:
+    """Serializable chunking audit (embeddings stripped from ``evidence``)."""
+    from .rag_embeddings import sanitize_evidence_for_grading_prompt
+
+    rows: list[dict[str, Any]] = []
+    for ch in chunks:
+        ev = sanitize_evidence_for_grading_prompt(dict(ch.evidence or {}))
+        rows.append(
+            {
+                "chunk_id": ch.chunk_id,
+                "assignment_id": ch.assignment_id,
+                "student_id": ch.student_id,
+                "question_id": ch.question_id,
+                "modality": ch.modality.value,
+                "task_type": ch.task_type.value,
+                "extracted_text": ch.extracted_text,
+                "evidence": ev,
+            }
+        )
+    return {
+        "assignment_id": envelope.assignment_id,
+        "student_id": envelope.student_id,
+        "chunker_mode": chunker_mode,
+        "n_chunks": len(chunks),
+        "chunks": rows,
+    }
+
+
+def _try_persist_assignment_chunking_json(
+    envelope: IngestionEnvelope,
+    chunks: list[GradingChunk],
+    hints: dict[str, Any],
+    chunker_mode: str,
+    wf: Callable[..., None],
+) -> None:
+    """Persist notebook-oriented chunking JSON for debugging and downstream tools."""
+    if hints.get("skip_assignment_chunking_json_export"):
+        return
+    if not envelope.artifacts.get("ipynb"):
+        return
+    raw_dir = hints.get("assignment_chunking_output_dir")
+    root = Path(str(raw_dir)).expanduser() if raw_dir else default_assignment_chunking_dir()
+    try:
+        root.mkdir(parents=True, exist_ok=True)
+    except OSError as exc:
+        _log.warning("Could not create assignment_chunking directory %s: %s", root, exc)
+        return
+    stem_a = _safe_trio_export_stem(envelope.assignment_id)
+    stem_s = _safe_trio_export_stem(envelope.student_id)
+    path = root / f"{stem_a}_{stem_s}_chunking.json"
+    try:
+        payload = _assignment_chunking_export_payload(
+            chunks, chunker_mode=chunker_mode, envelope=envelope
+        )
+        path.write_text(json.dumps(payload, ensure_ascii=True, indent=2), encoding="utf-8")
+        wf("persist_assignment_chunking_json", path=str(path))
+    except OSError as exc:
+        _log.warning("Could not write assignment chunking export %s: %s", path, exc)
 
 
 @dataclass
@@ -246,6 +339,25 @@ class MultimodalGradingPipeline:
             search_dir=str(ak_dir),
         )
 
+        raw_blank_dir = str(hints.get("blank_assignments_dir") or "").strip()
+        blank_dir = Path(raw_blank_dir).expanduser() if raw_blank_dir else default_blank_assignments_dir()
+        if not hints.get("blank_assignment_ipynb_bytes"):
+            blank_bytes, blank_name = resolve_blank_assignment_ipynb(
+                envelope.assignment_id, blank_dir
+            )
+            if blank_bytes.strip():
+                hints["blank_assignment_ipynb_bytes"] = blank_bytes
+                if blank_name:
+                    hints["blank_assignment_matched_file"] = blank_name
+        _bb = hints.get("blank_assignment_ipynb_bytes")
+        _n_blank = len(bytes(_bb)) if isinstance(_bb, (bytes, bytearray)) else 0
+        wf(
+            "resolve_blank_assignment",
+            blank_ipynb_bytes=_n_blank,
+            matched_file=str(hints.get("blank_assignment_matched_file") or ""),
+            search_dir=str(blank_dir),
+        )
+
         require_ak = bool(self.config.require_answer_key) or (
             os.getenv("MULTIMODAL_REQUIRE_ANSWER_KEY", "").strip().lower() in ("1", "true", "yes")
         )
@@ -301,7 +413,19 @@ class MultimodalGradingPipeline:
                     "multimodal_chunk_cache_path missing or invalid; rebuilding chunks (%s)",
                     cache_read,
                 )
-            if app_cfg is not None and multimodal_openai_trio_rag_frontload_enabled(app_cfg):
+            raw_b = hints.get("blank_assignment_ipynb_bytes")
+            blank_ipynb_b = bytes(raw_b) if isinstance(raw_b, (bytes, bytearray)) else b""
+            skip_openai_for_blank_template = bool(
+                envelope.artifacts.get("ipynb")
+                and blank_template_chunking_requested(
+                    blank_bytes=blank_ipynb_b, cfg=app_cfg
+                )
+            )
+            if (
+                app_cfg is not None
+                and multimodal_openai_trio_rag_frontload_enabled(app_cfg)
+                and not skip_openai_for_blank_template
+            ):
                 fl_chunks, fl_audit = run_openai_trio_rag_frontload(
                     envelope, app_cfg, answer_key_for_prompt
                 )
@@ -409,6 +533,7 @@ class MultimodalGradingPipeline:
                 _log.warning("Could not save multimodal chunk cache to %s: %s", out_p, exc)
 
         _try_persist_trio_chunks_json(envelope, chunks, hints, wf)
+        _try_persist_assignment_chunking_json(envelope, chunks, hints, chunker_mode, wf)
 
         art.append(
             "chunking",

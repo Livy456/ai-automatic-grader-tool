@@ -112,21 +112,20 @@ class GradingChunk:
 
 @dataclass
 class CriterionScore:
-    """``score`` is the raw rubric level (half-step grid); ``calibrated_credit`` is g(r) in [0,1]."""
+    """``score`` is the raw rubric level on the assignment’s half-step grid for this row."""
 
     name: str
     score: float
     max_points: float
     weight: float = 1.0
-    calibrated_credit: float = 0.0
 
 
 @dataclass
 class ParsedChunkGrade:
     """
     ``total_score`` is the sum of per-criterion raw rubric scores (audit).
-    ``normalized_score`` is the weighted calibrated question score in ``[0, 1]``.
-    ``calibrated_question_score_0_100`` is ``100 * normalized_score``.
+    ``normalized_score`` is ``sum(score) / sum(max_points)`` in ``[0, 1]``.
+    ``calibrated_question_score_0_100`` is ``100 * normalized_score`` (legacy field name).
     """
 
     rubric_type: RubricType | str

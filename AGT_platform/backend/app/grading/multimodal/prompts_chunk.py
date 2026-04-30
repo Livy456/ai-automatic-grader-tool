@@ -112,12 +112,12 @@ OUTPUT_SCHEMA_HINT = {
         "string — one per criterion, same order as criterion_scores",
     ],
     "total_score": "optional — sum of raw scores (server may ignore)",
-    "normalized_score": "optional — server recomputes from calibrated mapping",
+    "normalized_score": "optional — server recomputes as sum(raw_score)/sum(max_points)",
     "confidence_note": "string — brief note if uncertain",
     "review_flag": "boolean — true only if evidence is genuinely ambiguous",
     "note": (
-        "Server adds calibrated_credit and mean calibrated question score. "
-        "If raw_score is not on 0,0.5,…,R, server ceils to the next half-step capped at R."
+        "Server validates half-step raw scores and recomputes totals; criterion ``score`` in "
+        "exported JSON is the snapped raw rubric level on each row’s scale."
     ),
 }
 

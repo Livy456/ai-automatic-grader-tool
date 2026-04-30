@@ -296,6 +296,15 @@ class Config:
     MULTIMODAL_OPENAI_TRIO_ANSWER_KEY_MAX_CHARS = _env_int(
         "MULTIMODAL_OPENAI_TRIO_ANSWER_KEY_MAX_CHARS", default=32_000
     )
+    # Blank instructor ``.ipynb`` (``blank_assignments/``) drives question boundaries when aligned
+    # with the student notebook. Values: ``off`` | ``on`` | ``auto`` (default: use blank when bytes resolve).
+    MULTIMODAL_BLANK_TEMPLATE_CHUNKING = (
+        _env_str("MULTIMODAL_BLANK_TEMPLATE_CHUNKING").strip().lower() or "auto"
+    )
+    # When a blank ``.ipynb`` is resolved: ``off`` | ``on`` | ``auto`` (try LLM question list when cfg + client exist).
+    MULTIMODAL_BLANK_LLM_QUESTIONS = (
+        _env_str("MULTIMODAL_BLANK_LLM_QUESTIONS").strip().lower() or "auto"
+    )
     # Defaults align with gpt-5.4-nano + text-embedding-3-small list pricing; override if your SKU differs.
     OPENAI_TRIO_RAG_CHAT_INPUT_USD_PER_MTOK = _env_float(
         "OPENAI_TRIO_RAG_CHAT_INPUT_USD_PER_MTOK", default=0.20

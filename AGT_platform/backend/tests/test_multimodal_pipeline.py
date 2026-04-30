@@ -81,7 +81,14 @@ from app.grading.multimodal.answer_key_chunk_enrich import (
     split_answer_key_sections,
 )
 from app.grading.multimodal.chunk_cache import save_grading_chunks_cache
-from app.grading.multimodal.notebook_chunker import build_notebook_qa_chunks
+from app.grading.multimodal.notebook_chunker import (
+    build_notebook_qa_chunks,
+    build_notebook_question_boundary_chunks,
+)
+from app.grading.multimodal.template_aligned_notebook_chunks import (
+    build_blank_template_aligned_notebook_chunks,
+)
+from app.grading.blank_assignment_resolve import resolve_blank_assignment_ipynb
 from app.grading.multimodal.prompts_chunk import build_chunk_grading_prompt
 from app.grading.multimodal.rag_embeddings import (
     build_multimodal_grading_chunks,
@@ -1195,12 +1202,16 @@ class NotebookChunkingAccuracyTests(unittest.TestCase):
                 numeric_ids = [
                     ch.question_id
                     for ch in chunks
-                    if re.match(r"\d+\.", ch.question_id)
+                    if re.match(
+                        r"^\d+(\.\d+)*[a-zA-Z]?$",
+                        str(ch.question_id or ""),
+                        re.I,
+                    )
                 ]
                 self.assertGreater(
                     len(numeric_ids), 0,
                     f"[{stem}] Has ### Question headers but chunker "
-                    f"produced no numeric question IDs. Got: "
+                    f"produced no numeric-looking question IDs. Got: "
                     f"{[ch.question_id for ch in chunks]}",
                 )
 
@@ -1266,6 +1277,244 @@ class AnswerKeyChunkEnrichTests(unittest.TestCase):
         rag = unit.get("answer_key_rag")
         self.assertIsInstance(rag, dict)
         self.assertGreater(rag.get("embedding_dimension", 0), 0)
+
+
+class NotebookChunkerInformalHeadingsTests(unittest.TestCase):
+    """Labs without ``Question 1.1`` headings — ``## Step``, ``(N min)`` titles, prompt prose."""
+
+    def test_substantive_hash_headings_split_units(self) -> None:
+        nb = {
+            "nbformat": 4,
+            "nbformat_minor": 5,
+            "metadata": {},
+            "cells": [
+                {
+                    "cell_type": "markdown",
+                    "metadata": {},
+                    "source": ["# Week 4 Lab\n", "Intro paragraph.\n"],
+                },
+                {
+                    "cell_type": "markdown",
+                    "metadata": {},
+                    "source": ["Loading CSV Into pandas (5 min)\n"],
+                },
+                {
+                    "cell_type": "markdown",
+                    "metadata": {},
+                    "source": ["## Step 4: Get Familiar with Climate Data (one code cell)\n"],
+                },
+                {"cell_type": "code", "metadata": {}, "source": ["# setup\npass\n"]},
+                {
+                    "cell_type": "markdown",
+                    "metadata": {},
+                    "source": ["### Choose one column to explore (second code cell)\n"],
+                },
+                {"cell_type": "code", "metadata": {}, "source": ["import pandas as pd\n"]},
+            ],
+        }
+        raw = json.dumps(nb).encode("utf-8")
+        chunks = build_notebook_qa_chunks(
+            raw, assignment_id="lab", student_id="stu",
+        )
+        self.assertGreaterEqual(len(chunks), 2, [c.question_id for c in chunks])
+        joined_q = " ".join(
+            (c.evidence or {}).get("question_text", "") for c in chunks
+        ).lower()
+        self.assertIn("step 4", joined_q)
+        self.assertIn("choose one column", joined_q)
+
+    def test_prompt_extension_markdown_stays_with_question(self) -> None:
+        nb = {
+            "nbformat": 4,
+            "nbformat_minor": 5,
+            "metadata": {},
+            "cells": [
+                {
+                    "cell_type": "markdown",
+                    "metadata": {},
+                    "source": ["## Print column names\n"],
+                },
+                {
+                    "cell_type": "markdown",
+                    "metadata": {},
+                    "source": [
+                        "Now that we have our dataframe, use the code block below "
+                        "to print the names of all columns.\n",
+                    ],
+                },
+                {"cell_type": "code", "metadata": {}, "source": ["print(df.columns)\n"]},
+            ],
+        }
+        raw = json.dumps(nb).encode("utf-8")
+        chunks = build_notebook_qa_chunks(
+            raw, assignment_id="lab", student_id="stu",
+        )
+        self.assertTrue(chunks)
+        qt = str((chunks[0].evidence or {}).get("question_text") or "").lower()
+        self.assertIn("code block below", qt)
+        self.assertIn("now that we have", qt)
+
+
+class BlankTemplateAlignedChunkTests(unittest.TestCase):
+    """Blank ``blank_assignments/`` template + student ipynb → aligned trio chunks."""
+
+    def test_question_boundary_blank_produces_units(self) -> None:
+        nb = {
+            "nbformat": 4,
+            "nbformat_minor": 5,
+            "metadata": {},
+            "cells": [
+                {
+                    "cell_type": "markdown",
+                    "metadata": {},
+                    "source": ["### Question 1.1\n", "First prompt.\n"],
+                },
+                {
+                    "cell_type": "markdown",
+                    "metadata": {},
+                    "source": ["### Question 1.2\n", "Second prompt.\n"],
+                },
+            ],
+        }
+        raw = json.dumps(nb).encode("utf-8")
+        tpl = build_notebook_question_boundary_chunks(
+            raw, assignment_id="hw", student_id="__blank__",
+        )
+        self.assertEqual(len(tpl), 2)
+        self.assertEqual({c.question_id for c in tpl}, {"1.1", "1.2"})
+
+    def test_blank_template_aligned_chunk_ids_and_trio(self) -> None:
+        blank = {
+            "nbformat": 4,
+            "nbformat_minor": 5,
+            "metadata": {},
+            "cells": [
+                {
+                    "cell_type": "markdown",
+                    "metadata": {},
+                    "source": ["### Question 1.1\n", "Do A.\n"],
+                },
+                {
+                    "cell_type": "markdown",
+                    "metadata": {},
+                    "source": ["### Question 1.2\n", "Do B.\n"],
+                },
+            ],
+        }
+        student = {
+            "nbformat": 4,
+            "nbformat_minor": 5,
+            "metadata": {},
+            "cells": [
+                {
+                    "cell_type": "markdown",
+                    "metadata": {},
+                    "source": ["### Question 1.1\n", "Do A.\n"],
+                },
+                {
+                    "cell_type": "code",
+                    "metadata": {},
+                    "source": ["ans_a = 10\n"],
+                },
+                {
+                    "cell_type": "markdown",
+                    "metadata": {},
+                    "source": ["### Question 1.2\n", "Do B.\n"],
+                },
+                {
+                    "cell_type": "code",
+                    "metadata": {},
+                    "source": ["ans_b = 20\n"],
+                },
+            ],
+        }
+        blank_b = json.dumps(blank).encode("utf-8")
+        stu_b = json.dumps(student).encode("utf-8")
+        envelope = ingest_raw_submission(
+            assignment_id="Week_1_Pset",
+            student_id="Student_1",
+            artifacts={"ipynb": stu_b},
+            extracted_plaintext="",
+            modality_hints={
+                "modality_subtype": "notebook",
+                "blank_assignment_ipynb_bytes": blank_b,
+                "blank_assignment_matched_file": "Week_1_blank.ipynb",
+            },
+        )
+        cfg = Config()
+        out = build_blank_template_aligned_notebook_chunks(
+            envelope, blank_ipynb_bytes=blank_b, cfg=cfg,
+        )
+        self.assertIsNotNone(out)
+        chunks, mode = out
+        self.assertEqual(mode, "blank_template_aligned_notebook")
+        self.assertEqual(len(chunks), 2)
+        self.assertTrue(
+            chunks[0].chunk_id.startswith("Week_1_Pset:Student_1:template_trio:0:"),
+        )
+        trio = (chunks[0].evidence or {}).get("trio")
+        self.assertIsInstance(trio, dict)
+        self.assertIn("Do A.", str(trio.get("question") or ""))
+        self.assertIn("ans_a", str(trio.get("student_response") or ""))
+        self.assertTrue((chunks[0].evidence or {}).get("_blank_template_trio"))
+
+    def test_build_multimodal_prefers_blank_template_when_configured(self) -> None:
+        # ``Config`` reads this env at import time; use a lightweight object for the chunker.
+        cfg = SimpleNamespace(MULTIMODAL_BLANK_TEMPLATE_CHUNKING="on")
+        blank = {
+            "nbformat": 4,
+            "nbformat_minor": 5,
+            "metadata": {},
+            "cells": [
+                {
+                    "cell_type": "markdown",
+                    "metadata": {},
+                    "source": ["### Question 2.1\n", "Q.\n"],
+                },
+            ],
+        }
+        student = {
+            "nbformat": 4,
+            "nbformat_minor": 5,
+            "metadata": {},
+            "cells": [
+                {
+                    "cell_type": "markdown",
+                    "metadata": {},
+                    "source": ["### Question 2.1\n", "Q.\n"],
+                },
+                {"cell_type": "code", "metadata": {}, "source": ["x = 1\n"]},
+            ],
+        }
+        envelope = ingest_raw_submission(
+            assignment_id="t_hw",
+            student_id="s1",
+            artifacts={"ipynb": json.dumps(student).encode("utf-8")},
+            extracted_plaintext="",
+            modality_hints={
+                "modality_subtype": "notebook",
+                "blank_assignment_ipynb_bytes": json.dumps(blank).encode("utf-8"),
+            },
+        )
+        chunks, mode = build_multimodal_grading_chunks(envelope, cfg)
+        self.assertEqual(mode, "blank_template_aligned_notebook")
+        self.assertEqual(len(chunks), 1)
+        self.assertEqual(
+            (chunks[0].evidence or {}).get("chunker"),
+            "blank_template_aligned_notebook",
+        )
+
+    def test_resolve_blank_prefers_exact_stem(self) -> None:
+        with tempfile.TemporaryDirectory() as td:
+            p = Path(td)
+            target = p / "My_Assignment.ipynb"
+            target.write_text(
+                '{"nbformat":4,"nbformat_minor":5,"metadata":{},"cells":[]}',
+                encoding="utf-8",
+            )
+            got, name = resolve_blank_assignment_ipynb("My_Assignment", p)
+            self.assertEqual(name, "My_Assignment.ipynb")
+            self.assertGreater(len(got), 4)
 
 
 class NotebookChunkerInstructorScaffoldTests(unittest.TestCase):
@@ -1870,7 +2119,7 @@ class ParseChunkGradeRubricAlignmentTests(unittest.TestCase):
         names = [c.name for c in parsed.criterion_scores]
         self.assertEqual(names, ["Conceptual Correctness", "Clarity"])
         self.assertEqual(parsed.criterion_scores[0].score, 3.5)
-        self.assertAlmostEqual(parsed.criterion_scores[0].calibrated_credit, 0.90, places=5)
+        self.assertAlmostEqual(parsed.normalized_score, 0.7, places=5)
         self.assertTrue(any("dropped_unknown_criterion" in w for w in warns))
 
 
@@ -2077,8 +2326,10 @@ class MultimodalHuggingFaceRoutingTests(unittest.TestCase):
         cfg.OPENAI_API_KEY = "sk-test"
         cfg.OPENAI_TRIO_RAG_CHAT_MODEL = "gpt-test"
         cfg.OPENAI_TRIO_RAG_EMBEDDING_MODEL = "text-embedding-3-small"
-        cfg.MULTIMODAL_OPENAI_TRIO_WINDOW_CHARS = 12
-        cfg.MULTIMODAL_OPENAI_TRIO_WINDOW_OVERLAP_CHARS = 2
+        # Frontload clamps ``MULTIMODAL_OPENAI_TRIO_WINDOW_CHARS`` to at least 4000, so the
+        # submission must be longer than one window to exercise multi-window merging.
+        cfg.MULTIMODAL_OPENAI_TRIO_WINDOW_CHARS = 4000
+        cfg.MULTIMODAL_OPENAI_TRIO_WINDOW_OVERLAP_CHARS = 200
 
         inst = MagicMock()
         one_unit = {
@@ -2096,7 +2347,7 @@ class MultimodalHuggingFaceRoutingTests(unittest.TestCase):
         def fake_embed(texts, **kwargs):
             return [[0.1, 0.2] for _ in range(len(texts))], 10
 
-        long_text = "x" * 30
+        long_text = "x" * 5000
         with patch(
             "app.grading.multimodal.openai_trio_rag_frontload.OpenAIJsonClient",
             return_value=inst,

@@ -16,10 +16,8 @@ from app.grading.rubric_allowlist import (
 from app.grading.rubric_credit_calibration import (
     anchor_map_monotone_increasing,
     ceiling_half_point_on_grid,
-    compute_mean_calibrated_question_score,
     format_anchor_map_for_log,
     get_anchor_map_for_criterion,
-    map_raw_score_to_calibrated_credit,
     validate_raw_score_increment,
 )
 
@@ -88,7 +86,6 @@ def _align_parsed_to_rubric_rows(
                     score=0.0,
                     max_points=float(mp or 0),
                     weight=1.0,
-                    calibrated_credit=0.0,
                 )
             )
             new_just.append("")
@@ -108,7 +105,6 @@ def _align_parsed_to_rubric_rows(
                 score=sc,
                 max_points=mx,
                 weight=1.0,
-                calibrated_credit=0.0,
             )
         )
         idx = int(_best_idx)
@@ -155,16 +151,15 @@ def _ordered_rubric_rows(rubric_rows: list[dict[str, Any]]) -> list[dict[str, An
     return out
 
 
-def _finalize_rubric_calibration(
+def _finalize_rubric_half_steps(
     parsed: ParsedChunkGrade,
     rubric_rows: list[dict[str, Any]],
     *,
     invalid_raw_score_policy: str = "regenerate",
 ) -> tuple[ParsedChunkGrade | None, list[str]]:
     """
-    Validate half-step raw scores, map to calibrated credits, set question score (mean credit).
-
-    On ``regenerate`` policy, any invalid raw score fails the whole parse (returns None).
+    Validate half-step raw scores per rubric row; recompute totals from raw ``score`` only
+    (no calibrated credit blending).
     """
     extra: list[str] = []
     ordered_rr = _ordered_rubric_rows(rubric_rows)
@@ -215,32 +210,25 @@ def _finalize_rubric_calibration(
         anchor = get_anchor_map_for_criterion(rr if rr else None)
         if not anchor_map_monotone_increasing(anchor):
             extra.append(f"anchor_map_non_monotone:{cs.name!r}")
-        g = map_raw_score_to_calibrated_credit(raw, anchor)
         rebuilt.append(
             CriterionScore(
                 name=cs.name,
                 score=raw,
                 max_points=float(R or cs.max_points or 0),
                 weight=1.0,
-                calibrated_credit=float(g),
             )
         )
         _log.info(
-            "rubric_calibration name=%s R=%.3f raw=%.2f credit=%.4f anchor=%s",
+            "rubric_half_step name=%s R=%.3f raw=%.2f anchor=%s",
             cs.name,
             R,
             raw,
-            g,
             format_anchor_map_for_log(anchor),
         )
 
-    sq_100, audit = compute_mean_calibrated_question_score(
-        [c.calibrated_credit for c in rebuilt],
-        scale_to_100=True,
-    )
     raw_sum = sum(c.score for c in rebuilt)
-    norm = max(0.0, min(1.0, sq_100 / 100.0))
-    extra.append("ignored_llm_total_and_normalized_recomputed_from_calibration")
+    mx_total = sum(c.max_points for c in rebuilt) or 1.0
+    norm = max(0.0, min(1.0, float(raw_sum) / float(mx_total)))
     warns = list(parsed.parse_warnings) + extra
     return (
         ParsedChunkGrade(
@@ -254,9 +242,9 @@ def _finalize_rubric_calibration(
             criterion_evidence=list(parsed.criterion_evidence),
             criterion_reasoning=list(parsed.criterion_reasoning),
             parse_warnings=warns,
-            calibrated_question_score_0_100=float(sq_100),
+            calibrated_question_score_0_100=float(norm) * 100.0,
         ),
-        [f"calibration_audit:{row}" for row in audit[:20]],
+        [],
     )
 
 
@@ -351,7 +339,6 @@ def parse_chunk_grade_json(
                 score=score,
                 max_points=mx,
                 weight=1.0,
-                calibrated_credit=0.0,
             )
         )
         ij = str(row.get("justification") or row.get("reason") or row.get("explanation") or "")
@@ -430,7 +417,7 @@ def parse_chunk_grade_json(
     if rubric_list:
         parsed = _align_parsed_to_rubric_rows(parsed, rubric_list)
         warnings = list(parsed.parse_warnings)
-        fin, audit_msgs = _finalize_rubric_calibration(
+        fin, audit_msgs = _finalize_rubric_half_steps(
             parsed,
             rubric_list,
             invalid_raw_score_policy=invalid_raw_score_policy,
@@ -440,19 +427,11 @@ def parse_chunk_grade_json(
         parsed = fin
         warnings = list(parsed.parse_warnings) + audit_msgs
     elif c_scores:
-        adj: list[CriterionScore] = []
-        for cs in parsed.criterion_scores:
-            if cs.max_points:
-                g_lin = max(0.0, min(1.0, float(cs.score) / float(cs.max_points)))
-            else:
-                g_lin = 0.0
-            adj.append(replace(cs, calibrated_credit=g_lin))
-        tot = sum(cs.score for cs in adj)
-        mxt = sum(cs.max_points for cs in adj) or 1.0
+        tot = sum(cs.score for cs in parsed.criterion_scores)
+        mxt = sum(cs.max_points for cs in parsed.criterion_scores) or 1.0
         n_lin = max(0.0, min(1.0, float(tot) / float(mxt)))
         parsed = replace(
             parsed,
-            criterion_scores=adj,
             total_score=float(tot),
             normalized_score=float(n_lin),
             calibrated_question_score_0_100=float(n_lin) * 100.0,

@@ -94,6 +94,8 @@ env.production.gpu
 **/multi-modal_RAG_embeding/*
 **/answer_key/*
 **/grading_output copy/*
+**/blank_assignments/*
+**/assignment_chunking/*
 
 # Cursor implementation prompt (local only)
 /multi_llm_semantic_entropy.md

@@ -50,10 +50,8 @@ def align_criterion_text_maps_to_consensus(
     consensus_crit: dict[str, float],
 ) -> tuple[dict[str, str], dict[str, str], dict[str, str]]:
     """
-    For each criterion, pick the sample whose **calibrated_credit** is closest to the
-    consensus value (prefer non-empty evidence on ties). Aligns text with numeric
-    consensus so strong justifications are not paired with empty ``evidence`` from an
-    unrelated sample.
+    For each criterion, pick the sample whose **score / max_points** is closest to the
+    consensus fraction (prefer non-empty evidence on ties).
     """
     just_map: dict[str, str] = {}
     ev_map: dict[str, str] = {}
@@ -68,7 +66,10 @@ def align_criterion_text_maps_to_consensus(
             g_here: float | None = None
             for cs in p.criterion_scores:
                 if cs.name == name:
-                    g_here = float(cs.calibrated_credit)
+                    if cs.max_points:
+                        g_here = float(cs.score) / float(cs.max_points)
+                    else:
+                        g_here = 0.0
                     break
             if g_here is None:
                 continue
@@ -133,13 +134,14 @@ def consensus_normalized_score(
 
 
 def criterion_ratios(parsed: ParsedChunkGrade) -> dict[str, float]:
-    """Per-criterion calibrated credit in ``[0, 1]`` (rubric-anchored, not score/max)."""
+    """Per-criterion ``score / max_points`` in ``[0, 1]`` (used for multi-sample consensus)."""
     out: dict[str, float] = {}
     for c in parsed.criterion_scores:
-        g = float(getattr(c, "calibrated_credit", 0.0) or 0.0)
-        if g <= 0.0 and c.max_points:
+        if c.max_points:
             g = max(0.0, min(1.0, float(c.score) / float(c.max_points)))
-        out[c.name] = max(0.0, min(1.0, g))
+        else:
+            g = 0.0
+        out[c.name] = g
     return out
 
 

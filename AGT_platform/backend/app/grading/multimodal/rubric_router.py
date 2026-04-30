@@ -71,6 +71,12 @@ def _chunk_is_ipynb_submission(chunk: GradingChunk) -> bool:
     ev = chunk.evidence or {}
     if ev.get("chunker") == "notebook_cell_order":
         return True
+    if ev.get("chunker") == "blank_template_aligned_notebook":
+        return True
+    if ev.get("chunker") == "blank_llm_question_aligned_notebook":
+        return True
+    if ev.get("_blank_template_trio"):
+        return True
     if ev.get("_openai_trio_rag_frontload"):
         return True
     if chunk.modality == Modality.NOTEBOOK:
