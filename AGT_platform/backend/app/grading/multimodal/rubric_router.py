@@ -75,6 +75,8 @@ def _chunk_is_ipynb_submission(chunk: GradingChunk) -> bool:
         return True
     if ev.get("chunker") == "blank_llm_question_aligned_notebook":
         return True
+    if ev.get("chunker") == "blank_scaffold_aligned_notebook":
+        return True
     if ev.get("_blank_template_trio"):
         return True
     if ev.get("_openai_trio_rag_frontload"):

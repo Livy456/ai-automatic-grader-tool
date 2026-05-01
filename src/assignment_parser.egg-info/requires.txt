@@ -1,0 +1,5 @@
+python-docx>=1.0.0
+
+[dev]
+pytest>=7.4
+mypy>=1.8

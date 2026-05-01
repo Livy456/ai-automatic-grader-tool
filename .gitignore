@@ -95,6 +95,7 @@ env.production.gpu
 **/answer_key/*
 **/grading_output copy/*
 **/blank_assignments/*
+**/grading_output_training/*
 **/assignment_chunking/*
 
 # Cursor implementation prompt (local only)

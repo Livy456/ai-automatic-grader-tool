@@ -1,0 +1,2 @@
+[console_scripts]
+assignment-parser = assignment_parser.__main__:main

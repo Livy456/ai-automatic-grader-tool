@@ -1,12 +1,11 @@
 """
 Align **blank** instructor notebooks (``blank_assignments/``) with student ``.ipynb`` submissions.
 
-When ``MULTIMODAL_BLANK_LLM_QUESTIONS`` is not ``off`` and a structure LLM is configured,
-:mod:`blank_llm_question_chunker` lists distinct questions from the blank template, then
-matches student cells by embedding similarity. Otherwise question/instruction boundaries
-come from :func:`notebook_chunker.build_notebook_question_boundary_chunks` on the blank
-template; student answers come from :func:`notebook_chunker.build_notebook_qa_chunks` on
-the submission. Resulting chunks use ``chunk_id`` shaped like OpenAI trio frontload
+When ``blank_assignments/`` bytes are available, chunking prefers **scaffold code-cell
+anchors** (``# TODO``, ``# add your code``, placeholders) matched by ordinal between blank
+and student, then optional LLM question lists from the blank, then question-boundary
+chunks on the blank paired with student :func:`notebook_chunker.build_notebook_qa_chunks`.
+Resulting chunks use ``chunk_id`` shaped like OpenAI trio frontload
 (``{assignment_id}:{student_id}:template_trio:{i}:{qid}``) and set ``evidence["_blank_template_trio"]``
 so the pipeline skips relabeling that would overwrite the alignment.
 """
@@ -23,6 +22,7 @@ from .ingestion import IngestionEnvelope
 from .notebook_chunker import (
     build_notebook_qa_chunks,
     build_notebook_question_boundary_chunks,
+    try_build_notebook_scaffold_aligned_chunks,
 )
 from .schemas import GradingChunk, Modality, TaskType
 from .chunker import modality_from_hints, task_type_from_hints
@@ -121,6 +121,99 @@ def _trio_question_student(
     return q, sr, ic, ext
 
 
+def _max_grading_units_from_hints(hints: dict) -> int | None:
+    cap = hints.get("max_grading_units")
+    if cap is None:
+        return None
+    try:
+        return int(cap)
+    except (TypeError, ValueError):
+        return None
+
+
+def _try_scaffold_blank_student_alignment(
+    envelope: IngestionEnvelope,
+    blank_ipynb_bytes: bytes,
+    *,
+    max_grading_units: int | None = None,
+) -> tuple[list[GradingChunk], str] | None:
+    """
+    When the blank and student notebooks share the same number of scaffold **code** cells
+    (TODO / add code / placeholders), emit one template-style chunk per anchor.
+    """
+    hints = envelope.modality_hints or {}
+    raw = (envelope.artifacts or {}).get("ipynb")
+    if not isinstance(raw, (bytes, bytearray)):
+        return None
+    student_bytes = bytes(raw)
+    if not student_bytes.strip():
+        return None
+
+    aid = envelope.assignment_id
+    sid = envelope.student_id
+    nb_mod = modality_from_hints(hints)
+    if nb_mod == Modality.UNKNOWN:
+        nb_mod = Modality.NOTEBOOK
+    task = task_type_from_hints(hints)
+
+    scaffold_try = try_build_notebook_scaffold_aligned_chunks(
+        blank_ipynb_bytes,
+        student_bytes,
+        assignment_id=aid,
+        student_id=sid,
+        modality=nb_mod,
+        task_type=task,
+        max_grading_units=max_grading_units,
+    )
+    if not scaffold_try:
+        return None
+
+    out_sc: list[GradingChunk] = []
+    for i, ch in enumerate(scaffold_try):
+        ev0 = dict(ch.evidence or {})
+        trio = ev0.get("trio")
+        q, sr, ic = "", "", ""
+        if isinstance(trio, dict):
+            q = str(trio.get("question") or "").strip()
+            sr = str(trio.get("student_response") or "").strip()
+            ic = str(trio.get("instructor_context") or "").strip()
+        qid = _safe_qid(str(ch.question_id or ""), i)
+        cid = f"{aid}:{sid}:template_trio:{i}:{qid}"
+        ext = "\n\n".join(p for p in (q, sr) if p).strip() or (ch.extracted_text or "").strip()
+        ev0["chunker"] = "blank_scaffold_aligned_notebook"
+        ev0["question_id"] = str(ch.question_id or qid)
+        ev0["question_text"] = str(ev0.get("question_text") or q)[:2000]
+        ev0["response_preview"] = str(ev0.get("response_preview") or sr)[:500]
+        ev0["trio"] = {
+            "question": q,
+            "student_response": sr,
+            "instructor_context": ic,
+            "answer_key_segment": "",
+        }
+        ev0["_blank_template_trio"] = True
+        ev0["blank_template_question_source"] = str(
+            hints.get("blank_assignment_matched_file") or "blank_assignments"
+        )
+        ev0["student_notebook_chunker"] = "notebook_scaffold_anchor_aligned"
+        out_sc.append(
+            GradingChunk(
+                chunk_id=cid,
+                assignment_id=aid,
+                student_id=sid,
+                question_id=str(ch.question_id or qid),
+                modality=nb_mod,
+                task_type=task,
+                extracted_text=ext,
+                evidence=ev0,
+            )
+        )
+    if max_grading_units is not None and max_grading_units >= 1:
+        out_sc = out_sc[:max_grading_units]
+    if not out_sc:
+        return None
+    return out_sc, "blank_scaffold_aligned_notebook"
+
+
 def build_blank_template_aligned_notebook_chunks(
     envelope: IngestionEnvelope,
     *,
@@ -140,13 +233,7 @@ def build_blank_template_aligned_notebook_chunks(
     if not student_bytes.strip():
         return None
 
-    cap = hints.get("max_grading_units")
-    max_units: int | None = None
-    if cap is not None:
-        try:
-            max_units = int(cap)
-        except (TypeError, ValueError):
-            max_units = None
+    max_units = _max_grading_units_from_hints(hints)
 
     aid = envelope.assignment_id
     sid = envelope.student_id
@@ -154,6 +241,12 @@ def build_blank_template_aligned_notebook_chunks(
     if nb_mod == Modality.UNKNOWN:
         nb_mod = Modality.NOTEBOOK
     task = task_type_from_hints(hints)
+
+    hit = _try_scaffold_blank_student_alignment(
+        envelope, blank_ipynb_bytes, max_grading_units=max_units
+    )
+    if hit:
+        return hit
 
     template_chunks = build_notebook_question_boundary_chunks(
         blank_ipynb_bytes,
@@ -239,6 +332,13 @@ def try_build_blank_template_aligned_chunks(
     blank_bytes = bytes(blank_bytes)
     if not blank_template_chunking_requested(blank_bytes=blank_bytes, cfg=cfg):
         return None
+    sc = _try_scaffold_blank_student_alignment(
+        envelope,
+        blank_bytes,
+        max_grading_units=_max_grading_units_from_hints(hints),
+    )
+    if sc:
+        return sc
     if cfg is not None:
         from .blank_llm_question_chunker import try_build_llm_blank_aligned_notebook_chunks
 

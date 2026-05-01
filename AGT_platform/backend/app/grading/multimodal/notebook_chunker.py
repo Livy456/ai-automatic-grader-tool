@@ -6,9 +6,9 @@ Question boundaries are **not** limited to ``### Question 1.1``-style headings: 
 ``##`` / ``###`` lines (e.g. ``## Step 4: …``), plain titles with time estimates
 (``Loading CSV … (5 min)``), and instructional markdown that references ``code block below``
 stay with the prompt until the next code cell. When a **blank** instructor copy is aligned
-(:mod:`template_aligned_notebook_chunks`), the same classification applies to both notebooks.
-
-The text-based heuristic chunker receives pre-flattened plaintext where code
+(:mod:`template_aligned_notebook_chunks`), **scaffold code-cell anchors** on the blank
+(``# TODO`` / ``add code`` / placeholders) align the student's response tail by ordinal
+anchor. The text-based heuristic chunker receives pre-flattened plaintext where code
 and markdown are split into separate sections (destroying Q/A pairing).  This
 module parses the raw notebook JSON to produce accurate ``GradingChunk`` objects.
 """
@@ -408,6 +408,239 @@ def _split_instructor_prefix_and_student_suffix(src: str) -> tuple[str, str]:
     if best_cut < 0:
         return s, ""
     return s[:best_cut].strip(), best_tail
+
+
+# Code-cell scaffolds: instructor prompts the student where to write (blank + student alignment).
+_SCAFFOLD_LINE_HINT = re.compile(
+    r"(?:"
+    r"to\s*do\b|todo\b|fixme\b|tbd\b|"
+    r"add\s+(your\s+)?code|insert\s+(your\s+)?code|"
+    r"your\s+code\s+(here|below)|write\s+your\s+code|"
+    r"fill\s+in|complete\s+(this|the)|replace\s+(this|the)|"
+    r"student\s+(code|answer)\s+below|\+{2,}\s*your|\.{3}\s*add"
+    r")",
+    re.IGNORECASE,
+)
+
+
+def code_cell_has_scaffold_instruction(src: str) -> bool:
+    """
+    True when a **code** cell signals a student deliverable (TODO / add code / placeholders).
+
+    Used with the **blank** notebook to locate anchor cells; the same indices (ordinal)
+    align the **student** notebook for ``trio.student_response``.
+    """
+    if not (src or "").strip():
+        return False
+    low = src.lower()
+    for line in src.splitlines():
+        t = line.strip()
+        if not t:
+            continue
+        if t.startswith("#") or t.startswith("//"):
+            if _SCAFFOLD_LINE_HINT.search(line):
+                return True
+        if _line_is_assignment_placeholder(line):
+            return True
+    if any(
+        k in low
+        for k in (
+            "add your code",
+            "insert your code",
+            "add code here",
+            "your code below",
+        )
+    ):
+        return True
+    return False
+
+
+def split_code_cell_at_scaffold_for_student_tail(src: str) -> tuple[str, str]:
+    """
+    Split a scaffold **code** cell into ``(prefix_for_prompt, student_tail)``.
+
+    Uses the **last** matching placeholder / scaffold comment line as the cut so
+    ``# setup`` then ``# TODO`` keeps setup in the prompt and code after TODO as the response.
+    """
+    lines = src.splitlines()
+    split_at = -1
+    for i, line in enumerate(lines):
+        if _line_is_assignment_placeholder(line):
+            split_at = i
+            continue
+        if line.strip().startswith("#") and _SCAFFOLD_LINE_HINT.search(line):
+            split_at = i
+    if split_at < 0:
+        return src.strip(), ""
+    rest = "\n".join(lines[split_at + 1 :]).strip()
+    pref = "\n".join(lines[: split_at + 1]).strip()
+    return pref, rest
+
+
+def _notebook_cells_list(ipynb_bytes: bytes) -> list[dict[str, Any]]:
+    try:
+        nb = json.loads(ipynb_bytes.decode("utf-8", errors="replace"))
+    except (json.JSONDecodeError, UnicodeDecodeError):
+        return []
+    cells = nb.get("cells")
+    return cells if isinstance(cells, list) else []
+
+
+def scaffold_anchor_code_cell_indices(cells: list[dict[str, Any]]) -> list[int]:
+    """Indices of **code** cells that carry student scaffold / TODO instructions."""
+    out: list[int] = []
+    for i, cell in enumerate(cells):
+        if cell.get("cell_type") != "code":
+            continue
+        src = _cell_source(cell)
+        if code_cell_has_scaffold_instruction(src):
+            out.append(i)
+    return out
+
+
+def _collect_blank_question_for_segment(
+    cells: list[dict[str, Any]],
+    start_i: int,
+    end_i: int,
+) -> list[str]:
+    """Cells ``start_i`` … ``end_i`` inclusive from the blank; scaffold cell uses prefix only."""
+    parts: list[str] = []
+    for j in range(start_i, end_i + 1):
+        if j < 0 or j >= len(cells):
+            continue
+        cell = cells[j]
+        src = _cell_source(cell).strip()
+        if not src:
+            continue
+        ct = cell.get("cell_type", "")
+        if ct == "code" and j == end_i:
+            pref, _tail = split_code_cell_at_scaffold_for_student_tail(src)
+            parts.append(pref if pref.strip() else src)
+        else:
+            parts.append(src)
+    return parts
+
+
+def _collect_student_response_for_segment(
+    cells: list[dict[str, Any]],
+    anchor_i: int,
+    next_anchor_i: int,
+) -> list[str]:
+    """Student work: tail of scaffold cell at ``anchor_i`` plus following cells until next anchor."""
+    parts: list[str] = []
+    if anchor_i < 0 or anchor_i >= len(cells):
+        return parts
+    anchor_cell = cells[anchor_i]
+    if anchor_cell.get("cell_type") == "code":
+        src = _cell_source(anchor_cell)
+        _pref, tail = split_code_cell_at_scaffold_for_student_tail(src)
+        if tail.strip():
+            parts.append(tail)
+    end = min(next_anchor_i, len(cells))
+    for j in range(anchor_i + 1, end):
+        src = _cell_source(cells[j]).strip()
+        if src:
+            parts.append(src)
+    return parts
+
+
+def try_build_notebook_scaffold_aligned_chunks(
+    blank_ipynb_bytes: bytes,
+    student_ipynb_bytes: bytes,
+    *,
+    assignment_id: str,
+    student_id: str,
+    modality: Modality = Modality.NOTEBOOK,
+    task_type: TaskType = TaskType.UNKNOWN,
+    max_grading_units: int | None = None,
+) -> list[GradingChunk] | None:
+    """
+    One chunk per **scaffold code cell** shared ordinal between blank and student notebooks.
+
+    Question / instructions come from the blank segment up to and including the scaffold
+    prefix; ``student_response`` is the scaffold tail plus following cells until the next
+    scaffold anchor. Returns ``None`` when anchors are missing or counts disagree.
+    """
+    blank_cells = _notebook_cells_list(blank_ipynb_bytes)
+    student_cells = _notebook_cells_list(student_ipynb_bytes)
+    if not blank_cells or not student_cells:
+        return None
+    b_idx = scaffold_anchor_code_cell_indices(blank_cells)
+    s_idx = scaffold_anchor_code_cell_indices(student_cells)
+    if not b_idx or len(b_idx) != len(s_idx):
+        _log.info(
+            "scaffold align: anchor mismatch or empty (blank=%s student=%s)",
+            len(b_idx),
+            len(s_idx),
+        )
+        return None
+
+    units: list[dict[str, Any]] = []
+    for k, (ib, isc) in enumerate(zip(b_idx, s_idx, strict=True)):
+        prev_b = b_idx[k - 1] if k > 0 else -1
+        q_parts = _collect_blank_question_for_segment(blank_cells, prev_b + 1, ib)
+        next_s = s_idx[k + 1] if k + 1 < len(s_idx) else len(student_cells)
+        r_parts = _collect_student_response_for_segment(student_cells, isc, next_s)
+        q_blob = "\n\n".join(q_parts).strip()
+        r_blob = "\n\n".join(r_parts).strip()
+        if not q_blob and not r_blob:
+            continue
+        qid = resolve_question_cell_id(q_blob[:1200] if q_blob else f"scaffold_{k}", ordinal=k + 1)
+        u = _new_unit(qid)
+        u["question_parts"] = q_parts if q_parts else [q_blob or f"(scaffold segment {k + 1})"]
+        u["response_parts"] = r_parts if r_parts else ([] if not r_blob else [r_blob])
+        u["has_student_content"] = bool(r_blob.strip())
+        units.append(u)
+
+    if not units:
+        return None
+
+    if max_grading_units is not None and max_grading_units >= 1:
+        units = units[:max_grading_units]
+
+    out: list[GradingChunk] = []
+    for i, unit in enumerate(units):
+        qid = str(unit["question_id"])
+        extracted = _unit_to_extracted_text(unit)
+        if not extracted:
+            continue
+        trio = _unit_trio_payload(unit)
+        qtxt = strip_assignment_placeholder_lines(
+            "\n\n".join(unit["question_parts"]).strip()
+        )[:2000]
+        rprev = strip_assignment_placeholder_lines(
+            "\n\n".join(unit["response_parts"]).strip()
+        )[:500]
+        out.append(
+            GradingChunk(
+                chunk_id=f"{student_id}:{assignment_id}:{qid}:scaffold_{i}",
+                assignment_id=assignment_id,
+                student_id=student_id,
+                question_id=qid,
+                modality=modality,
+                task_type=task_type,
+                extracted_text=extracted,
+                evidence={
+                    "chunker": "notebook_scaffold_anchor_aligned",
+                    "question_id": qid,
+                    "question_text": qtxt,
+                    "response_preview": rprev,
+                    "trio": trio,
+                    "scaffold_anchor_index": i,
+                    "n_scaffold_anchors": len(b_idx),
+                    "blank_scaffold_cell_indices": list(b_idx),
+                    "student_scaffold_cell_indices": list(s_idx),
+                },
+            )
+        )
+
+    _log.info(
+        "notebook_chunker (scaffold anchors): %d anchors → %d chunks for %s",
+        len(b_idx),
+        len(out),
+        assignment_id,
+    )
+    return out
 
 
 def _classify_code(src: str) -> str:

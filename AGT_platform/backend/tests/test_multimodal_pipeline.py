@@ -1458,6 +1458,99 @@ class BlankTemplateAlignedChunkTests(unittest.TestCase):
         self.assertIn("ans_a", str(trio.get("student_response") or ""))
         self.assertTrue((chunks[0].evidence or {}).get("_blank_template_trio"))
 
+    def test_blank_scaffold_aligned_splits_on_todo_anchors(self) -> None:
+        """Blank + student share ordinal scaffold code cells → one triad per anchor."""
+        blank = {
+            "nbformat": 4,
+            "nbformat_minor": 5,
+            "metadata": {},
+            "cells": [
+                {
+                    "cell_type": "markdown",
+                    "metadata": {},
+                    "source": ["## Task A\n", "Complete the code cell below.\n"],
+                },
+                {
+                    "cell_type": "code",
+                    "metadata": {},
+                    "source": ["# setup\n", "# TODO: implement A\n"],
+                },
+                {
+                    "cell_type": "markdown",
+                    "metadata": {},
+                    "source": ["## Task B\n"],
+                },
+                {
+                    "cell_type": "code",
+                    "metadata": {},
+                    "source": ["# add your code below\n"],
+                },
+            ],
+        }
+        student = {
+            "nbformat": 4,
+            "nbformat_minor": 5,
+            "metadata": {},
+            "cells": [
+                {
+                    "cell_type": "markdown",
+                    "metadata": {},
+                    "source": ["## Task A\n", "Complete the code cell below.\n"],
+                },
+                {
+                    "cell_type": "code",
+                    "metadata": {},
+                    "source": [
+                        "# setup\n",
+                        "# TODO: implement A\n",
+                        "a_answer = 1\n",
+                    ],
+                },
+                {
+                    "cell_type": "markdown",
+                    "metadata": {},
+                    "source": ["## Task B\n"],
+                },
+                {
+                    "cell_type": "code",
+                    "metadata": {},
+                    "source": ["# add your code below\n", "b_answer = 2\n"],
+                },
+            ],
+        }
+        blank_b = json.dumps(blank).encode("utf-8")
+        stu_b = json.dumps(student).encode("utf-8")
+        envelope = ingest_raw_submission(
+            assignment_id="Week_scaffold",
+            student_id="Student_1",
+            artifacts={"ipynb": stu_b},
+            extracted_plaintext="",
+            modality_hints={
+                "modality_subtype": "notebook",
+                "blank_assignment_ipynb_bytes": blank_b,
+            },
+        )
+        out = build_blank_template_aligned_notebook_chunks(
+            envelope, blank_ipynb_bytes=blank_b, cfg=Config(),
+        )
+        self.assertIsNotNone(out)
+        chunks, mode = out
+        self.assertEqual(mode, "blank_scaffold_aligned_notebook")
+        self.assertEqual(len(chunks), 2)
+        self.assertEqual(
+            (chunks[0].evidence or {}).get("chunker"),
+            "blank_scaffold_aligned_notebook",
+        )
+        t0 = (chunks[0].evidence or {}).get("trio")
+        t1 = (chunks[1].evidence or {}).get("trio")
+        self.assertIsInstance(t0, dict)
+        self.assertIsInstance(t1, dict)
+        self.assertIn("Task A", str(t0.get("question") or ""))
+        self.assertIn("a_answer", str(t0.get("student_response") or ""))
+        self.assertIn("Task B", str(t1.get("question") or ""))
+        self.assertIn("b_answer", str(t1.get("student_response") or ""))
+        self.assertTrue((chunks[0].evidence or {}).get("_blank_template_trio"))
+
     def test_build_multimodal_prefers_blank_template_when_configured(self) -> None:
         # ``Config`` reads this env at import time; use a lightweight object for the chunker.
         cfg = SimpleNamespace(MULTIMODAL_BLANK_TEMPLATE_CHUNKING="on")
