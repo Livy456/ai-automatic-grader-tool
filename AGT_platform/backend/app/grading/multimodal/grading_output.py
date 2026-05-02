@@ -1,6 +1,10 @@
 """
 Map :class:`AssignmentGradeResult` to the grading JSON contract used by
 :func:`app.grading.output_schema.validate_grading_output` (``overall`` + ``criteria``).
+
+Each ``question_grades`` entry includes one criterion row per routed rubric dimension
+(with ``name``, ``score``, ``max_points``, ``confidence``, ``justification``, ``evidence``,
+``reasoning``); ``raw_rubric_score`` / ``calibrated_credit`` are never emitted.
 """
 
 from __future__ import annotations
@@ -8,6 +12,7 @@ from __future__ import annotations
 from typing import Any
 
 from app.grading.consistency_rules import run_rule_checks
+from app.grading.output_schema import finalize_criterion_grading_fields
 from app.grading.rubric_allowlist import filter_criteria_dicts_to_allowlist
 from app.grading.rubric_credit_calibration import snap_half_nearest_display
 
@@ -154,7 +159,7 @@ def _sync_rubric_caps_on_criteria_rows(
 
 
 def _coerce_rubric_items(rubric: list) -> list[dict[str, Any]]:
-    """Align with :func:`app.grading.pipelines._coerce_rubric_items` (subset copy)."""
+    """Normalize rubric rows: ``name``, ``max_points``, ``weight``, ``min_points``."""
     out: list[dict[str, Any]] = []
     for x in rubric or []:
         if not isinstance(x, dict):
@@ -178,6 +183,23 @@ def _coerce_rubric_items(rubric: list) -> list[dict[str, Any]]:
     return out
 
 
+def _max_by_name_for_chunk(
+    chunk: ChunkGradeOutcome, full_max_by_name: dict[str, float]
+) -> dict[str, float]:
+    """Use routed rubric row names for this chunk when present; else full assignment rubric."""
+    aux = chunk.auxiliary or {}
+    names = aux.get("rubric_criterion_names") or []
+    if not isinstance(names, list) or not names:
+        return dict(full_max_by_name)
+    out: dict[str, float] = {}
+    for n in names:
+        s = str(n).strip()
+        if not s or s not in full_max_by_name:
+            continue
+        out[s] = float(full_max_by_name[s])
+    return out or dict(full_max_by_name)
+
+
 def _chunk_to_question_grade(
     chunk: ChunkGradeOutcome, max_by_name: dict[str, float]
 ) -> dict[str, Any]:
@@ -196,20 +218,34 @@ def _chunk_to_question_grade(
                 continue
 
     se_confidence = round(float(chunk.ai_confidence), 4)
+    consensus_frac = dict(chunk.criterion_consensus or {})
+
+    # One output row per rubric dimension for this chunk (never an empty ``criteria`` list).
+    names_ordered = sorted(max_by_name.keys())
 
     criteria_rows: list[dict[str, Any]] = []
-    for name in (chunk.criterion_consensus or {}):
-        mp = float(max_by_name.get(name) or 100.0)
-        raw_consensus = float(raw_map.get(name, 0.0))
+    for name in names_ordered:
+        mp = float(max_by_name.get(name) or 0.0)
+        if mp <= 0:
+            continue
+        if name in raw_map:
+            try:
+                raw_consensus = float(raw_map[name])
+            except (TypeError, ValueError):
+                raw_consensus = 0.0
+        elif name in consensus_frac:
+            raw_consensus = float(consensus_frac[name]) * mp
+        else:
+            raw_consensus = 0.0
         raw_s = float(snap_half_nearest_display(raw_consensus, mp))
         row: dict[str, Any] = {
             "name": name,
             "score": raw_s,
             "max_points": mp,
             "confidence": se_confidence,
-            "justification": just_map.get(name) or "",
-            "evidence": ev_map.get(name) or "",
-            "reasoning": reason_map.get(name) or "",
+            "justification": str(just_map.get(name) or "").strip(),
+            "evidence": str(ev_map.get(name) or "").strip(),
+            "reasoning": str(reason_map.get(name) or "").strip(),
         }
         criteria_rows.append(row)
 
@@ -266,7 +302,8 @@ def multimodal_assignment_to_grading_dict(
     max_by_name = {r["name"]: float(r["max_points"]) for r in rubric_items}
 
     question_grades = [
-        _chunk_to_question_grade(c, max_by_name) for c in result.chunk_results
+        _chunk_to_question_grade(c, _max_by_name_for_chunk(c, max_by_name))
+        for c in result.chunk_results
     ]
     sid = str(getattr(result, "student_id", "") or "")
     aid = str(getattr(result, "assignment_id", "") or "")
@@ -294,6 +331,7 @@ def multimodal_assignment_to_grading_dict(
             if isinstance(c, dict):
                 c.pop("weight", None)
                 _snap_criterion_score_row(c)
+                finalize_criterion_grading_fields(c)
         _refresh_qg_overall_rubric_totals(qg)
         issues = run_rule_checks(qg.get("criteria") or [])
         if issues:
@@ -306,8 +344,9 @@ def multimodal_assignment_to_grading_dict(
         merged, allowed, context="assignment_merged"
     )
     all_consistency_issues.extend(allow_issues)
-    for row in merged:
-        _snap_criterion_score_row(row)
+    for c in merged:
+        if isinstance(c, dict):
+            _snap_criterion_score_row(c)
 
     # --- Consistency checks on merged assignment-level criteria ---
     assignment_issues = run_rule_checks(merged)
@@ -328,9 +367,17 @@ def multimodal_assignment_to_grading_dict(
         overall_score = round(sum(per_q_scores) / len(per_q_scores), 6)
     else:
         overall_score = round(_rubric_point_fraction(merged), 6)
-    earned_assign = (
-        round(overall_score * cap_assign, 4) if cap_assign > 0 else 0.0
+    earned_from_chunks = sum(
+        float((qg.get("overall") or {}).get("rubric_points_earned") or 0)
+        for qg in question_grades
+        if isinstance(qg, dict)
     )
+    if question_grades:
+        earned_assign = round(earned_from_chunks, 4)
+    else:
+        earned_assign = (
+            round(overall_score * cap_assign, 4) if cap_assign > 0 else 0.0
+        )
     conf_mean = _mean_criterion_confidence(merged)
 
     entropies = [float(c.semantic_entropy_nats) for c in result.chunk_results]
@@ -353,6 +400,7 @@ def multimodal_assignment_to_grading_dict(
         row.setdefault("justification", "")
         row.setdefault("reasoning", "")
         _snap_criterion_score_row(row)
+        finalize_criterion_grading_fields(row)
         crit_out.append(row)
 
     summary = "; ".join(

@@ -2,8 +2,8 @@
 Build grading units from :func:`submission_chunks.build_submission_chunks` output.
 
 Units group a **question** line with the **student response** chunks that share its
-``pair_id``. Orphan responses (no detected prompt) form a separate unit. Used by the
-``chunk_entropy`` grading pipeline with optional per-unit embeddings.
+``pair_id``. Orphan responses (no detected prompt) form a separate unit. Used when building
+per-unit grading payloads (including multimodal unit lists) with optional per-unit embeddings.
 """
 
 from __future__ import annotations

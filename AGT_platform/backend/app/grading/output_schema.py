@@ -100,7 +100,12 @@ def _normalize_overall_score_fraction(overall: dict[str, Any]) -> None:
 def _sync_question_grade_overall_from_criteria(qg_row: dict[str, Any]) -> None:
     """After criteria are filtered, recompute ``overall.score`` from remaining rows."""
     crits = [c for c in (qg_row.get("criteria") or []) if isinstance(c, dict)]
+    ov = qg_row.setdefault("overall", {})
     if not crits:
+        ov["score"] = 0.0
+        ov["max_score"] = 1.0
+        ov["max_points"] = 0.0
+        ov["rubric_points_earned"] = 0.0
         return
     earned = 0.0
     cap = 0.0
@@ -320,6 +325,149 @@ def coerce_grading_output_shape(data: Any) -> dict[str, Any]:
     return data
 
 
+def finalize_criterion_grading_fields(c: dict[str, Any]) -> None:
+    """
+    Ensure ``justification``, ``evidence``, and ``reasoning`` are present as strings.
+
+    When the model omitted free-text fields but assigned points, insert explicit placeholders
+    so downstream JSON matches the grading-output contract (and matches human-readable exports).
+    """
+    try:
+        sc = float(c.get("score", 0) or 0)
+    except (TypeError, ValueError):
+        sc = 0.0
+    try:
+        mp = float(c.get("max_points") if c.get("max_points") is not None else c.get("max_score") or 0)
+    except (TypeError, ValueError):
+        mp = 0.0
+    j = str(c.get("justification") or "").strip()
+    ev = str(c.get("evidence") or "").strip()
+    rs = str(c.get("reasoning") or "").strip()
+    if j and ev and rs:
+        return
+    if mp <= 0.0:
+        c["justification"] = j or "Not applicable (zero max points for this rubric row)."
+        c["evidence"] = ev or ""
+        c["reasoning"] = rs or ""
+        return
+    if sc <= 0.0:
+        c["justification"] = j or (
+            "No points awarded for this rubric dimension on this question segment."
+        )
+        c["evidence"] = ev or (
+            "No credited student evidence for this criterion in this chunk."
+        )
+        c["reasoning"] = rs or (
+            "A score of 0 reflects missing, off-topic, or non-defensible student work "
+            "for this criterion relative to the rubric."
+        )
+        return
+    c["justification"] = j or (
+        "The grader did not return a separate justification string; the numeric score "
+        "reflects rubric-aligned model output for this row."
+    )
+    c["evidence"] = ev or (
+        "The grader did not return a verbatim student quote for this criterion; "
+        "see other fields or the chunk summary for context."
+    )
+    c["reasoning"] = rs or (
+        "The grader did not return explicit chain-of-thought text; the score follows "
+        "the rubric row consensus for this chunk."
+    )
+
+
+def _normalize_one_criterion_dict(
+    row: dict[str, Any], *, index: str | int
+) -> dict[str, Any]:
+    """Normalize a single criterion row (top-level or under ``question_grades``)."""
+    if not isinstance(row, dict):
+        raise GradingOutputValidationError(f"criterion[{index}] must be a dict")
+    c = dict(row)
+    name = (c.get("name") or c.get("criterion") or "").strip()
+    if not name:
+        name = "unknown"
+    c["name"] = name
+    c["score"] = _coerce_float(c.get("score", 0))
+    c["confidence"] = _coerce_confidence(c.get("confidence", 0.5))
+    if c.get("max_points") is None and c.get("max_score") is not None:
+        c["max_points"] = _coerce_float(c["max_score"])
+    elif c.get("max_points") is not None:
+        c["max_points"] = _coerce_float(c["max_points"])
+    ev = c.get("evidence")
+    if ev is None:
+        c["evidence"] = ""
+    elif isinstance(ev, dict):
+        parts = [str(q) for q in (ev.get("quotes") or [])]
+        notes = str(ev.get("notes") or "")
+        if notes:
+            parts.append(notes)
+        c["evidence"] = " | ".join(parts) if parts else ""
+    elif not isinstance(ev, str):
+        c["evidence"] = str(ev)
+
+    reasoning = c.get("reasoning")
+    if reasoning is None:
+        c["reasoning"] = ""
+    elif not isinstance(reasoning, str):
+        c["reasoning"] = str(reasoning)
+
+    if c.get("justification") is None:
+        c["justification"] = ""
+    elif not isinstance(c.get("justification"), str):
+        c["justification"] = str(c.get("justification"))
+
+    c.pop("calibrated_credit", None)
+    c.pop("raw_rubric_score", None)
+    c.pop("weight", None)
+    finalize_criterion_grading_fields(c)
+    return c
+
+
+def _resync_assignment_overall_from_question_grades(data: dict[str, Any]) -> None:
+    """
+    Set assignment ``overall.score`` to the mean of ``question_grades[].overall.score``.
+
+    When present, also align ``rubric_points_earned`` with the sum of per-question earned
+    points so the headline fraction is not numerically inconsistent with chunk rows.
+    """
+    qg = data.get("question_grades")
+    if not isinstance(qg, list) or not qg:
+        return
+    scores: list[float] = []
+    earned_sum = 0.0
+    for row in qg:
+        if not isinstance(row, dict):
+            continue
+        ov = row.get("overall")
+        if isinstance(ov, dict) and "score" in ov:
+            try:
+                scores.append(float(ov["score"]))
+            except (TypeError, ValueError):
+                continue
+        if isinstance(ov, dict) and ov.get("rubric_points_earned") is not None:
+            try:
+                earned_sum += float(ov["rubric_points_earned"])
+            except (TypeError, ValueError):
+                pass
+    if not scores:
+        return
+    mean_q = round(sum(scores) / len(scores), 6)
+    top = data.get("overall")
+    if not isinstance(top, dict):
+        return
+    prev = float(top.get("score", 0.0))
+    if abs(prev - mean_q) > 1e-5:
+        fl = data.setdefault("flags", [])
+        if isinstance(fl, list):
+            tag = "assignment_overall_resynced_from_question_grades_mean"
+            if tag not in fl:
+                fl.append(tag)
+    top["score"] = mean_q
+    top["max_score"] = 1.0
+    _normalize_overall_score_fraction(top)
+    top["rubric_points_earned"] = round(earned_sum, 4)
+
+
 def validate_grading_output(
     data: dict[str, Any],
     *,
@@ -339,6 +487,13 @@ def validate_grading_output(
     question’s ``overall.score`` (each of those is the mean of ``score/max_points`` per
     criterion). Otherwise it uses the mean criterion fraction on filtered top-level
     ``criteria``.
+
+    Each criterion dict (top-level and under ``question_grades``) is normalized to include
+    string ``justification``, ``evidence``, and ``reasoning`` (placeholders are inserted
+    when the producer omitted them). ``raw_rubric_score`` / ``calibrated_credit`` are stripped.
+    When ``question_grades`` is present, assignment-level ``overall.score`` and
+    ``rubric_points_earned`` are re-synchronized from per-question aggregates so headline
+    scores do not contradict chunk-level rubric rows.
 
     Returns the same ``data`` dict after light normalization (e.g. ``criterion`` → ``name``).
     """
@@ -382,46 +537,7 @@ def validate_grading_output(
 
     criteria_out: list[dict[str, Any]] = []
     for i, row in enumerate(crit_raw):
-        if not isinstance(row, dict):
-            raise GradingOutputValidationError(f"criteria[{i}] must be a dict")
-        c = dict(row)
-        name = (c.get("name") or c.get("criterion") or "").strip()
-        if not name:
-            name = "unknown"
-        c["name"] = name
-        c["score"] = _coerce_float(c.get("score", 0))
-        c["confidence"] = _coerce_confidence(c.get("confidence", 0.5))
-        if c.get("max_points") is None and c.get("max_score") is not None:
-            c["max_points"] = _coerce_float(c["max_score"])
-        elif c.get("max_points") is not None:
-            c["max_points"] = _coerce_float(c["max_points"])
-        ev = c.get("evidence")
-        if ev is None:
-            c["evidence"] = ""
-        elif isinstance(ev, dict):
-            parts = [str(q) for q in (ev.get("quotes") or [])]
-            notes = str(ev.get("notes") or "")
-            if notes:
-                parts.append(notes)
-            c["evidence"] = " | ".join(parts) if parts else ""
-        elif not isinstance(ev, str):
-            c["evidence"] = str(ev)
-
-        reasoning = c.get("reasoning")
-        if reasoning is None:
-            c["reasoning"] = ""
-        elif not isinstance(reasoning, str):
-            c["reasoning"] = str(reasoning)
-
-        if c.get("justification") is None:
-            c["justification"] = ""
-
-        c.pop("calibrated_credit", None)
-        c.pop("raw_rubric_score", None)
-
-        c.pop("weight", None)
-
-        criteria_out.append(c)
+        criteria_out.append(_normalize_one_criterion_dict(row, index=i))
     data["criteria"] = criteria_out
 
     fl = data.get("flags")
@@ -443,10 +559,17 @@ def validate_grading_output(
         for i, row in enumerate(qg):
             if not isinstance(row, dict):
                 raise GradingOutputValidationError(f"question_grades[{i}] must be a dict")
+            qc_norm: list[dict[str, Any]] = []
+            for j, crit in enumerate(row.get("criteria") or []):
+                if isinstance(crit, dict):
+                    qc_norm.append(_normalize_one_criterion_dict(crit, index=f"{i}.{j}"))
+            row["criteria"] = qc_norm
+            _sync_question_grade_overall_from_criteria(row)
             qov = row.get("overall")
-            if isinstance(qov, dict) and "score" in qov:
-                qov["score"] = _coerce_float(qov.get("score"))
-                _normalize_overall_score_fraction(qov)
+            if isinstance(qov, dict):
+                if "score" in qov:
+                    qov["score"] = _coerce_float(qov.get("score"))
+                    _normalize_overall_score_fraction(qov)
                 if qov.get("max_points") is not None:
                     qov["max_points"] = _coerce_float(qov["max_points"])
                 if qov.get("rubric_points_earned") is not None:
@@ -459,14 +582,6 @@ def validate_grading_output(
                     qov["entropy_max_reference_nats"] = float(
                         qov["entropy_max_reference_nats"]
                     )
-            for crit in row.get("criteria") or []:
-                if isinstance(crit, dict):
-                    crit.pop("weight", None)
-                    crit.setdefault("evidence", "")
-                    crit.setdefault("reasoning", "")
-                    crit.setdefault("justification", "")
-                    crit.pop("calibrated_credit", None)
-                    crit.pop("raw_rubric_score", None)
         data["question_grades"] = qg
 
     mod = data.get("_modality")
@@ -503,7 +618,10 @@ def validate_grading_output(
             allowed_criterion_names,
             context="top_level",
         )
-        data["criteria"] = crit_top
+        data["criteria"] = [
+            _normalize_one_criterion_dict(c, index=f"top:{i}")
+            for i, c in enumerate(crit_top)
+        ]
         fl = data.get("flags")
         if not isinstance(fl, list):
             data["flags"] = []
@@ -524,7 +642,10 @@ def validate_grading_output(
                     allowed_criterion_names,
                     context=cid,
                 )
-                row["criteria"] = qf
+                row["criteria"] = [
+                    _normalize_one_criterion_dict(c, index=f"{cid}:{j}")
+                    for j, c in enumerate(qf)
+                ]
                 _sync_question_grade_overall_from_criteria(row)
                 for msg in al_q[:40]:
                     t2 = f"rubric_allowlist:{msg}"
@@ -562,6 +683,8 @@ def validate_grading_output(
             data["overall"]["confidence"] = _coerce_confidence(
                 _mean_criterion_confidence_from_rows(crit_top)
             )
+
+    _resync_assignment_overall_from_question_grades(data)
 
     return data
 

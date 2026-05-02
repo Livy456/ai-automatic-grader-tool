@@ -135,6 +135,43 @@ class OutputSchemaTests(unittest.TestCase):
         self.assertEqual(names, ["Conceptual Correctness"])
         self.assertTrue(any("rubric_allowlist" in f for f in out.get("flags", [])))
 
+    def test_question_grades_criteria_require_text_fields_and_resync_overall(self) -> None:
+        d = {
+            "overall": {"score": 0.2, "confidence": 0.9, "summary": "headline mismatch"},
+            "criteria": [],
+            "flags": [],
+            "question_grades": [
+                {
+                    "chunk_id": "q1",
+                    "criteria": [
+                        {
+                            "name": "Functional Correctness",
+                            "score": 2.0,
+                            "max_points": 4.0,
+                            "confidence": 0.8,
+                        }
+                    ],
+                    "overall": {
+                        "score": 0.99,
+                        "max_score": 1.0,
+                        "max_points": 4.0,
+                        "rubric_points_earned": 9.0,
+                        "summary": "stale",
+                    },
+                }
+            ],
+        }
+        out = validate_grading_output(d)
+        crit = out["question_grades"][0]["criteria"][0]
+        for k in ("justification", "evidence", "reasoning"):
+            self.assertIn(k, crit)
+            self.assertIsInstance(crit[k], str)
+            self.assertGreater(len(crit[k]), 10)
+        self.assertAlmostEqual(float(out["question_grades"][0]["overall"]["score"]), 0.5, places=5)
+        self.assertAlmostEqual(float(out["overall"]["score"]), 0.5, places=5)
+        self.assertIn("assignment_overall_resynced_from_question_grades_mean", out["flags"])
+        self.assertAlmostEqual(float(out["overall"]["rubric_points_earned"]), 2.0, places=4)
+
 
 if __name__ == "__main__":
     unittest.main()

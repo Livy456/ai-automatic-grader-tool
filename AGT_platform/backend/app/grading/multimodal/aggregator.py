@@ -226,6 +226,8 @@ def aggregate_chunk_samples(
         "criterion_reasoning": reasoning,
         "confidence_note": confidence_note,
         "criterion_raw_scores": consensus_raw,
+        # Names from the routed chunk rubric (used when building ``question_grades`` rows).
+        "rubric_criterion_names": list(fb) if fb else [],
     }
 
     return ChunkGradeOutcome(

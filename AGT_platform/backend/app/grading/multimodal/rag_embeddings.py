@@ -91,13 +91,13 @@ def _env_bool(name: str, default: bool = False) -> bool:
     return raw in ("1", "true", "yes", "on")
 
 
-def multimodal_ollama_qa_segment_enabled() -> bool:
+def multimodal_llm_qa_segment_enabled() -> bool:
     """
     True to run LLM JSON Q/A segmentation on plain submissions.
 
     Enable with ``MULTIMODAL_ASSIGNMENT_PARSING=on`` (preferred), ``MULTIMODAL_LLM_QA_SEGMENT=on``,
-    or the legacy name ``MULTIMODAL_OLLAMA_QA_SEGMENT=on`` (the backend may use Claude when
-    ``ANTHROPIC_API_KEY`` is set — see :data:`ASSIGNMENT_PARSING_SYSTEM_PROMPT`).
+    or the legacy env name ``MULTIMODAL_OLLAMA_QA_SEGMENT=on`` (structure LLM is Claude or OpenAI;
+    see :data:`ASSIGNMENT_PARSING_SYSTEM_PROMPT`).
     """
     return (
         _env_bool("MULTIMODAL_ASSIGNMENT_PARSING", default=False)
@@ -162,7 +162,7 @@ def _qa_segment_plaintext(envelope: IngestionEnvelope) -> str:
     return reflow_pdf_sections_in_plaintext(base)
 
 
-def _chunks_from_ollama_qa_segmentation(
+def _chunks_from_llm_qa_segmentation(
     envelope: IngestionEnvelope,
     cfg: Config,
 ) -> list[GradingChunk] | None:
@@ -578,8 +578,8 @@ def build_multimodal_grading_chunks(
             return nb_chunks, "notebook_cell_order"
         _log.info("Notebook chunker returned empty; trying other chunkers.")
 
-    if cfg is not None and multimodal_ollama_qa_segment_enabled():
-        llm_units = _chunks_from_ollama_qa_segmentation(envelope, cfg)
+    if cfg is not None and multimodal_llm_qa_segment_enabled():
+        llm_units = _chunks_from_llm_qa_segmentation(envelope, cfg)
         if llm_units:
             tag = (llm_units[0].evidence or {}).get("chunker") or "llm_qa_segment"
             return llm_units, str(tag)

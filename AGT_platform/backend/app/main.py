@@ -11,7 +11,6 @@ from app.models import Base
 from .auth import bp as auth_bp, init_oauth
 from .tasks import init_celery
 from .routes.health import bp as health_bp
-# from .routes.assignments import bp as assignments_bp # OLD VERSION OF THE ASSIGNMENTS
 from .routes.submissions import bp as submissions_bp
 from .routes.admin import bp as admin_bp
 from .routes.courses import bp as courses_bp

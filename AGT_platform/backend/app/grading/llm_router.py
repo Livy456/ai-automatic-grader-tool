@@ -1,9 +1,7 @@
 """
-LLM routing: local Ollama on the GPU/private tier vs OpenAI (server-side only).
+LLM routing for grading: **OpenAI** (server-side) plus optional **Anthropic** for structure.
 
-Request handlers and light Flask code must not assume where the model runs — workers
-call this layer with Config resolved for their deployment (GPU host has INTERNAL_OLLAMA_URL).
-Escalation uses OpenAI when configured and ESCALATE_TO_OPENAI is true.
+Course grading and multimodal per-chunk grading use OpenAI chat clients; Ollama is not supported.
 """
 from __future__ import annotations
 
@@ -12,8 +10,6 @@ import logging
 import os
 import re
 from typing import Any, Protocol
-
-import requests
 
 from ..config import Config
 
@@ -81,59 +77,6 @@ class ChatClient(Protocol):
     def chat_json(
         self, messages: list[dict], *, temperature: float | None = None
     ) -> dict: ...
-
-
-class OllamaClient:
-    def __init__(
-        self,
-        base_url: str,
-        model: str,
-        *,
-        request_json_format: bool = True,
-        timeout_sec: float = 300.0,
-        keep_alive: str | None = None,
-    ):
-        self.base_url = (base_url or "").rstrip("/")
-        self.model = model
-        self._request_json_format = request_json_format
-        self._timeout_sec = float(timeout_sec)
-        self._keep_alive = keep_alive
-
-    def chat_json(
-        self, messages: list[dict], *, temperature: float | None = None
-    ) -> dict:
-        body: dict[str, Any] = {
-            "model": self.model,
-            "messages": messages,
-            "stream": False,
-        }
-        if self._request_json_format:
-            body["format"] = "json"
-        if self._keep_alive is not None:
-            body["keep_alive"] = self._keep_alive
-        if temperature is not None:
-            body["options"] = {"temperature": float(temperature)}
-        r = requests.post(
-            f"{self.base_url}/api/chat",
-            json=body,
-            timeout=self._timeout_sec,
-        )
-        if r.status_code >= 400:
-            snippet = (getattr(r, "text", None) or "")[:1200].strip()
-            _log.warning(
-                "Ollama /api/chat HTTP %s for model=%r: %s",
-                r.status_code,
-                self.model,
-                snippet or "(empty body)",
-            )
-        r.raise_for_status()
-        try:
-            payload = r.json()
-        except json.JSONDecodeError:
-            _log.warning("Ollama returned non-JSON body for model=%r", self.model)
-            raise
-        content = (payload.get("message") or {}).get("content") or ""
-        return parse_llm_json_content(content)
 
 
 class OpenAIJsonClient:
@@ -286,29 +229,6 @@ def anthropic_multimodal_structure_client(
     return AnthropicJsonClient(key, model, max_tokens=mt), f"anthropic:{model}"
 
 
-def _ollama_keep_alive(cfg: Config) -> str | None:
-    """Return ``keep_alive`` value for Ollama requests.
-
-    When ``OLLAMA_KEEP_ALIVE`` is set (e.g. ``"0s"``), Ollama unloads the model
-    immediately after responding, freeing VRAM/RAM for the next model.  Essential
-    on memory-constrained machines running multiple grading models sequentially.
-    """
-    return getattr(cfg, "OLLAMA_KEEP_ALIVE", None) or os.getenv("OLLAMA_KEEP_ALIVE") or None
-
-
-def primary_ollama_client(cfg: Config) -> OllamaClient:
-    base = (cfg.INTERNAL_OLLAMA_URL or cfg.OLLAMA_BASE_URL or "").strip()
-    model = (cfg.OLLAMA_MODEL or "llama3.2:3b").strip()
-    to = float(getattr(cfg, "OLLAMA_CHAT_TIMEOUT_SEC", 300))
-    return OllamaClient(
-        base,
-        model,
-        request_json_format=getattr(cfg, "OLLAMA_CHAT_JSON_FORMAT", True),
-        timeout_sec=to,
-        keep_alive=_ollama_keep_alive(cfg),
-    )
-
-
 def openai_client_if_configured(cfg: Config) -> OpenAIJsonClient | None:
     key = (cfg.OPENAI_API_KEY or "").strip()
     if not key:
@@ -317,57 +237,44 @@ def openai_client_if_configured(cfg: Config) -> OpenAIJsonClient | None:
 
 
 def _parse_model_spec(spec: str, cfg: Config) -> tuple[ChatClient, str] | None:
-    """Parse a 'provider:model' spec into (client, label). Returns None if invalid/empty."""
+    """Parse ``openai:<model>`` or a bare OpenAI model id into ``(client, label)``."""
     if not spec:
         return None
-    if spec.startswith("openai:"):
-        model_name = spec[len("openai:") :].strip()
-        key = (cfg.OPENAI_API_KEY or "").strip()
-        if not key or not model_name:
-            return None
-        return OpenAIJsonClient(key, model_name), f"openai:{model_name}"
-    if spec.startswith("ollama:"):
-        model_name = spec[len("ollama:") :].strip()
+    s = spec.strip()
+    if s.lower().startswith("ollama:"):
+        _log.warning("Ignoring Ollama model spec %r (Ollama grading has been removed).", spec)
+        return None
+    if s.startswith("openai:"):
+        model_name = s[len("openai:") :].strip()
     else:
-        # Bare model name defaults to Ollama
-        model_name = spec.strip()
+        model_name = s
     if not model_name:
         return None
-    base = (cfg.INTERNAL_OLLAMA_URL or cfg.OLLAMA_BASE_URL or "").strip()
-    if not base:
+    key = (cfg.OPENAI_API_KEY or "").strip()
+    if not key:
         return None
-    to = float(getattr(cfg, "OLLAMA_CHAT_TIMEOUT_SEC", 300))
-    return (
-        OllamaClient(
-            base,
-            model_name,
-            request_json_format=getattr(cfg, "OLLAMA_CHAT_JSON_FORMAT", True),
-            timeout_sec=to,
-            keep_alive=_ollama_keep_alive(cfg),
-        ),
-        f"ollama:{model_name}",
-    )
+    return OpenAIJsonClient(key, model_name), f"openai:{model_name}"
 
 
 def build_grading_clients(cfg: Config) -> list[tuple[ChatClient, str]]:
     """
-    Return 1–3 (client, model_label) pairs for multi-LLM grading.
+    Return 1–3 ``(client, model_label)`` pairs for multi-LLM **course** grading (OpenAI only).
 
-    Always includes the primary Ollama model (``OLLAMA_MODEL``). Optional extras
-    come from non-empty ``GRADING_MODEL_2`` / ``GRADING_MODEL_3``. When those are
-    unset, multimodal grading uses a single model and relies on
-    ``MULTIMODAL_SAMPLES_PER_MODEL`` for semantic entropy and consensus.
+    Primary model is ``OPENAI_MODEL``; optional ``GRADING_MODEL_2`` / ``GRADING_MODEL_3``
+    must be ``openai:…`` specs or bare OpenAI model ids. Ollama specs are ignored.
     """
-    primary = primary_ollama_client(cfg)
-    om = (cfg.OLLAMA_MODEL or "llama3.2:3b").strip()
-    primary_label = f"ollama:{om}"
-    clients: list[tuple[ChatClient, str]] = [(primary, primary_label)]
-
+    key = (cfg.OPENAI_API_KEY or "").strip()
+    if not key:
+        _log.warning("build_grading_clients: OPENAI_API_KEY missing; no clients")
+        return []
+    mid = (cfg.OPENAI_MODEL or "gpt-4o-mini").strip()
+    clients: list[tuple[ChatClient, str]] = [
+        (OpenAIJsonClient(key, mid), f"openai:{mid}"),
+    ]
     for spec in (cfg.GRADING_MODEL_2, cfg.GRADING_MODEL_3):
         parsed = _parse_model_spec(spec, cfg)
         if parsed:
             clients.append(parsed)
-
     return clients
 
 
@@ -453,15 +360,8 @@ def build_multimodal_grading_clients(cfg: Config) -> list[tuple[ChatClient, str]
 
     for spec in (cfg.GRADING_MODEL_2, cfg.GRADING_MODEL_3):
         parsed = _parse_model_spec(spec, cfg)
-        if not parsed:
-            continue
-        if parsed[1].startswith("ollama:"):
-            _log.warning(
-                "Skipping GRADING_MODEL_*=%r (multimodal grading is OpenAI-only, not Ollama).",
-                spec,
-            )
-            continue
-        clients.append(parsed)
+        if parsed:
+            clients.append(parsed)
 
     return clients
 
