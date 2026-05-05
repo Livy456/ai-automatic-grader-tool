@@ -112,6 +112,13 @@ def multimodal_rag_embed_units_enabled() -> bool:
 
 def multimodal_llm_trio_chunking_enabled(cfg: Config | None = None) -> bool:
     """True when an LLM should re-label each chunk's ``evidence['trio']`` before AK enrich."""
+    raw = (os.getenv("MULTIMODAL_LLM_TRIO_CHUNKING", "") or "").strip().lower()
+    if raw in ("off", "false", "0", "no"):
+        return False
+    if raw in ("on", "true", "1", "yes"):
+        return True
+    if cfg is not None and str(getattr(cfg, "ANTHROPIC_API_KEY", "") or "").strip():
+        return True
     if cfg is not None and bool(getattr(cfg, "MULTIMODAL_LLM_TRIO_CHUNKING", False)):
         return True
     return _env_bool("MULTIMODAL_LLM_TRIO_CHUNKING", default=False)

@@ -127,14 +127,16 @@ class JournalPdfChunkPairingTests(unittest.TestCase):
             "Bare word 'questions' must not be a question header.",
         )
 
-        by_pair: dict[int, list[dict]] = {}
+        by_tid: dict[int, list[dict]] = {}
         for c in chunks:
-            pid = c.get("pair_id")
-            if pid is None:
+            tid = c.get("trio_id")
+            if tid is None and c.get("pair_id") is not None:
+                tid = int(c.get("pair_id"))
+            if tid is None:
                 continue
-            by_pair.setdefault(int(pid), []).append(c)
+            by_tid.setdefault(int(tid), []).append(c)
 
-        for pid, group in by_pair.items():
+        for tid, group in by_tid.items():
             qtxt = " ".join(
                 x["text"] for x in group if x.get("role") == "question"
             )
@@ -142,7 +144,7 @@ class JournalPdfChunkPairingTests(unittest.TestCase):
                 x["text"] for x in group if x.get("role") == "response"
             )
             if "Did you select" in qtxt:
-                self.assertIn("I kept the default", rtxt, f"pair {pid}: {qtxt=!r} {rtxt=!r}")
+                self.assertIn("I kept the default", rtxt, f"pair {tid}: {qtxt=!r} {rtxt=!r}")
 
 
 if __name__ == "__main__":

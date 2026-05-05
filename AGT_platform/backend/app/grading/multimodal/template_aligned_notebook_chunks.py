@@ -85,6 +85,20 @@ def _pop_matching_student(
     return None
 
 
+def _pop_first_unconsumed(
+    student_chunks: list[GradingChunk],
+    consumed: set[int],
+) -> GradingChunk | None:
+    """Pair by notebook unit order when ``question_id`` strings differ between blank and student."""
+    for sch in student_chunks:
+        sid = id(sch)
+        if sid in consumed:
+            continue
+        consumed.add(sid)
+        return sch
+    return None
+
+
 def _trio_question_student(
     template_ch: GradingChunk,
     student_ch: GradingChunk | None,
@@ -277,6 +291,16 @@ def build_blank_template_aligned_notebook_chunks(
 
     for i, tch in enumerate(template_chunks):
         sch = _pop_matching_student(student_chunks, consumed_student, str(tch.question_id or ""))
+        if sch is None:
+            sch = _pop_first_unconsumed(student_chunks, consumed_student)
+            if sch is not None:
+                _log.info(
+                    "blank template: no question_id match for template unit %s (%r); "
+                    "paired ordinal student unit %r",
+                    i,
+                    str(tch.question_id or ""),
+                    str(sch.question_id or ""),
+                )
         q, sr, ic, ext = _trio_question_student(tch, sch)
         qid = _safe_qid(str(tch.question_id or ""), i)
         cid = f"{aid}:{sid}:template_trio:{i}:{qid}"
@@ -307,7 +331,8 @@ def build_blank_template_aligned_notebook_chunks(
                         hints.get("blank_assignment_matched_file") or "blank_assignments"
                     ),
                     "student_notebook_chunker": str(
-                        (sch.evidence or {}).get("chunker") or "notebook_cell_order"
+                        ((sch.evidence or {}) if sch is not None else {}).get("chunker")
+                        or "notebook_cell_order"
                     ),
                 },
             )

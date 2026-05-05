@@ -40,14 +40,36 @@ def _now() -> datetime:
 
 def _allowed_file(filename: str) -> bool:
     """
-    You can tighten this. For now we accept many modalities.
+    Allowed upload extensions for assignment uploads.
+
+    Includes notebooks / documents / code (``.ipynb``, ``.pdf``, ``.py``), audio
+    (``.mp3``, ``.wav``, ``.m4a``), spreadsheets and Word (``.xlsx``, ``.docx``),
+    plus common image, video, and plain-text types used in courses.
     """
     allowed = {
-        ".ipynb", ".py", ".pdf",
-        ".png", ".jpg", ".jpeg", ".webp",
-        ".mp4", ".mov", ".webm",
-        ".txt", ".md",
-        ".csv", ".json",
+        # Notebooks, written PDFs, Colab / script Python
+        ".ipynb",
+        ".pdf",
+        ".py",
+        # Audio (e.g. oral / journal voice submissions)
+        ".mp3",
+        ".wav",
+        ".m4a",
+        # Tabular / Office
+        ".xlsx",
+        ".docx",
+        # Other course artifacts
+        ".png",
+        ".jpg",
+        ".jpeg",
+        ".webp",
+        ".mp4",
+        ".mov",
+        ".webm",
+        ".txt",
+        ".md",
+        ".csv",
+        ".json",
     }
     ext = os.path.splitext(filename.lower())[1]
     return ext in allowed

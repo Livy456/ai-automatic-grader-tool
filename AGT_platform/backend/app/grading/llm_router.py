@@ -191,8 +191,8 @@ class AnthropicJsonClient:
         }
         if system_parts:
             kwargs["system"] = "\n\n".join(system_parts).strip()
-        if temperature is not None:
-            kwargs["temperature"] = float(temperature)
+        # Claude 4.x rejects ``temperature`` on some models (400 deprecated). Omit for Anthropic.
+        _ = temperature
         msg = client.messages.create(**kwargs)
         text = ""
         for block in getattr(msg, "content", []) or []:

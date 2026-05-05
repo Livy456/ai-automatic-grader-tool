@@ -29,24 +29,30 @@ Chunking strategy (high level)
      are extra boundaries (regex ``_JOURNAL_INSTRUCTOR_PROMPT``).
 
    For each boundary line we emit ``role: \"question\"``; material until the next boundary
-   becomes ``role: \"response\"`` (or ``code``) with the same ``pair_id``.
+   becomes ``role: \"response\"`` (or ``code``) with the same ``trio_id``.
 
 4. **Leading body before the first header** — ``role: \"response\"`` (or ``code``) with
-   ``pair_id: null``.
+   ``trio_id: null``.
 
 5. **No headers found** — The whole section becomes ``response`` / ``code`` only.
 
-6. **Metadata** — ``assignment_title``, ``modality_subtype``, ``chunk_index``, ``pair_id``.
+6. **Trio export** — Each numbered ``trio_id`` also gets an ``answer/reference`` row (filled
+   later from answer-key alignment / RAG). Export records use fields:
+   ``role``, ``trio_id``, ``text``, ``chunk_index``, ``assignment_title``, ``modality_subtype``.
 """
 
 from __future__ import annotations
 
 import json
+import logging
 import re
+from collections import defaultdict
 from pathlib import Path
 from typing import Any, Sequence
 
 from app.grading.tools import normalize_verticalized_pdf_text
+
+_log = logging.getLogger(__name__)
 
 # Banner lines from submission_text_from_artifacts: "=== LABEL (key) ===" or "=== LABEL ==="
 _SECTION_BANNER = re.compile(
@@ -115,6 +121,138 @@ _JOURNALISH_SUBSTRINGS = (
 )
 
 
+def _notebook_markdown_body_is_instruction(ans_text: str) -> bool:
+    """
+    True when markdown after a short heading reads like instructor instructions
+    (merge into question; real student work is in code cells).
+    """
+    s = (ans_text or "").strip()
+    if len(s) < 50:
+        return False
+    if s.count("```") >= 2 and len(s) > 400:
+        return False
+    return bool(
+        re.search(
+            r"(?i)\b("
+            r"hint:|make sure|you should|must include|use\s+the\s+built|documentation\s+for|"
+            r"create\s+(a\s+)?new\s+dataframe|on\s+your\s+bar\s+chart|groupby\(|pandas\.|"
+            r"matplotlib|seaborn|plt\.|write\s+code|complete\s+the\s+following"
+            r")\b",
+            s,
+        )
+    )
+
+
+def _merge_notebook_markdown_question(
+    *,
+    q_line: str,
+    ans_text: str,
+    modality_subtype: str,
+    section_banner: str,
+) -> bool:
+    st = (modality_subtype or "").lower()
+    if st != "notebook":
+        return False
+    if "NOTEBOOK MARKDOWN" not in (section_banner or "").upper():
+        return False
+    if len((q_line or "").strip()) > 220:
+        return False
+    return _notebook_markdown_body_is_instruction(ans_text)
+
+
+def trio_chunk_schema_record(ch: dict[str, Any]) -> dict[str, Any]:
+    """Public trio-chunk JSON shape (six fields). ``pair_id`` is accepted as legacy alias."""
+    tid = ch.get("trio_id")
+    if tid is None and ch.get("pair_id") is not None:
+        tid = ch.get("pair_id")
+    return {
+        "role": ch.get("role"),
+        "trio_id": tid,
+        "text": str(ch.get("text") or ""),
+        "chunk_index": int(ch.get("chunk_index", 0)),
+        "assignment_title": str(ch.get("assignment_title") or ""),
+        "modality_subtype": str(ch.get("modality_subtype") or ""),
+    }
+
+
+def validate_trio_chunking_schema(chunks: Sequence[dict[str, Any]]) -> list[str]:
+    """Return human-readable issues; empty means every ``trio_id`` has required roles."""
+    errs: list[str] = []
+    by_tid: dict[Any, dict[str, int]] = defaultdict(lambda: defaultdict(int))
+    for i, c in enumerate(chunks):
+        rec = trio_chunk_schema_record(dict(c))
+        if rec["role"] is None or str(rec["role"]).strip() == "":
+            errs.append(f"chunk[{i}]: missing role")
+        tid = rec["trio_id"]
+        if tid is None:
+            continue
+        by_tid[tid][str(rec["role"] or "")] += 1
+    for tid, roles in sorted(by_tid.items(), key=lambda x: (x[0] is None, str(x[0]))):
+        if tid is None:
+            continue
+        if not roles.get("answer/reference"):
+            errs.append(f"trio_id={tid}: missing answer/reference row")
+        if not roles.get("question"):
+            errs.append(f"trio_id={tid}: missing question row")
+        if not (roles.get("response") or roles.get("code")):
+            errs.append(f"trio_id={tid}: missing response or code row")
+    return errs
+
+
+def _ensure_trio_answer_reference_rows(chunks: list[dict[str, Any]]) -> None:
+    """Append missing ``answer/reference`` / ``response`` rows per ``trio_id``."""
+    by_tid: dict[Any, list[dict[str, Any]]] = defaultdict(list)
+    for c in chunks:
+        tid = c.get("trio_id")
+        if tid is None and c.get("pair_id") is not None:
+            tid = c.get("pair_id")
+            c["trio_id"] = tid
+        if tid is None:
+            continue
+        by_tid[tid].append(c)
+    for tid, group in by_tid.items():
+        roles = {str(x.get("role") or "") for x in group}
+        src = group[0]
+        if "answer/reference" not in roles:
+            chunks.append(
+                {
+                    "role": "answer/reference",
+                    "trio_id": tid,
+                    "text": "",
+                    "chunk_index": 0,
+                    "assignment_title": src.get("assignment_title", ""),
+                    "modality_subtype": src.get("modality_subtype", ""),
+                    "section_banner": src.get("section_banner"),
+                }
+            )
+        if not (("response" in roles) or ("code" in roles)):
+            chunks.append(
+                {
+                    "role": "response",
+                    "trio_id": tid,
+                    "text": "",
+                    "chunk_index": 0,
+                    "assignment_title": src.get("assignment_title", ""),
+                    "modality_subtype": src.get("modality_subtype", ""),
+                    "section_banner": src.get("section_banner"),
+                }
+            )
+
+
+def _sort_and_renumber_chunk_indices(chunks: list[dict[str, Any]]) -> None:
+    _order = {"question": 0, "response": 1, "code": 1, "answer/reference": 2}
+
+    def sk(c: dict[str, Any]) -> tuple[int, int, int]:
+        tid = c.get("trio_id")
+        if tid is None:
+            return (1 << 30, 9, int(c.get("chunk_index", 0)))
+        return (int(tid), _order.get(str(c.get("role")), 5), int(c.get("chunk_index", 0)))
+
+    chunks.sort(key=sk)
+    for i, c in enumerate(chunks):
+        c["chunk_index"] = i
+
+
 def _pdf_uses_journal_style_prompts(modality_subtype: str) -> bool:
     st = (modality_subtype or "").lower()
     return any(s in st for s in _JOURNALISH_SUBSTRINGS)
@@ -156,6 +294,8 @@ def _infer_section_kind(banner: str, modality_subtype: str) -> str:
     u = banner.upper()
     if "NOTEBOOK CODE" in u or "PYTHON SOURCE" in u:
         return "code"
+    if "AUDIO TRANSCRIPT" in u or "VIDEO / AUDIO" in u:
+        return "body"
     if "NOTEBOOK MARKDOWN" in u or ".MD" in u or "MARKDOWN" in u:
         return "markdown"
     if "PDF TEXT" in u:
@@ -235,7 +375,7 @@ def _pack_text_by_paragraphs(
     text: str,
     *,
     role: str,
-    pair_id: int | None,
+    trio_id: int | None,
     max_chunk_chars: int | None,
     assignment_title: str,
     modality_subtype: str,
@@ -253,7 +393,7 @@ def _pack_text_by_paragraphs(
         out.append(
             {
                 "role": role,
-                "pair_id": pair_id,
+                "trio_id": trio_id,
                 "text": piece,
                 "chunk_index": idx,
                 "assignment_title": assignment_title,
@@ -297,16 +437,15 @@ def _chunks_from_prose_section(
     modality_subtype: str,
     max_chunk_chars: int | None,
     chunk_index_start: int,
-    pair_id_start: int,
+    trio_id_start: int,
 ) -> tuple[list[dict[str, Any]], int, int]:
     """
-    Build question + answer chunks. Uses the same (question_line, answer_blob) segmentation
-    as the previous implementation: each answer blob is paired with the **previous** header
-    line as its question text.
+    Build question + response + (later) answer/reference rows. Each numbered ``trio_id`` ties
+    the question line, student markdown/code, and an ``answer/reference`` placeholder row.
     """
     chunks: list[dict[str, Any]] = []
     idx = chunk_index_start
-    pair_id = pair_id_start
+    trio_id = trio_id_start
 
     body = (body or "").strip()
     if section_kind == "pdf":
@@ -322,7 +461,7 @@ def _chunks_from_prose_section(
         packed, idx = _pack_text_by_paragraphs(
             body,
             role=ans_role,
-            pair_id=None,
+            trio_id=None,
             max_chunk_chars=max_chunk_chars,
             assignment_title=assignment_title,
             modality_subtype=modality_subtype,
@@ -330,7 +469,7 @@ def _chunks_from_prose_section(
             section_banner=section_banner,
         )
         chunks.extend(packed)
-        return chunks, idx, pair_id
+        return chunks, idx, trio_id
 
     segments: list[tuple[str | None, str]] = []
     pos = 0
@@ -354,7 +493,7 @@ def _chunks_from_prose_section(
             packed, idx = _pack_text_by_paragraphs(
                 ans_text,
                 role=ans_role,
-                pair_id=None,
+                trio_id=None,
                 max_chunk_chars=max_chunk_chars,
                 assignment_title=assignment_title,
                 modality_subtype=modality_subtype,
@@ -364,12 +503,48 @@ def _chunks_from_prose_section(
             chunks.extend(packed)
             continue
 
-        pid = pair_id
-        pair_id += 1
+        pid = trio_id
+        trio_id += 1
+        if _merge_notebook_markdown_question(
+            q_line=q_line,
+            ans_text=ans_text,
+            modality_subtype=modality_subtype,
+            section_banner=section_banner,
+        ):
+            q_full = f"{q_line}\n\n{ans_text}".strip()
+            chunks.append(
+                {
+                    "role": "question",
+                    "trio_id": pid,
+                    "text": q_full,
+                    "chunk_index": idx,
+                    "assignment_title": assignment_title,
+                    "modality_subtype": modality_subtype,
+                    "section_banner": section_banner or None,
+                }
+            )
+            idx += 1
+            chunks.append(
+                {
+                    "role": "response",
+                    "trio_id": pid,
+                    "text": (
+                        "[Student implementation is in NOTEBOOK CODE cells following this prompt "
+                        "in the original notebook order.]"
+                    ),
+                    "chunk_index": idx,
+                    "assignment_title": assignment_title,
+                    "modality_subtype": modality_subtype,
+                    "section_banner": section_banner or None,
+                }
+            )
+            idx += 1
+            continue
+
         chunks.append(
             {
                 "role": "question",
-                "pair_id": pid,
+                "trio_id": pid,
                 "text": q_line,
                 "chunk_index": idx,
                 "assignment_title": assignment_title,
@@ -384,7 +559,7 @@ def _chunks_from_prose_section(
         packed, idx = _pack_text_by_paragraphs(
             ans_text,
             role=ans_role,
-            pair_id=pid,
+            trio_id=pid,
             max_chunk_chars=max_chunk_chars,
             assignment_title=assignment_title,
             modality_subtype=modality_subtype,
@@ -393,7 +568,7 @@ def _chunks_from_prose_section(
         )
         chunks.extend(packed)
 
-    return chunks, idx, pair_id
+    return chunks, idx, trio_id
 
 
 def build_submission_chunks(
@@ -404,7 +579,8 @@ def build_submission_chunks(
     max_chunk_chars: int | None = None,
 ) -> list[dict[str, Any]]:
     """
-    Produce chunks with ``role`` of ``question``, ``response``, or ``code``.
+    Produce chunks with ``role`` of ``question``, ``response``, ``code``, or
+    ``answer/reference`` (placeholder per ``trio_id``).
 
     See module docstring for the full chunking explanation.
 
@@ -418,7 +594,7 @@ def build_submission_chunks(
     sections = _split_artifact_sections(raw)
     all_chunks: list[dict[str, Any]] = []
     idx = 0
-    next_pair = 0
+    next_trio = 0
 
     for banner, sec_kind, body in sections:
         if not body.strip():
@@ -428,7 +604,7 @@ def build_submission_chunks(
             packed, idx = _pack_text_by_paragraphs(
                 body,
                 role="code",
-                pair_id=None,
+                trio_id=None,
                 max_chunk_chars=max_chunk_chars,
                 assignment_title=assignment_title,
                 modality_subtype=modality_subtype,
@@ -446,7 +622,7 @@ def build_submission_chunks(
                 packed, idx = _pack_text_by_paragraphs(
                     body,
                     role="code",
-                    pair_id=None,
+                    trio_id=None,
                     max_chunk_chars=max_chunk_chars,
                     assignment_title=assignment_title,
                     modality_subtype=modality_subtype,
@@ -456,7 +632,7 @@ def build_submission_chunks(
                 all_chunks.extend(packed)
                 continue
 
-            part, idx, next_pair = _chunks_from_prose_section(
+            part, idx, next_trio = _chunks_from_prose_section(
                 body,
                 section_kind="markdown" if sec_kind == "mixed" else sec_kind,
                 section_banner=banner,
@@ -464,14 +640,14 @@ def build_submission_chunks(
                 modality_subtype=modality_subtype,
                 max_chunk_chars=max_chunk_chars,
                 chunk_index_start=idx,
-                pair_id_start=next_pair,
+                trio_id_start=next_trio,
             )
             all_chunks.extend(part)
 
-    # Renumber chunk_index contiguously
-    for i, c in enumerate(all_chunks):
-        c["chunk_index"] = i
-
+    _ensure_trio_answer_reference_rows(all_chunks)
+    for msg in validate_trio_chunking_schema(all_chunks):
+        _log.warning("trio_chunking_schema: %s", msg)
+    _sort_and_renumber_chunk_indices(all_chunks)
     return all_chunks
 
 
@@ -483,15 +659,18 @@ def write_chunks_json(
     source_file: str = "",
     profile: dict[str, Any] | None = None,
 ) -> None:
+    export_chunks = [trio_chunk_schema_record(dict(c)) for c in chunks]
     payload: dict[str, Any] = {
         "assignment_title": assignment_title,
         "source_file": source_file,
-        "chunk_count": len(chunks),
+        "chunk_count": len(export_chunks),
+        "trio_chunking_schema_version": 1,
         "chunking_notes": (
-            "question = rubric/part line; response/code = student work. "
-            "pair_id links question to answer chunk(s); null = no detected prompt line."
+            "Per trio_id: question (prompt/instructions), response or code (student work), "
+            "answer/reference (empty here; filled from answer key during grading). "
+            "trio_id null = preamble / unstructured."
         ),
-        "chunks": list(chunks),
+        "chunks": export_chunks,
     }
     if profile:
         payload["modality"] = profile

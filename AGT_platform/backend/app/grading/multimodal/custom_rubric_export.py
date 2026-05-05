@@ -118,6 +118,18 @@ def _custom_rubric_dir(hints: dict[str, Any]) -> Path:
     return default_custom_rubric_dir()
 
 
+def _persist_custom_rubric_json(path: Path, plan: dict[str, Any]) -> bool:
+    """Write ``plan`` to ``path``; return whether the file exists after the attempt."""
+    try:
+        path.parent.mkdir(parents=True, exist_ok=True)
+        path.write_text(json.dumps(plan, indent=2, ensure_ascii=True), encoding="utf-8")
+        _log.info("custom_rubric: persisted %s", path)
+        return True
+    except OSError as exc:
+        _log.warning("custom_rubric: could not persist %s (%s)", path, exc)
+        return False
+
+
 def _safe_filename_stem(assignment_id: str) -> str:
     s = re.sub(r"[^\w\-.]+", "_", (assignment_id or "assignment").strip())
     return s.strip("._") or "assignment"
@@ -447,6 +459,9 @@ def apply_custom_rubric_plan_to_chunks(
     env_dir = os.getenv("MULTIMODAL_CUSTOM_RUBRIC_OUTPUT_DIR", "").strip()
     if env_dir and not hints.get("custom_rubric_output_dir"):
         hints["custom_rubric_output_dir"] = env_dir
+    cfg_dir = str(getattr(cfg, "MULTIMODAL_CUSTOM_RUBRIC_OUTPUT_DIR", None) or "").strip()
+    if cfg_dir and not hints.get("custom_rubric_output_dir"):
+        hints["custom_rubric_output_dir"] = cfg_dir
 
     _normalize_notebook_chunks_from_artifact(envelope, chunks)
 
@@ -517,14 +532,11 @@ def apply_custom_rubric_plan_to_chunks(
                 template,
                 cot_step1="",
             )
-        try:
-            path.write_text(json.dumps(plan, indent=2, ensure_ascii=True), encoding="utf-8")
-            _log.info("custom_rubric: wrote %s", path)
-        except OSError as exc:
-            _log.warning("custom_rubric: could not write %s (%s)", path, exc)
 
     if plan is None:
         return None
+
+    _persist_custom_rubric_json(path, plan)
 
     assert plan is not None
     rt_val = str(plan.get("generic_rubric_type") or "").strip()

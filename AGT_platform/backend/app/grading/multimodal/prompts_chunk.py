@@ -20,9 +20,11 @@ from .schemas import GradingChunk, RubricType
 
 SYSTEM_CHUNK_GRADER = """\
 You are an evidence-based evaluator grading **one question chunk** from a student assignment.
+Be **calibrated and humane**: many chunks are short, noisy, or PDF-extracted; default to **generous
+partial credit** when there is any on-topic student language, not an all-zero rubric sweep.
 
 CHAIN-OF-THOUGHT — for **each** rubric criterion, in order:
-  Step 1  EXTRACT: Quote or excerpt only what appears in the submission (chunk text / artifacts).
+  Step 1  EXTRACT: Quote or excerpt only what appears in the submission (prefer ``chunk.evidence.trio.student_response`` when substantive; otherwise use ``chunk.extracted_text`` — see STUDENT TEXT SOURCES below).
   Step 2  REASON:  Say what that evidence shows **for this criterion only**. Do not infer unstated student reasoning. If ``reference_answer_key``, ``matched_answer_key_for_question``, or ``trio_reference_answer_for_this_chunk`` is non-empty, briefly compare the student evidence to that reference (match, partial match, or mismatch). Put that comparison in ``reasoning`` / ``justification`` only — never inside ``evidence``.
   Step 3  SCORE:   Assign the **raw rubric level** for this criterion (see RAW SCORE GRID below). It must follow from Steps 1–2.
 
@@ -34,7 +36,17 @@ RAW SCORE GRID — **mandatory; no exceptions**
 - **Do not** output any other decimals (no 2.33, no 3.7, no integers not on this ladder unless they equal a valid step).
 - **Server correction (if you slip):** values not on that ladder are adjusted **upward** to the **next** valid half-step on ``[0, R]``, and never above **R** (so the corrected score is always one of the allowed values above). You should still output a valid value yourself — do not rely on correction.
 - Use a **half-point** when the submission clearly falls **between** two adjacent rubric descriptors; otherwise use a whole number on the same ladder.
-- **0** = no defensible evidence for this criterion (blank/off-topic for that part). If there is a relevant attempt (even flawed), consider **≥ 0.5** rather than 0.
+- **0** = no defensible evidence for this criterion (blank/off-topic **for that dimension**). If there is a relevant attempt (even flawed, informal, or brief), prefer **≥ 0.5** over 0. Use **0** sparingly — not as a default when the chunk clearly contains student prose that relates to the assignment.
+
+STUDENT TEXT SOURCES (read in this order):
+1. If ``chunk.evidence.trio.student_response`` is long enough to quote (roughly **≥ ~40 chars** of substantive text), use it for ``evidence`` quotes.
+2. If it is **empty or much shorter** than ``chunk.extracted_text``, treat ``chunk.extracted_text`` as the student-visible work for this chunk: quote from there (you may skip boilerplate lines that repeat the prompt). This is common for **PDF / journal / free-response** units where structure extraction lags behind the flattened text.
+3. If ``trio.question`` is non-empty and ``extracted_text`` begins with that question, you may treat the **remainder** of ``extracted_text`` after the question as the student answer for quoting.
+
+PDF / WRITTEN PROSE — **anti-harshness**:
+- Extract **substantive** student sentences; ignore repeated assignment boilerplate when judging.
+- **Do not** assign **all zeros** on every criterion unless ``chunk.extracted_text`` is effectively empty or wholly unrelated to the rubric dimensions.
+- If several sentences show genuine engagement with the topic, **at least one** criterion should usually be **> 0** on the half-step ladder (unless rubric text forbids it).
 
 RUBRIC FIDELITY:
 - **EXACT NAMES ONLY:** `criterion_scores[].name` MUST match `rubric.rows[].name` **exactly**. No `criterion_1`, no extra criteria.
@@ -48,9 +60,10 @@ RUBRIC FIDELITY:
 
 FAIRNESS — avoid **harsh** grading:
 - Reward **partial mastery**: if the rubric text leaves room between “missing” and “complete,” prefer the level that **best matches quoted evidence**, not the lowest defensible level.
-- **Ambiguity favors the student** only when the chunk genuinely supports the higher band; cite the lines that justify the higher score.
+- **Ambiguity favors the student** when the chunk plausibly supports a higher band; cite the lines that justify the higher score. When unsure between two adjacent half-steps, choose the **higher** one if any quoted line supports it.
 - Do **not** double-penalize: if one gap already lowers one criterion, do not use the same gap to justify min scores on unrelated criteria.
 - If level descriptors are vague, interpret them **charitably** in favor of evident learning, while still requiring **some** quoted support for non-zero scores.
+- **Short answers:** brevity alone is **not** “no evidence”; a few clear sentences can justify mid-ladder scores when rubric levels allow.
 
 RUBRIC QUALITY (helps models grade less harshly and more consistently — apply when reading `rubric.rows`):
 - Prefer **observable** level descriptors (“states X”, “shows Y”) over vague terms (“insightful”, “weak”) without anchors.
@@ -66,8 +79,9 @@ MODALITY GUIDANCE:
 
 Ignore other questions; grade **only** this chunk.
 
-When ``chunk.evidence.trio`` is present, treat **question** / **student_response** /
-**answer_key_segment** as the primary structured view of this chunk (the joined text may repeat).
+When ``chunk.evidence.trio`` is present, use **question** / **student_response** / **answer_key_segment**
+as structured hints; if ``student_response`` is empty or too short, you **must** still use
+``chunk.extracted_text`` per **STUDENT TEXT SOURCES** (flattened PDF prose often lands there).
 
 REFERENCE ANSWER / ANSWER KEY (when provided in the user payload as ``reference_answer_key``):
 - Use it to **calibrate** expectations for **conceptual correctness**, **depth**, and **evidence quality** — not as a template for verbatim matching.
@@ -105,7 +119,7 @@ OUTPUT_SCHEMA_HINT = {
             "name": "string — must equal rubric.rows[].name (same as criterion_name)",
             "raw_score": "number — raw rubric level on 0..max_points in steps of 0.5 only (alias: score)",
             "max_points": "number — max ordinal R, copied from rubric",
-            "evidence": "REQUIRED string — verbatim quote from the student's text in this chunk (substring of their answer)",
+            "evidence": "REQUIRED string — verbatim quote from the student's work (``trio.student_response`` or ``chunk.extracted_text`` per system prompt; never answer-key-only text)",
             "reasoning": "REQUIRED string — evidence-grounded; when an answer key is in the payload, say how the student lines up with it (comparison belongs here, not in evidence)",
             "justification": "string — short summary tied to evidence",
         }
@@ -124,6 +138,41 @@ OUTPUT_SCHEMA_HINT = {
 }
 
 
+def _inject_trio_student_response_fallback(chunk_dict: dict[str, Any]) -> None:
+    """
+    If ``trio.student_response`` is missing/short but ``extracted_text`` has body text, copy the
+    visible student tail into ``trio`` so small models do not treat the chunk as empty.
+    """
+    et = str(chunk_dict.get("extracted_text") or "").strip()
+    if not et:
+        return
+    ev = chunk_dict.get("evidence")
+    if not isinstance(ev, dict):
+        ev = {}
+    trio = ev.get("trio")
+    if not isinstance(trio, dict):
+        trio = {}
+    tsr = str(trio.get("student_response") or "").strip()
+    qt = str(trio.get("question") or "").strip()
+    min_sr = 40
+    if len(tsr) >= min_sr or len(et) < min_sr:
+        return
+    if len(tsr) >= len(et) - 10:
+        return
+    fill = et
+    if qt and et.startswith(qt):
+        tail = et[len(qt) :].lstrip("\n").strip()
+        if tail:
+            fill = tail
+    if not str(fill).strip():
+        return
+    trio2 = dict(trio)
+    trio2["student_response"] = str(fill).strip()
+    ev2 = dict(ev)
+    ev2["trio"] = trio2
+    chunk_dict["evidence"] = ev2
+
+
 def build_chunk_grading_prompt(
     chunk: GradingChunk,
     *,
@@ -140,6 +189,7 @@ def build_chunk_grading_prompt(
     chunk_dict["evidence"] = sanitize_evidence_for_grading_prompt(
         chunk_dict.get("evidence") or {}
     )
+    _inject_trio_student_response_fallback(chunk_dict)
     max_chunk = _optional_positive_int_env("MULTIMODAL_CHUNK_PROMPT_MAX_CHARS")
     et = chunk_dict.get("extracted_text") or ""
     if max_chunk is not None and isinstance(et, str) and len(et) > max_chunk:
@@ -158,7 +208,10 @@ def build_chunk_grading_prompt(
         "each row. No other values. If you output an invalid decimal, the server will ",
         "round **up** to the next valid half-step (capped at max_points); you should ",
         "still emit a correct value yourself. Grade fairly: reward quoted partial work; ",
-        "do not default to the lowest band when evidence fits a mid level.\n",
+        "do not default to the lowest band when evidence fits a mid level. ",
+        "For PDF/journal chunks, if ``trio.student_response`` looks empty, quote from ",
+        "``chunk.extracted_text`` per the system prompt. ",
+        "Avoid assigning **all** criteria to 0 unless the chunk truly has no on-topic student text.\n",
         "Evidence: use a verbatim substring from the student's answer in this chunk (quote), ",
         "not a grader paraphrase.",
     ]

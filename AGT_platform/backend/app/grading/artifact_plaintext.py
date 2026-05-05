@@ -13,7 +13,11 @@ import io
 import logging
 from typing import Final
 
-from app.grading.tools import extract_from_ipynb, extract_text_from_pdf, transcribe_video_stub
+from app.grading.tools import (
+    extract_from_ipynb,
+    extract_text_from_pdf,
+    transcribe_submission_media_bytes,
+)
 
 _log = logging.getLogger(__name__)
 
@@ -67,8 +71,8 @@ def bytes_with_suffix_to_plain(data: bytes, suffix: str) -> str:
         if suf == ".xlsx":
             return _xlsx_bytes_to_plain(data)
         if suf in (".mp4", ".mp3", ".wav", ".m4a", ".webm"):
-            tr = transcribe_video_stub(data)
-            return f"=== VIDEO / AUDIO ({len(data)} bytes) ===\n{tr}".strip()
+            tr = transcribe_submission_media_bytes(data, filename=f"submission{suf}")
+            return f"=== AUDIO TRANSCRIPT ===\n{tr}".strip()
         return data.decode("utf-8", errors="replace").strip()
     except Exception:
         _log.debug("bytes_with_suffix_to_plain failed suffix=%s", suf, exc_info=True)
@@ -176,8 +180,8 @@ def single_artifact_key_to_plain(key: str, raw: bytes) -> str:
             body = _xlsx_bytes_to_plain(raw)
             return f"=== XLSX ===\n{body}" if body else ""
         if k in ("mp4", "mp3", "wav", "m4a", "webm"):
-            tr = transcribe_video_stub(raw)
-            return f"=== VIDEO / AUDIO ({len(raw)} bytes) ===\n{tr}"
+            tr = transcribe_submission_media_bytes(raw, filename=f"submission.{k}")
+            return f"=== AUDIO TRANSCRIPT ===\n{tr}"
     except Exception:
         _log.warning("single_artifact_key_to_plain failed key=%s", k, exc_info=True)
         return f"=== ERROR parsing artifact {k} ===\n"
@@ -208,8 +212,10 @@ def infer_modality_from_artifact_keys(artifacts: dict[str, bytes]) -> str:
     keys = {k.lower() for k, v in artifacts.items() if isinstance(v, (bytes, bytearray)) and v}
     if "ipynb" in keys:
         return "notebook"
-    if keys & {"mp4", "mp3", "wav", "m4a", "webm"}:
+    if "mp4" in keys:
         return "video_oral"
+    if keys & {"mp3", "wav", "m4a"} or ("webm" in keys and "mp4" not in keys):
+        return "written"
     if "pdf" in keys or "docx" in keys or "txt" in keys or "md" in keys:
         return "written"
     if "py" in keys:

@@ -80,8 +80,14 @@ def default_chunker_build_units(
             modality_subtype = "free_response"
         elif "=== NOTEBOOK" in u:
             modality_subtype = "notebook"
+        elif "=== AUDIO TRANSCRIPT ===" in u or "=== VIDEO / AUDIO" in u:
+            modality_subtype = "free_response"
+        elif isinstance(arts, dict) and arts.get("py") and not arts.get("ipynb"):
+            modality_subtype = "code"
+        elif isinstance(arts, dict) and (arts.get("xlsx") or arts.get("csv")):
+            modality_subtype = "spreadsheet"
         else:
-            modality_subtype = "notebook"
+            modality_subtype = "free_response"
 
     chunks = build_submission_chunks(
         plain,
@@ -100,9 +106,10 @@ def default_chunker_build_units(
             task = TaskType.SCAFFOLDED_CODING
     out: list[GradingChunk] = []
     for i, u in enumerate(units, start=1):
-        # Stable 1-based labels for outputs/APIs; original segmentation pair_id is kept
+        # Stable 1-based labels for outputs/APIs; original segmentation trio_id is kept
         # under evidence for auditing (may be None for preamble / undetected-prompt blobs).
         qid = f"pair_{i}"
+        ref = str(u.get("reference_text") or "").strip()
         text_parts = [
             u.get("question_text") or "",
             u.get("response_text") or "",
@@ -120,14 +127,15 @@ def default_chunker_build_units(
         ev = {
             "chunk_ids": u.get("chunk_ids"),
             "unit": u,
-            "source_pair_id": u.get("pair_id"),
+            "source_trio_id": u.get("trio_id"),
+            "source_pair_id": u.get("trio_id"),
             "canonical_pair_index": i,
             "question_text": qt,
             "trio": {
                 "question": qt,
                 "student_response": rt,
                 "instructor_context": "",
-                "answer_key_segment": "",
+                "answer_key_segment": ref,
             },
         }
         out.append(

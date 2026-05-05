@@ -97,7 +97,7 @@ ANSWER_KEY_DIR = REPO_ROOT / "answer_key"
 
 _GENERIC_BASENAMES = ("default", "generic", "rubric")
 
-_SUPPORTED_SUFFIXES = {".ipynb", ".py", ".pdf", ".txt", ".md", ".mp4"}
+_SUPPORTED_SUFFIXES = {".ipynb", ".py", ".pdf", ".txt", ".md", ".mp4", ".docx"}
 _SUFFIX_TO_ARTIFACT_KEY = {
     ".ipynb": "ipynb",
     ".py": "py",
@@ -105,6 +105,7 @@ _SUFFIX_TO_ARTIFACT_KEY = {
     ".txt": "txt",
     ".md": "md",
     ".mp4": "mp4",
+    ".docx": "docx",
 }
 
 

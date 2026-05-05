@@ -14,6 +14,7 @@ from typing import Any
 from app.grading.modality_resolution import (
     augment_prompt_for_modality_profile,
     infer_modality_from_artifacts,
+    normalize_modality_hint_for_multimodal,
     resolve_modality_profile,
 )
 from app.grading.output_schema import coerce_grading_output_shape
@@ -225,9 +226,24 @@ def _run_multimodal_once(
 
     rubric_rows_by_type, flat_rubric = rubric_column_to_by_type_and_flat(rubric_column)
 
+    raw_assign_mod = str(getattr(assignment, "modality", None) or "").strip()
+    if raw_assign_mod:
+        modality_for_hints = normalize_modality_hint_for_multimodal(raw_assign_mod)
+    else:
+        modality_for_hints = normalize_modality_hint_for_multimodal(
+            str(profile.get("modality") or modality or "")
+        )
     hints: dict[str, Any] = {
         "answer_key_plaintext": (answer_key_text or "").strip(),
+        "modality": modality_for_hints,
+        "modality_subtype": str(profile.get("modality_subtype") or "").strip(),
     }
+    tt = str(getattr(assignment, "task_type", None) or "").strip()
+    if tt:
+        hints["task_type"] = tt
+    cr_out = str(getattr(cfg, "MULTIMODAL_CUSTOM_RUBRIC_OUTPUT_DIR", None) or "").strip()
+    if cr_out:
+        hints["custom_rubric_output_dir"] = cr_out
     envelope = ingest_raw_submission(
         assignment_id=str(assignment_id),
         student_id=envelope_student_id,

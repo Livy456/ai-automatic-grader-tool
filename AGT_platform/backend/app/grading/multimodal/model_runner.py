@@ -20,7 +20,31 @@ from .schemas import GradingChunk, SampledChunkGrade
 
 _log = logging.getLogger(__name__)
 
+_JSON_OBJECT = {"type": "json_object"}
+_MAX_GRADING_CHAT_ATTEMPTS = 3
+
 ClientBuilder = Callable[[Config], list[tuple[ChatClient, str]]]
+
+
+def _grading_chat_parsed_object(
+    client: ChatClient,
+    messages: list[dict[str, Any]],
+    *,
+    temperature: float,
+) -> dict[str, Any]:
+    """
+    Prefer OpenAI ``json_object`` responses so long ``evidence`` strings with quotes
+    (common in journal / PDF prose) do not break JSON syntax.
+    """
+    usage_fn = getattr(client, "chat_json_with_usage", None)
+    if callable(usage_fn):
+        obj, _u = usage_fn(
+            messages,
+            temperature=temperature,
+            response_format=_JSON_OBJECT,
+        )
+        return obj
+    return client.chat_json(messages, temperature=temperature)
 
 
 class ChunkModelRunner(Protocol):
@@ -38,7 +62,9 @@ class ChunkModelRunner(Protocol):
 class MultiModelChunkRunner:
     """
     For each configured grading client, run ``MULTIMODAL_SAMPLES_PER_MODEL``
-    ``chat_json`` calls (default 3 for a single primary OpenAI model).
+    chat calls (default 3 for a single primary OpenAI model). OpenAI clients use
+    ``response_format=json_object`` plus brief retries to reduce parse failures
+    on journal-style evidence quotes.
 
     Semantic entropy over parsed outcomes is computed in
     :class:`MultimodalGradingPipeline` from cluster assignments of these samples.
@@ -87,10 +113,32 @@ class MultiModelChunkRunner:
         for client, model_label in clients:
             for _rep in range(k):
                 raw_text = ""
-                try:
-                    obj = client.chat_json(messages, temperature=temp)
-                    raw_text = json.dumps(obj, ensure_ascii=True, default=str)
-                except Exception as e:
+                last_err: Exception | None = None
+                for attempt in range(_MAX_GRADING_CHAT_ATTEMPTS):
+                    try:
+                        obj = _grading_chat_parsed_object(
+                            client, messages, temperature=temp
+                        )
+                        raw_text = json.dumps(obj, ensure_ascii=True, default=str)
+                        last_err = None
+                        break
+                    except Exception as e:
+                        last_err = e
+                        if attempt + 1 < _MAX_GRADING_CHAT_ATTEMPTS:
+                            _log.debug(
+                                "grading chat retry chunk_id=%s model=%s rep=%s/%s "
+                                "attempt=%s/%s: %s: %s",
+                                chunk.chunk_id,
+                                model_label,
+                                _rep + 1,
+                                k,
+                                attempt + 1,
+                                _MAX_GRADING_CHAT_ATTEMPTS,
+                                type(e).__name__,
+                                e,
+                            )
+                if last_err is not None:
+                    e = last_err
                     _log.warning(
                         "grading_llm_sample_failed (not chunking): chunk_id=%s model=%s "
                         "rep=%s/%s: %s: %s",

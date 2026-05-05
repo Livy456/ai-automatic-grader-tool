@@ -241,6 +241,21 @@ class Config:
         1,
         min(_env_int("MULTIMODAL_SAMPLES_PER_MODEL", default=5), 16),
     )
+    # Optional absolute path for assignment-wide multimodal ``custom_rubric/*.json`` caches.
+    # Empty → ``MULTIMODAL_CUSTOM_RUBRIC_OUTPUT_DIR`` env → repo ``custom_rubric/``.
+    MULTIMODAL_CUSTOM_RUBRIC_OUTPUT_DIR = _env_str(
+        "MULTIMODAL_CUSTOM_RUBRIC_OUTPUT_DIR"
+    ).strip()
+    # Whisper (OpenAI) for submission audio: off | on | auto (default). ``auto`` transcribes when
+    # ``OPENAI_API_KEY`` is set. Runs once when building ``extracted_plaintext`` for chunking.
+    _wt_raw = _env_str("MULTIMODAL_WHISPER_TRANSCRIBE").strip().lower()
+    if _wt_raw in ("0", "false", "no", "off"):
+        MULTIMODAL_WHISPER_TRANSCRIBE = "off"
+    elif _wt_raw in ("1", "true", "yes", "on"):
+        MULTIMODAL_WHISPER_TRANSCRIBE = "on"
+    else:
+        MULTIMODAL_WHISPER_TRANSCRIBE = "auto"
+    OPENAI_WHISPER_MODEL = _env_str("OPENAI_WHISPER_MODEL").strip() or "whisper-1"
     # When true, each chunk is sent to the **structure** LLM once to fill ``evidence["trio"]``
     # (question / student_response / instructor_context) before answer-key alignment. Uses
     # Claude (Anthropic) when configured, else OpenAI — not Ollama.

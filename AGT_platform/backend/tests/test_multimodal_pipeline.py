@@ -52,7 +52,10 @@ from app.grading.llm_router import (
     multimodal_structure_llm_trace_label,
 )
 from app.grading.grading_units import build_grading_units_from_chunks
-from app.grading.modality_resolution import resolve_modality_profile
+from app.grading.modality_resolution import (
+    normalize_modality_hint_for_multimodal,
+    resolve_modality_profile,
+)
 from app.grading.multimodal import (
     MultimodalGradingConfig,
     Modality,
@@ -903,6 +906,29 @@ class MultimodalRoutingTests(unittest.TestCase):
         route_rubric(ch, rubric_rows_by_type=rows)
         self.assertEqual(ch.rubric_type, RubricType.EDA_VISUALIZATION)
 
+    def test_ipynb_chunk_scaffold_todo_prefers_programming_over_eda_signals(self) -> None:
+        rows = {
+            RubricType.PROGRAMMING_SCAFFOLDED: _SCAFFOLDED_RUBRIC,
+            RubricType.EDA_VISUALIZATION: _EDA_RUBRIC_STUB,
+        }
+        ch = GradingChunk(
+            chunk_id="c1",
+            assignment_id="a1",
+            student_id="s1",
+            question_id="q1",
+            modality=Modality.NOTEBOOK,
+            task_type=TaskType.UNKNOWN,
+            extracted_text=(
+                "# TODO: fill in\n"
+                "# write your code here\n"
+                "import pandas as pd\n"
+                "df.groupby('x').mean()\n"
+            ),
+            evidence={"chunker": "notebook_cell_order"},
+        )
+        route_rubric(ch, rubric_rows_by_type=rows)
+        self.assertEqual(ch.rubric_type, RubricType.PROGRAMMING_SCAFFOLDED)
+
     def test_classifier_free_response_overridden_for_trio_frontload_chunk(self) -> None:
         rows = {
             RubricType.PROGRAMMING_SCAFFOLDED: _SCAFFOLDED_RUBRIC,
@@ -987,6 +1013,37 @@ class ChunkGradingPromptJsonTests(unittest.TestCase):
         data = json.loads(raw)
         self.assertIn("matched_answer_key_for_question", data)
         self.assertIn("Reference:", data["matched_answer_key_for_question"])
+
+    def test_chunk_prompt_fills_trio_student_response_from_extracted_text(self) -> None:
+        """Thin ``trio.student_response`` + long ``extracted_text`` → inject tail for the LLM."""
+        qt = "Problem 2: Discuss trade-offs between precision and recall."
+        tail = (
+            "The student argues that optimizing for precision can miss positive cases "
+            "while recall focuses on coverage."
+        )
+        extracted = f"{qt}\n\n{tail}"
+        ch = GradingChunk(
+            chunk_id="s1:a1:pair_1",
+            assignment_id="a1",
+            student_id="s1",
+            question_id="pair_1",
+            modality=Modality.WRITTEN,
+            task_type=TaskType.FREE_RESPONSE_LONG,
+            extracted_text=extracted,
+            rubric_type=RubricType.FREE_RESPONSE,
+            rubric_rows=list(_FREE_RESPONSE_RUBRIC),
+            evidence={
+                "trio": {
+                    "question": qt,
+                    "student_response": "",
+                    "answer_key_segment": "",
+                }
+            },
+        )
+        raw = build_chunk_grading_prompt(ch)
+        data = json.loads(raw)
+        trio = (data["chunk"]["evidence"] or {}).get("trio") or {}
+        self.assertEqual(trio.get("student_response"), tail)
 
 
 # ---------------------------------------------------------------------------
@@ -1479,6 +1536,78 @@ class BlankTemplateAlignedChunkTests(unittest.TestCase):
         self.assertIn("ans_a", str(trio.get("student_response") or ""))
         self.assertTrue((chunks[0].evidence or {}).get("_blank_template_trio"))
 
+    def test_blank_template_ordinal_pair_when_question_ids_mismatch(self) -> None:
+        """If blank vs student headings yield different ``question_id`` strings, pair by order."""
+        blank = {
+            "nbformat": 4,
+            "nbformat_minor": 5,
+            "metadata": {},
+            "cells": [
+                {
+                    "cell_type": "markdown",
+                    "metadata": {},
+                    "source": ["### Question 1.1\n", "Do A.\n"],
+                },
+                {
+                    "cell_type": "markdown",
+                    "metadata": {},
+                    "source": ["### Question 1.2\n", "Do B.\n"],
+                },
+            ],
+        }
+        student = {
+            "nbformat": 4,
+            "nbformat_minor": 5,
+            "metadata": {},
+            "cells": [
+                {
+                    "cell_type": "markdown",
+                    "metadata": {},
+                    "source": ["### Question 9.9\n", "Different label.\n"],
+                },
+                {
+                    "cell_type": "code",
+                    "metadata": {},
+                    "source": ["ans_first = 10\n"],
+                },
+                {
+                    "cell_type": "markdown",
+                    "metadata": {},
+                    "source": ["### Question 8.8\n", "Other label.\n"],
+                },
+                {
+                    "cell_type": "code",
+                    "metadata": {},
+                    "source": ["ans_second = 20\n"],
+                },
+            ],
+        }
+        blank_b = json.dumps(blank).encode("utf-8")
+        stu_b = json.dumps(student).encode("utf-8")
+        envelope = ingest_raw_submission(
+            assignment_id="Week_mismatch",
+            student_id="Student_1",
+            artifacts={"ipynb": stu_b},
+            extracted_plaintext="",
+            modality_hints={
+                "modality_subtype": "notebook",
+                "blank_assignment_ipynb_bytes": blank_b,
+            },
+        )
+        out = build_blank_template_aligned_notebook_chunks(
+            envelope, blank_ipynb_bytes=blank_b, cfg=Config(),
+        )
+        self.assertIsNotNone(out)
+        chunks, mode = out
+        self.assertEqual(mode, "blank_template_aligned_notebook")
+        self.assertEqual(len(chunks), 2)
+        t0 = (chunks[0].evidence or {}).get("trio")
+        t1 = (chunks[1].evidence or {}).get("trio")
+        self.assertIsInstance(t0, dict)
+        self.assertIsInstance(t1, dict)
+        self.assertIn("ans_first", str(t0.get("student_response") or ""))
+        self.assertIn("ans_second", str(t1.get("student_response") or ""))
+
     def test_blank_scaffold_aligned_splits_on_todo_anchors(self) -> None:
         """Blank + student share ordinal scaffold code cells → one triad per anchor."""
         blank = {
@@ -1629,6 +1758,31 @@ class BlankTemplateAlignedChunkTests(unittest.TestCase):
             got, name = resolve_blank_assignment_ipynb("My_Assignment", p)
             self.assertEqual(name, "My_Assignment.ipynb")
             self.assertGreater(len(got), 4)
+
+
+class ModalityAndArtifactFormatTests(unittest.TestCase):
+    """PDF / audio / spreadsheet modality hints used by chunking + prompts."""
+
+    def test_normalize_video_hint(self) -> None:
+        self.assertEqual(normalize_modality_hint_for_multimodal("video"), "video_oral")
+
+    def test_resolve_audio_transcript_subtype(self) -> None:
+        assignment = SimpleNamespace(title="Oral reflection", description="")
+        arts = {"mp3": b"fake"}
+        prof = resolve_modality_profile(assignment, arts, "hello transcript sample " * 5)
+        self.assertEqual(prof["modality_subtype"], "audio_transcript")
+
+    def test_resolve_spreadsheet_subtype(self) -> None:
+        assignment = SimpleNamespace(title="Lab 3 data", description="")
+        arts = {"xlsx": b"x"}
+        prof = resolve_modality_profile(assignment, arts, "col1\tcol2\n1\t2\n")
+        self.assertEqual(prof["modality_subtype"], "spreadsheet")
+
+    def test_resolve_docx_journal_subtype(self) -> None:
+        assignment = SimpleNamespace(title="[Student 2] Journal Entry 3", description="")
+        arts = {"docx": b"x"}
+        prof = resolve_modality_profile(assignment, arts, "entry body " * 10)
+        self.assertEqual(prof["modality_subtype"], "journal_entry")
 
 
 class NotebookChunkerInstructorScaffoldTests(unittest.TestCase):
@@ -2242,6 +2396,52 @@ class ParseChunkGradeRubricAlignmentTests(unittest.TestCase):
         self.assertTrue(any("dropped_unknown_criterion" in w for w in warns))
 
 
+class MultiModelChunkRunnerJsonTests(unittest.TestCase):
+    """Per-chunk grading must request strict JSON from OpenAI clients."""
+
+    def test_run_chunk_samples_passes_json_object(self) -> None:
+        from unittest.mock import MagicMock
+
+        from app.config import Config
+        from app.grading.multimodal.model_runner import MultiModelChunkRunner
+        from app.grading.multimodal.schemas import (
+            GradingChunk,
+            Modality,
+            RubricType,
+            TaskType,
+        )
+
+        mock_client = MagicMock()
+        mock_client.chat_json_with_usage.return_value = (
+            {"rubric_type": "free_response", "criterion_scores": []},
+            {"prompt_tokens": 1, "completion_tokens": 1, "total_tokens": 2},
+        )
+
+        cfg = Config()
+        cfg.MULTIMODAL_SAMPLES_PER_MODEL = 1
+
+        def build_clients(_cfg: Config):
+            return [(mock_client, "openai:test-model")]
+
+        ch = GradingChunk(
+            chunk_id="c1",
+            assignment_id="a1",
+            student_id="s1",
+            question_id="q1",
+            modality=Modality.WRITTEN,
+            task_type=TaskType.FREE_RESPONSE_LONG,
+            extracted_text="x",
+            rubric_type=RubricType.FREE_RESPONSE,
+            rubric_rows=[{"name": "A", "max_points": 1.0}],
+        )
+        runner = MultiModelChunkRunner(cfg, build_clients=build_clients)
+        runner.run_chunk_samples(ch, system_prompt="sys", user_prompt='{"chunk":{}}')
+        mock_client.chat_json_with_usage.assert_called_once()
+        kw = mock_client.chat_json_with_usage.call_args.kwargs
+        self.assertEqual(kw.get("response_format"), {"type": "json_object"})
+        mock_client.chat_json.assert_not_called()
+
+
 class MultimodalHuggingFaceRoutingTests(unittest.TestCase):
     """Routing for ``MULTIMODAL_LLM_BACKEND`` without loading torch/transformers."""
 
@@ -2433,7 +2633,64 @@ class MultimodalHuggingFaceRoutingTests(unittest.TestCase):
         self.assertIn("rag_embedding_bundle", ev)
         self.assertIn("cost_usd", audit)
         self.assertIn("per_chunk_avg_cost_usd", audit)
+        self.assertTrue(audit.get("openai_embeddings_ok", False))
         inst.chat_json_with_usage.assert_called_once()
+
+    def test_openai_trio_rag_frontload_keeps_chunks_when_embedding_fails(self) -> None:
+        """Chat-produced trios must not be discarded when only the embed API fails."""
+        from unittest.mock import MagicMock, patch
+
+        from app.grading.multimodal.ingestion import ingest_raw_submission
+        from app.grading.multimodal.openai_trio_rag_frontload import (
+            run_openai_trio_rag_frontload,
+        )
+
+        cfg = Config()
+        cfg.OPENAI_API_KEY = "sk-test"
+        cfg.OPENAI_TRIO_RAG_CHAT_MODEL = "gpt-test"
+        cfg.OPENAI_TRIO_RAG_EMBEDDING_MODEL = "text-embedding-3-small"
+
+        inst = MagicMock()
+        inst.chat_json_with_usage.return_value = (
+            {
+                "units": [
+                    {
+                        "question_id": "1",
+                        "question": "Q?",
+                        "student_response": "A.",
+                        "answer_key_segment": "",
+                        "extracted_text": "Q?\nA.",
+                    }
+                ]
+            },
+            {"prompt_tokens": 10, "completion_tokens": 5, "total_tokens": 15},
+        )
+
+        with patch(
+            "app.grading.multimodal.openai_trio_rag_frontload.OpenAIJsonClient",
+            return_value=inst,
+        ), patch(
+            "app.grading.multimodal.openai_trio_rag_frontload._openai_embed_batch",
+            side_effect=RuntimeError("401 fake"),
+        ):
+            env = ingest_raw_submission(
+                assignment_id="a1",
+                student_id="s1",
+                artifacts={},
+                extracted_plaintext="student body",
+            )
+            chunks, audit = run_openai_trio_rag_frontload(env, cfg, "(no key)")
+
+        self.assertTrue(audit.get("ok"))
+        self.assertIn("embedding_error", audit)
+        self.assertFalse(audit.get("openai_embeddings_ok", True))
+        self.assertEqual(len(chunks), 1)
+        trio = ((chunks[0].evidence or {}).get("trio") or {})
+        self.assertEqual(trio.get("student_response"), "A.")
+        seg = (chunks[0].evidence or {}).get("trio_segment_rag") or {}
+        qmeta = seg.get("question") or {}
+        self.assertEqual(qmeta.get("embedding_dimension"), 0)
+        self.assertEqual(qmeta.get("embedding_source"), "openai_embedding_unavailable")
 
     def test_openai_trio_rag_frontload_multiple_windows_merge_dupes(self) -> None:
         from unittest.mock import MagicMock, patch

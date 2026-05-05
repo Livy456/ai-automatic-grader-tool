@@ -57,6 +57,15 @@ _MEDIUM_EDA_SIGNAL = re.compile(
     re.IGNORECASE,
 )
 
+# Homework notebooks: placeholders / TODOs → scaffolded coding rubric, not EDA.
+_SCAFFOLD_CODING_SIGNAL = re.compile(
+    r"(?i)\b("
+    r"write\s+your\s+code\s+here|write\s+code\s+for|your\s+code\s+here|your\s+answer\s+here|"
+    r"fill\s+in.*code|#\s*todo\b|#\s*add\s+your\s+code|#\s*student\s+begin|"
+    r"placeholder|for\s+students?\s+to\s+complete|implement\s+(the\s+)?function"
+    r")\b",
+)
+
 _HEURISTIC_TASK_FROM_MODALITY: dict[Modality, TaskType] = {
     Modality.VIDEO_ORAL: TaskType.ORAL_INTERVIEW,
     Modality.VISUALIZATION: TaskType.EDA_VISUALIZATION,
@@ -99,9 +108,16 @@ def _notebook_ipynb_grading_blob(chunk: GradingChunk) -> str:
 def _notebook_ipynb_pick_scaffolded_vs_eda(chunk: GradingChunk) -> RubricType:
     """Choose between programming_scaffolded and eda_visualization (Open-Ended EDA section)."""
     blob = _notebook_ipynb_grading_blob(chunk)
+    sc_hits = len(_SCAFFOLD_CODING_SIGNAL.findall(blob))
+    if sc_hits >= 2:
+        return RubricType.PROGRAMMING_SCAFFOLDED
+    if sc_hits >= 1 and not _STRONG_EDA_SIGNAL.search(blob):
+        return RubricType.PROGRAMMING_SCAFFOLDED
     if _STRONG_EDA_SIGNAL.search(blob):
         return RubricType.EDA_VISUALIZATION
-    if len(_MEDIUM_EDA_SIGNAL.findall(blob)) >= 2:
+    if len(_MEDIUM_EDA_SIGNAL.findall(blob)) >= 3:
+        return RubricType.EDA_VISUALIZATION
+    if len(_MEDIUM_EDA_SIGNAL.findall(blob)) >= 2 and not _SCAFFOLD_CODING_SIGNAL.search(blob):
         return RubricType.EDA_VISUALIZATION
     return RubricType.PROGRAMMING_SCAFFOLDED
 

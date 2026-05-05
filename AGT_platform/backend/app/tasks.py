@@ -132,6 +132,14 @@ def grade_submission(self, submission_id: int):
                 artifacts["py"] = data
             if art.kind.endswith("mp4"):
                 artifacts["mp4"] = data
+            if art.kind.endswith("mp3"):
+                artifacts["mp3"] = data
+            if art.kind.endswith("wav"):
+                artifacts["wav"] = data
+            if art.kind.endswith("m4a"):
+                artifacts["m4a"] = data
+            if art.kind.endswith("webm"):
+                artifacts["webm"] = data
             if art.kind.endswith("zip"):
                 artifacts["zip"] = data
             if art.kind.endswith("png"):
@@ -140,6 +148,10 @@ def grade_submission(self, submission_id: int):
                 artifacts["jpg"] = data
             if art.kind.endswith("docx"):
                 artifacts["docx"] = data
+            if art.kind.endswith("xlsx"):
+                artifacts["xlsx"] = data
+            if art.kind.endswith("csv"):
+                artifacts["csv"] = data
 
         is_public_autograder = assignment.course_id is None
         if is_public_autograder:

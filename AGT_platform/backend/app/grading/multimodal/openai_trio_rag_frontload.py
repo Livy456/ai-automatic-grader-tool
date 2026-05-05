@@ -50,7 +50,9 @@ Rules:
 - Every unit needs non-empty ``question`` or ``student_response`` (at least one).
 - Use as many units as the assignment visibly contains; merge tiny boilerplate into adjacent units.
 - **Short coding cells count:** if the only student work for a problem is a single line (e.g. ``import csv``), that is still a **complete** unit—copy it verbatim and set ``answer_key_segment`` to the matching key line(s), even when the rest of the notebook is long.
-- When the submission begins with a ``[STUDENT_SUBMISSION_PART …]`` header, you are seeing **one slice** of a longer file. Extract every gradable unit that appears **fully inside this slice**; still use the full ``ANSWER_KEY_OR_SAMPLE`` block below to choose ``answer_key_segment`` for each unit."""
+- When the submission begins with a ``[STUDENT_SUBMISSION_PART …]`` header, you are seeing **one slice** of a longer file. Extract every gradable unit that appears **fully inside this slice**; still use the full ``ANSWER_KEY_OR_SAMPLE`` block below to choose ``answer_key_segment`` for each unit.
+- **Answer key alignment:** when ``ANSWER_KEY_OR_SAMPLE`` contains numbered sections, sample solutions, or instructor prose that maps to a unit, copy the **shortest** matching ``answer_key_segment`` (can be a paragraph or bullet list). Use empty string only when the key truly has no relevant part.
+- **JSON safety:** your reply is parsed as strict JSON; the API enforces ``json_object`` — still avoid bare control characters inside strings."""
 
 
 def _submission_window_slices(text: str, window: int, overlap: int) -> list[tuple[int, int, str]]:
@@ -135,9 +137,30 @@ def _chat_trio_units(
         {"role": "system", "content": _TRIO_RAG_SYSTEM},
         {"role": "user", "content": user_body},
     ]
-    parsed, usage = client.chat_json_with_usage(
-        messages, temperature=0.1, response_format={"type": "json_object"}
-    )
+    last_exc: Exception | None = None
+    parsed: dict[str, Any] | None = None
+    usage: dict[str, int] = {}
+    for attempt in range(3):
+        try:
+            parsed, usage = client.chat_json_with_usage(
+                messages,
+                temperature=0.1,
+                response_format={"type": "json_object"},
+            )
+            last_exc = None
+            break
+        except Exception as exc:
+            last_exc = exc
+            if attempt < 2:
+                _log.debug(
+                    "OpenAI trio frontload chat retry attempt=%s/3: %s",
+                    attempt + 1,
+                    exc,
+                )
+    if last_exc is not None:
+        raise last_exc
+    if not isinstance(parsed, dict):
+        raise ValueError("trio chat returned non-object JSON")
     raw = parsed.get("units") if isinstance(parsed, dict) else None
     raw_list = raw if isinstance(raw, list) else []
     clean = [u for u in raw_list if isinstance(u, dict)]
@@ -430,6 +453,8 @@ def run_openai_trio_rag_frontload(
     nonempty_texts = [t for t in embed_inputs if t.strip()]
     pre_embed_tok = sum(_chars_to_token_estimate(len(t)) for t in nonempty_texts)
 
+    vecs: list[list[float]]
+    embed_usage_tokens = 0
     try:
         vecs, embed_usage_tokens = _openai_embed_batch(
             embed_inputs,
@@ -438,8 +463,14 @@ def run_openai_trio_rag_frontload(
         )
     except Exception as exc:
         _log.warning("OpenAI trio frontload embeddings failed: %s", exc, exc_info=True)
-        audit["error"] = f"embed_failed:{exc!s}"
-        return [], audit
+        audit["embedding_error"] = f"embed_failed:{exc!s}"
+        audit["openai_embeddings_ok"] = False
+        vecs = [[] for _ in range(len(embed_inputs))]
+        embed_usage_tokens = 0
+    else:
+        audit["openai_embeddings_ok"] = True
+
+    embed_failed = bool(audit.get("embedding_error"))
 
     if embed_usage_tokens <= 0:
         embed_usage_tokens = pre_embed_tok
@@ -460,18 +491,30 @@ def run_openai_trio_rag_frontload(
                 }
                 continue
             vec = list(vecs[idx]) if idx < len(vecs) else []
+            if vec:
+                emb_src = f"openai:{embed_model}"
+            elif embed_failed:
+                emb_src = "openai_embedding_unavailable"
+            else:
+                emb_src = f"openai:{embed_model}"
             seg_rag[key] = {
                 "embedding_dimension": len(vec),
-                "embedding_source": f"openai:{embed_model}",
+                "embedding_source": emb_src,
                 "embedding": vec,
             }
         c_idx = base + 3
         vec2 = list(vecs[c_idx]) if c_idx < len(vecs) else []
         ev = dict(ch.evidence or {})
         ev["trio_segment_rag"] = seg_rag
+        if vec2:
+            bundle_src = f"trio_canonical:openai:{embed_model}"
+        elif embed_failed:
+            bundle_src = "trio_canonical:openai_embedding_unavailable"
+        else:
+            bundle_src = f"trio_canonical:openai:{embed_model}"
         ev["rag_embedding_bundle"] = {
             "embedding_dimension": len(vec2),
-            "embedding_source": f"trio_canonical:openai:{embed_model}",
+            "embedding_source": bundle_src,
             "embedding": vec2,
         }
         ch.evidence = ev

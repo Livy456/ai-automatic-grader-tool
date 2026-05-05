@@ -1,6 +1,15 @@
-import io, json, subprocess, tempfile, os
+import io
+import json
+import logging
+import os
+import subprocess
+import tempfile
+from pathlib import Path
+
 import nbformat
 from pypdf import PdfReader
+
+_log = logging.getLogger(__name__)
 
 
 def normalize_verticalized_pdf_text(text: str) -> str:
@@ -159,5 +168,84 @@ def run_python_tests(zip_or_py_bytes: bytes, filename_hint: str = "submission.py
             return {"ok": False, "tests":"py_compile", "stderr":"timeout", "stdout":""}
 
 def transcribe_video_stub(video_bytes: bytes) -> str:
-    # Wire to Whisper later (faster-whisper / whisper.cpp)
-    return "[TRANSCRIPTION_DISABLED_IN_MVP]"
+    """Placeholder when Whisper is off or unavailable (length hint only)."""
+    n = len(video_bytes or b"")
+    return f"[TRANSCRIPTION_DISABLED_OR_UNAVAILABLE] ({n} bytes)"
+
+
+_WHISPER_SAFE_SUFFIXES = frozenset(
+    {".flac", ".m4a", ".mp3", ".mp4", ".mpeg", ".mpga", ".ogg", ".wav", ".webm"}
+)
+
+
+def transcribe_submission_media_bytes(
+    data: bytes,
+    *,
+    filename: str = "submission.m4a",
+) -> str:
+    """
+    One-shot transcript for parsing/chunking (OpenAI Whisper).
+
+    Controlled by ``Config.MULTIMODAL_WHISPER_TRANSCRIBE`` (``off`` / ``on`` / ``auto``).
+    ``auto`` calls Whisper only when ``OPENAI_API_KEY`` is set. Large files may exceed the
+    API size limit (~25 MB).
+    """
+    if not data:
+        return ""
+    try:
+        from app.config import Config
+
+        mode = str(getattr(Config, "MULTIMODAL_WHISPER_TRANSCRIBE", "auto") or "auto").lower()
+        model = str(getattr(Config, "OPENAI_WHISPER_MODEL", "") or "").strip() or "whisper-1"
+    except Exception:
+        mode, model = "auto", "whisper-1"
+
+    if mode == "off":
+        return transcribe_video_stub(data)
+
+    api_key = os.getenv("OPENAI_API_KEY", "").strip()
+    want = mode == "on" or (mode == "auto" and bool(api_key))
+    if not want:
+        return transcribe_video_stub(data)
+    if not api_key:
+        _log.warning(
+            "MULTIMODAL_WHISPER_TRANSCRIBE=%s but OPENAI_API_KEY is empty; skipping Whisper",
+            mode,
+        )
+        return transcribe_video_stub(data)
+
+    max_bytes = 24 * 1024 * 1024
+    if len(data) > max_bytes:
+        _log.warning(
+            "submission media exceeds ~24MB Whisper limit (%s bytes); not transcribed",
+            len(data),
+        )
+        return (
+            "[AUDIO_TOO_LARGE_FOR_WHISPER_API]\n"
+            "Compress or split the file; limit is about 25 MB."
+        )
+
+    suf = Path(filename).suffix.lower()
+    if suf not in _WHISPER_SAFE_SUFFIXES:
+        suf = ".m4a"
+
+    try:
+        from openai import OpenAI
+    except ImportError:
+        _log.warning("openai package not installed; cannot call Whisper")
+        return transcribe_video_stub(data)
+
+    try:
+        client = OpenAI(api_key=api_key)
+        with tempfile.NamedTemporaryFile(suffix=suf, delete=True) as tmp:
+            tmp.write(data)
+            tmp.flush()
+            tmp.seek(0)
+            resp = client.audio.transcriptions.create(model=model, file=tmp)
+        text = str(getattr(resp, "text", "") or "").strip()
+        if not text:
+            return "[WHISPER_EMPTY_TRANSCRIPT]"
+        return text
+    except Exception as exc:
+        _log.warning("OpenAI Whisper transcription failed: %s", exc, exc_info=True)
+        return f"[WHISPER_TRANSCRIPTION_FAILED: {type(exc).__name__}]"

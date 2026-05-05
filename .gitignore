@@ -98,7 +98,7 @@ env.production.gpu
 **/grading_output_training/*
 **/assignment_chunking/*
 **/AGT_platform/backend/uploads/*
-
+**/custom_rubric/*
 # Cursor implementation prompt (local only)
 /multi_llm_semantic_entropy.md
 
