@@ -549,7 +549,8 @@ def validate_grading_output(
 
     Each criterion dict (top-level and under ``question_grades``) is normalized to include
     string ``justification``, ``evidence``, and ``reasoning`` (placeholders are inserted
-    when the producer omitted them). ``raw_rubric_score`` / ``calibrated_credit`` are stripped.
+    when the producer omitted them). 
+    
     When ``question_grades`` is present, assignment-level ``overall.score`` and
     ``rubric_points_earned`` are re-synchronized from per-question aggregates so headline
     scores do not contradict chunk-level rubric rows.

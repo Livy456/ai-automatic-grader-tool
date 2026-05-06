@@ -64,7 +64,6 @@ def compute_semantic_entropy(
             h -= pf * math.log(pf)
     return float(h)
 
-
 def normalize_entropy_to_confidence(
     semantic_entropy_nats: float,
     n_observed_clusters: int,
