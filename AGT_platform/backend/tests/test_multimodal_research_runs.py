@@ -14,11 +14,14 @@ Opt-in research harness: repeat multimodal grading many times for one or more as
 
 - A single assignment **stem** under ``assignments_to_grade/`` (e.g. ``[Student 1] Journal Entry 2``), or
 - A **JSON array** of stems, e.g. ``["[Student 1] Journal Entry 1","[Student 2] week 2 part 1 colab"]``.
-  With multiple stems, assignments run **concurrently** (default **3** at a time) via
-  ``asyncio`` + ``asyncio.to_thread`` so blocking OpenAI calls overlap while limiting burst
-  traffic. Tune with ``MULTIMODAL_RESEARCH_MAX_CONCURRENT_ASSIGNMENTS`` (integer ≥ 1, default **3**).
-  Invalid JSON is treated as one literal stem, so stems that start with ``[`` must be
-  JSON-encoded as above.
+  Stems run **one after another** (same order as the list). Invalid JSON is treated as one
+  literal stem, so stems that start with ``[`` must be JSON-encoded as above.
+
+**Resume (default on):** set ``MULTIMODAL_RESEARCH_RESUME=0``/``false``/``off`` to always re-run
+all ``MULTIMODAL_RESEARCH_RUN_COUNT`` passes from scratch. When resume is on (default), a stem
+is skipped if ``research analysis/<sanitized_stem>_run_01`` … ``_run_<N>/grade_output.json`` all
+exist; otherwise only **missing** run folders are executed, then the CSV is rebuilt from every
+run’s ``grade_output.json`` so you can stop and continue until each stem reaches ``N`` runs.
 
 Optionally set ``MULTIMODAL_RESEARCH_RUN_COUNT`` (default **30**, max 100).
 
@@ -35,8 +38,6 @@ Example (multiple assignments, 30 runs each)::
 
     MULTIMODAL_RESEARCH_ASSIGNMENT_ID='["[Student 1] Journal Entry 1","[Student 2] Journal Entry 1"]' \\
     pytest tests/test_multimodal_research_runs.py -v
-
-Optional: ``MULTIMODAL_RESEARCH_MAX_CONCURRENT_ASSIGNMENTS=2`` lowers parallel stems (default **3**).
 
 **Speed / parity toggles (research only):**
 
@@ -61,7 +62,6 @@ Pipeline-wide (optional, not research-specific):
 
 from __future__ import annotations
 
-import asyncio
 import csv
 import json
 import importlib.util
@@ -69,7 +69,6 @@ import logging
 import os
 import re
 import unittest
-from functools import partial
 from pathlib import Path
 from types import SimpleNamespace
 
@@ -141,17 +140,6 @@ def _research_run_count() -> int:
         return max(1, min(int(raw, 10), 100))
     except ValueError:
         return 30
-
-
-def _research_max_concurrent_assignments() -> int:
-    """Cap concurrent assignment stems (separate threads); default 3 to reduce 429 risk."""
-    raw = os.getenv("MULTIMODAL_RESEARCH_MAX_CONCURRENT_ASSIGNMENTS", "").strip()
-    if not raw:
-        return 3
-    try:
-        return max(1, min(int(raw, 10), 20))
-    except ValueError:
-        return 3
 
 
 def _research_use_chunk_cache() -> bool:
