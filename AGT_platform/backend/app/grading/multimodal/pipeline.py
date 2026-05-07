@@ -24,6 +24,12 @@ RAG embeddings otherwise use
 ``RAG_EMBEDDING_BACKEND`` (``sentence_transformers`` default, or ``openai`` for the same OpenAI
 embeddings API without frontload) / ``SENTENCE_TRANSFORMERS_MODEL``.
 
+**RAG embed tuning (non–trio-frontload path):** ``MULTIMODAL_RAG_EMBED_BATCH=on`` batches
+SentenceTransformer / OpenAI embedding requests in :func:`enrich_chunks_with_rag_embeddings`.
+``MULTIMODAL_RAG_PREWINDOW_EMBED=on`` runs :func:`precompute_document_rag_prewindow_for_pipeline`
+before chunking so plain units can reuse one document-span vector when safe (audit:
+``multimodal_rag_prewindow_plain_audit`` on ``modality_hints``).
+
 **Answer key:** if ``modality_hints["answer_key_plaintext"]`` is empty, the pipeline calls
 :func:`app.grading.answer_key_resolve.resolve_answer_key_plaintext` against
 ``modality_hints["answer_key_dir"]`` or the repository ``answer_key/`` folder.
@@ -411,6 +417,11 @@ class MultimodalGradingPipeline:
 
         app_cfg = self._resolve_app_config()
 
+        if app_cfg is not None:
+            from .rag_embeddings import precompute_document_rag_prewindow_for_pipeline
+
+            precompute_document_rag_prewindow_for_pipeline(envelope, app_cfg, wf)
+
         cache_read = str(hints.get("multimodal_chunk_cache_path") or "").strip()
         cache_write = str(hints.get("multimodal_chunk_cache_write_path") or "").strip()
         cache_p = Path(cache_read).expanduser() if cache_read else None
@@ -439,6 +450,10 @@ class MultimodalGradingPipeline:
                     "multimodal_chunk_cache_path missing or invalid; rebuilding chunks (%s)",
                     cache_read,
                 )
+            if app_cfg is not None:
+                from .audio_half_split import maybe_prepare_audio_half_split
+
+                maybe_prepare_audio_half_split(envelope, app_cfg)
             raw_tpl = hints.get("blank_assignment_template_bytes")
             raw_nb = hints.get("blank_assignment_ipynb_bytes")
             blank_for_flags = (
@@ -555,16 +570,29 @@ class MultimodalGradingPipeline:
         # Per-chunk RAG vectors (trio + bundle) must exist before LLM grading when enabled.
         embed_cfg = app_cfg if app_cfg is not None else Config()
         rag_embed_ran = False
+        hints_for_embed = hints if isinstance(hints, dict) else None
         if app_cfg is not None and multimodal_rag_embed_units_enabled():
             if (not reused_embeddings) or (not chunks_have_unit_embeddings(chunks)):
-                enrich_chunks_with_rag_embeddings(chunks, app_cfg)
+                enrich_chunks_with_rag_embeddings(
+                    chunks, app_cfg, modality_hints=hints_for_embed
+                )
                 rag_embed_ran = True
             if not chunks_have_unit_embeddings(chunks):
                 _log.warning(
                     "multimodal: RAG unit embeddings still missing before grading; forcing embed pass"
                 )
-                enrich_chunks_with_rag_embeddings(chunks, app_cfg)
+                enrich_chunks_with_rag_embeddings(
+                    chunks, app_cfg, modality_hints=hints_for_embed
+                )
                 rag_embed_ran = True
+
+        if hints_for_embed and isinstance(
+            hints_for_embed.get("multimodal_rag_prewindow_plain_audit"), dict
+        ):
+            wf(
+                "multimodal_rag_prewindow_plain_audit",
+                **hints_for_embed["multimodal_rag_prewindow_plain_audit"],
+            )
 
         if self.rubric_rows_by_type:
             apply_custom_rubric_plan_to_chunks(

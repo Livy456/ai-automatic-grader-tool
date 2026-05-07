@@ -3,7 +3,10 @@ Integration test: grade local fixtures from the repository root.
 
 Layout (at repo root, next to ``AGT_platform/``):
 
-- ``assignments_to_grade/`` — submission files (any supported modality; grouped by shared basename).
+- ``assignments_to_grade/`` — submission files (grouped by shared basename). Supported suffixes
+  include notebooks, code, PDF, text, ``.docx``, ``.mp4``, and common **audio** formats
+  (``.mp3``, ``.wav``, ``.m4a``, ``.webm``, ``.mpa`` — MPEG-style audio is stored under the
+  ``mp3`` artifact key for pipeline compatibility).
 - ``rubric/`` — **either** (a) four ``[Generic] *.json`` templates (scaffolded coding, free response,
   open-ended EDA, mock interview), **or** (b) legacy ``default`` / ``generic`` / ``rubric`` basenames,
   **or** (c) per-assignment ``rubric/<stem>.{json,md,txt}``.
@@ -97,7 +100,20 @@ ANSWER_KEY_DIR = REPO_ROOT / "answer_key"
 
 _GENERIC_BASENAMES = ("default", "generic", "rubric")
 
-_SUPPORTED_SUFFIXES = {".ipynb", ".py", ".pdf", ".txt", ".md", ".mp4", ".docx"}
+_SUPPORTED_SUFFIXES = {
+    ".ipynb",
+    ".py",
+    ".pdf",
+    ".txt",
+    ".md",
+    ".mp4",
+    ".docx",
+    ".mp3",
+    ".wav",
+    ".m4a",
+    ".webm",
+    ".mpa",
+}
 _SUFFIX_TO_ARTIFACT_KEY = {
     ".ipynb": "ipynb",
     ".py": "py",
@@ -106,6 +122,12 @@ _SUFFIX_TO_ARTIFACT_KEY = {
     ".md": "md",
     ".mp4": "mp4",
     ".docx": "docx",
+    ".mp3": "mp3",
+    ".wav": "wav",
+    ".m4a": "m4a",
+    ".webm": "webm",
+    # .mpa is common for MPEG audio sidecars; Whisper accepts it when listed as safe.
+    ".mpa": "mp3",
 }
 
 

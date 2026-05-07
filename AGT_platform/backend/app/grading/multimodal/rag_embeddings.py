@@ -4,6 +4,9 @@ RAG-style chunk embeddings and optional LLM Q→A segmentation for multimodal gr
 Aligns with :mod:`app.grading.rag_embeddings` — per-chunk vectors from
 :func:`app.grading.rag_embeddings.compute_submission_embedding` (default
 ``RAG_EMBEDDING_BACKEND=sentence_transformers`` / ``SENTENCE_TRANSFORMERS_MODEL``).
+Optional **batched** embeds: ``MULTIMODAL_RAG_EMBED_BATCH=on`` (see
+:func:`enrich_chunks_with_rag_embeddings`). Optional **document pre-window** embed before
+chunking: ``MULTIMODAL_RAG_PREWINDOW_EMBED=on`` (see :func:`precompute_document_rag_prewindow_for_pipeline`).
 
 **Chunking stack** (see ``new_chunking_method.md``):
 
@@ -50,7 +53,7 @@ from __future__ import annotations
 
 import logging
 import os
-from typing import Any
+from typing import Any, Callable
 
 from app.config import Config
 from app.grading.artifact_plaintext import artifacts_to_concatenated_plain
@@ -59,7 +62,10 @@ from app.grading.llm_router import (
     anthropic_multimodal_structure_client,
     openai_multimodal_grading_model,
 )
-from app.grading.rag_embeddings import compute_submission_embedding
+from app.grading.rag_embeddings import (
+    compute_submission_embedding,
+    compute_submission_embeddings_batch,
+)
 
 from app.grading.submission_chunks import reflow_pdf_sections_in_plaintext
 
@@ -108,6 +114,11 @@ def multimodal_llm_qa_segment_enabled() -> bool:
 
 def multimodal_rag_embed_units_enabled() -> bool:
     return _env_bool("MULTIMODAL_RAG_EMBED_UNITS", default=True)
+
+
+def multimodal_rag_embed_batch_enabled() -> bool:
+    """Batch OpenAI / SentenceTransformer embedding calls (``MULTIMODAL_RAG_EMBED_BATCH``)."""
+    return _env_bool("MULTIMODAL_RAG_EMBED_BATCH", default=False)
 
 
 def multimodal_llm_trio_chunking_enabled(cfg: Config | None = None) -> bool:
@@ -302,26 +313,117 @@ def _chunks_use_openai_trio_rag_frontload(chunks: list[GradingChunk]) -> bool:
     return True
 
 
-def enrich_chunks_with_rag_embeddings(chunks: list[GradingChunk], cfg: Config) -> None:
+def precompute_document_rag_prewindow_for_pipeline(
+    envelope: IngestionEnvelope,
+    cfg: Config,
+    wf: Callable[..., None],
+) -> None:
     """
-    Attach per-unit vectors via :func:`compute_submission_embedding`.
+    When ``MULTIMODAL_RAG_PREWINDOW_EMBED=on``, embed the first ``RAG_EMBED_MAX_CHARS`` chars of
+    QA-segment plaintext once and stash span + vector on ``modality_hints`` for optional reuse
+    in :func:`enrich_chunks_with_rag_embeddings` (non-trio units only).
+    """
+    if not _env_bool("MULTIMODAL_RAG_PREWINDOW_EMBED", default=False):
+        return
+    hints = envelope.modality_hints
+    if not isinstance(hints, dict):
+        return
+    if hints.get("multimodal_rag_doc_prewindow"):
+        return
+    plain = _qa_segment_plaintext(envelope)
+    if not plain.strip():
+        wf("multimodal_rag_doc_prewindow", skipped=True, reason="empty_plaintext")
+        return
+    max_c = int(getattr(cfg, "RAG_EMBED_MAX_CHARS", 24000))
+    span = plain[:max_c]
+    vec, src = compute_submission_embedding(span, cfg)
+    hints["multimodal_rag_doc_prewindow_span"] = span
+    hints["multimodal_rag_doc_prewindow"] = {
+        "embedding": vec,
+        "embedding_source": src,
+        "doc_plaintext_total_chars": len(plain),
+        "prewindow_span_chars": len(span),
+    }
+    wf(
+        "multimodal_rag_doc_prewindow",
+        doc_plaintext_total_chars=len(plain),
+        prewindow_span_chars=len(span),
+        embedding_source=src,
+        embedding_dimension=len(vec),
+    )
 
-    When ``evidence["trio"]`` is present (question / student_response / answer_key_segment),
-    embed each non-empty segment into ``trio_segment_rag`` and set ``rag_embedding_bundle``
-    from a canonical ``[QUESTION] / [STUDENT] / [REFERENCE]`` join (fallback: ``extracted_text``).
-    """
-    if not multimodal_rag_embed_units_enabled():
+
+def _prewindow_plain_reuse_max_frac() -> float:
+    raw = os.getenv("MULTIMODAL_RAG_PREWINDOW_REUSE_MAX_FRAC", "").strip()
+    if not raw:
+        return 0.85
+    try:
+        v = float(raw)
+        return max(0.05, min(v, 1.0))
+    except ValueError:
+        return 0.85
+
+
+def _try_plain_chunk_doc_prewindow_bundle(
+    ch: GradingChunk,
+    txt: str,
+    modality_hints: dict[str, Any] | None,
+) -> dict[str, Any] | None:
+    if not modality_hints or not _env_bool(
+        "MULTIMODAL_RAG_PREWINDOW_EMBED", default=False
+    ):
+        return None
+    meta = modality_hints.get("multimodal_rag_doc_prewindow")
+    span = str(modality_hints.get("multimodal_rag_doc_prewindow_span") or "")
+    if not isinstance(meta, dict) or not span:
+        return None
+    emb = meta.get("embedding")
+    if not isinstance(emb, list) or len(emb) < 8:
+        return None
+    t = (txt or "").strip()
+    if not t or t == " ":
+        return None
+    max_frac = _prewindow_plain_reuse_max_frac()
+    if t not in span or len(t) > int(len(span) * max_frac):
+        return None
+    src0 = str(meta.get("embedding_source") or "unknown")
+    return {
+        "embedding_dimension": len(emb),
+        "embedding_source": f"doc_prewindow_reuse:{src0}",
+        "embedding": list(emb),
+    }
+
+
+def _bump_prewindow_plain_audit(
+    modality_hints: dict[str, Any] | None, *, reused: bool
+) -> None:
+    if not modality_hints:
         return
-    if _chunks_use_openai_trio_rag_frontload(chunks):
-        return
+    aud = modality_hints.setdefault(
+        "multimodal_rag_prewindow_plain_audit",
+        {"plain_reuse": 0, "plain_embed": 0},
+    )
+    key = "plain_reuse" if reused else "plain_embed"
+    aud[key] = int(aud.get(key, 0)) + 1
+
+
+def _caps_trio() -> tuple[int, int, int, int]:
     if _env_bool("MULTIMODAL_TRIO_EMBED_NO_CAPS", default=False):
-        q_cap = r_cap = ak_cap = canon_cap = 10**9
-    else:
-        q_cap = _env_int("MULTIMODAL_TRIO_EMBED_QUESTION_MAX_CHARS", 12_000)
-        r_cap = _env_int("MULTIMODAL_TRIO_EMBED_RESPONSE_MAX_CHARS", 16_000)
-        ak_cap = _env_int("MULTIMODAL_TRIO_EMBED_ANSWER_KEY_MAX_CHARS", 16_000)
-        canon_cap = _env_int("MULTIMODAL_TRIO_CANONICAL_EMBED_MAX_CHARS", 24_000)
+        return 10**9, 10**9, 10**9, 10**9
+    return (
+        _env_int("MULTIMODAL_TRIO_EMBED_QUESTION_MAX_CHARS", 12_000),
+        _env_int("MULTIMODAL_TRIO_EMBED_RESPONSE_MAX_CHARS", 16_000),
+        _env_int("MULTIMODAL_TRIO_EMBED_ANSWER_KEY_MAX_CHARS", 16_000),
+        _env_int("MULTIMODAL_TRIO_CANONICAL_EMBED_MAX_CHARS", 24_000),
+    )
 
+
+def _enrich_chunks_with_rag_embeddings_sequential(
+    chunks: list[GradingChunk],
+    cfg: Config,
+    modality_hints: dict[str, Any] | None,
+) -> None:
+    q_cap, r_cap, ak_cap, canon_cap = _caps_trio()
     for ch in chunks:
         ev = dict(ch.evidence or {})
         trio = ev.get("trio")
@@ -388,6 +490,13 @@ def enrich_chunks_with_rag_embeddings(chunks: list[GradingChunk], cfg: Config) -
             continue
 
         txt = (ch.extracted_text or "").strip() or " "
+        reuse = _try_plain_chunk_doc_prewindow_bundle(ch, txt, modality_hints)
+        if reuse is not None:
+            ev["rag_embedding_bundle"] = reuse
+            ch.evidence = ev
+            _bump_prewindow_plain_audit(modality_hints, reused=True)
+            continue
+        _bump_prewindow_plain_audit(modality_hints, reused=False)
         vec, src = compute_submission_embedding(txt, cfg)
         ev["rag_embedding_bundle"] = {
             "embedding_dimension": len(vec),
@@ -395,6 +504,169 @@ def enrich_chunks_with_rag_embeddings(chunks: list[GradingChunk], cfg: Config) -
             "embedding": vec,
         }
         ch.evidence = ev
+
+
+def _enrich_chunks_with_rag_embeddings_batched(
+    chunks: list[GradingChunk],
+    cfg: Config,
+    modality_hints: dict[str, Any] | None,
+) -> None:
+    q_cap, r_cap, ak_cap, canon_cap = _caps_trio()
+    texts: list[str] = []
+    owners: list[tuple[GradingChunk, str, str]] = []
+    # (chunk, mode, detail) mode: seg|canon|plain ; detail: segment name or ""
+
+    for ch in chunks:
+        ev = dict(ch.evidence or {})
+        trio = ev.get("trio")
+        if isinstance(trio, dict):
+            tq = str(trio.get("question") or "").strip()[:q_cap]
+            tsr = str(trio.get("student_response") or "").strip()[:r_cap]
+            tak = str(trio.get("answer_key_segment") or "").strip()[:ak_cap]
+            for key, blob in (
+                ("question", tq),
+                ("student_response", tsr),
+                ("answer_key_segment", tak),
+            ):
+                b = (blob or "").strip()
+                if b:
+                    texts.append(b)
+                    owners.append((ch, "seg", key))
+            canon_parts: list[str] = []
+            if tq:
+                canon_parts.append(f"[QUESTION]\n{tq}")
+            if tsr:
+                canon_parts.append(f"[STUDENT]\n{tsr}")
+            if tak:
+                canon_parts.append(f"[REFERENCE]\n{tak}")
+            canon = "\n\n".join(canon_parts).strip()
+            if not canon:
+                canon = (ch.extracted_text or "").strip() or " "
+            canon = canon[:canon_cap]
+            texts.append(canon)
+            owners.append((ch, "canon", ""))
+        else:
+            txt = (ch.extracted_text or "").strip() or " "
+            reuse = _try_plain_chunk_doc_prewindow_bundle(ch, txt, modality_hints)
+            if reuse is not None:
+                ev = dict(ch.evidence or {})
+                ev["rag_embedding_bundle"] = reuse
+                ch.evidence = ev
+                _bump_prewindow_plain_audit(modality_hints, reused=True)
+                continue
+            _bump_prewindow_plain_audit(modality_hints, reused=False)
+            texts.append(txt)
+            owners.append((ch, "plain", ""))
+
+    if not texts:
+        return
+
+    vecs = compute_submission_embeddings_batch(texts, cfg)
+    if len(vecs) != len(texts):
+        _log.warning(
+            "batch embedding length mismatch (%s vs %s); falling back to sequential",
+            len(vecs),
+            len(texts),
+        )
+        _enrich_chunks_with_rag_embeddings_sequential(chunks, cfg, modality_hints)
+        return
+
+    # Apply trio + plain: group vectors per chunk
+    by_chunk: dict[int, dict[str, Any]] = {}
+    for (ch, mode, detail), (vec, src) in zip(owners, vecs):
+        cid = id(ch)
+        slot = by_chunk.setdefault(cid, {"seg": {}, "canon": None, "plain": None})
+        if mode == "seg":
+            slot["seg"][detail] = (vec, src)
+        elif mode == "canon":
+            slot["canon"] = (vec, src)
+        else:
+            slot["plain"] = (vec, src)
+
+    for ch in chunks:
+        ev = dict(ch.evidence or {})
+        trio = ev.get("trio")
+        if not isinstance(trio, dict):
+            emb = (ev.get("rag_embedding_bundle") or {}).get("embedding")
+            if isinstance(emb, list) and len(emb) >= 8:
+                continue
+            slot = by_chunk.get(id(ch))
+            if slot and slot.get("plain") is not None:
+                vec, src = slot["plain"]
+                ev["rag_embedding_bundle"] = {
+                    "embedding_dimension": len(vec),
+                    "embedding_source": src,
+                    "embedding": vec,
+                }
+                ch.evidence = ev
+            continue
+
+        tq = str(trio.get("question") or "").strip()[:q_cap]
+        tsr = str(trio.get("student_response") or "").strip()[:r_cap]
+        tak = str(trio.get("answer_key_segment") or "").strip()[:ak_cap]
+        slot = by_chunk.get(id(ch))
+        if not slot:
+            continue
+        seg_rag: dict[str, Any] = {}
+        for key, blob in (
+            ("question", tq),
+            ("student_response", tsr),
+            ("answer_key_segment", tak),
+        ):
+            b = (blob or "").strip()
+            if not b:
+                seg_rag[key] = {
+                    "embedding_dimension": 0,
+                    "embedding_source": "empty_segment_skipped",
+                    "embedding": [],
+                }
+                continue
+            hit = slot["seg"].get(key)
+            if not hit:
+                vec, src = [], "embedding_failed"
+            else:
+                vec, src = hit
+            seg_rag[key] = {
+                "embedding_dimension": len(vec),
+                "embedding_source": src,
+                "embedding": vec,
+            }
+        ev["trio_segment_rag"] = seg_rag
+        if slot.get("canon"):
+            vec2, src2 = slot["canon"]
+        else:
+            vec2, src2 = [], "embedding_failed"
+        ev["rag_embedding_bundle"] = {
+            "embedding_dimension": len(vec2),
+            "embedding_source": f"trio_canonical:{src2}",
+            "embedding": vec2,
+        }
+        ch.evidence = ev
+
+
+def enrich_chunks_with_rag_embeddings(
+    chunks: list[GradingChunk],
+    cfg: Config,
+    modality_hints: dict[str, Any] | None = None,
+) -> None:
+    """
+    Attach per-unit vectors via :func:`compute_submission_embedding`.
+
+    When ``evidence["trio"]`` is present (question / student_response / answer_key_segment),
+    embed each non-empty segment into ``trio_segment_rag`` and set ``rag_embedding_bundle``
+    from a canonical ``[QUESTION] / [STUDENT] / [REFERENCE]`` join (fallback: ``extracted_text``).
+
+    ``modality_hints`` may carry ``multimodal_rag_doc_prewindow*`` from
+    :func:`precompute_document_rag_prewindow_for_pipeline` for optional plain-chunk reuse.
+    """
+    if not multimodal_rag_embed_units_enabled():
+        return
+    if _chunks_use_openai_trio_rag_frontload(chunks):
+        return
+    if multimodal_rag_embed_batch_enabled():
+        _enrich_chunks_with_rag_embeddings_batched(chunks, cfg, modality_hints)
+    else:
+        _enrich_chunks_with_rag_embeddings_sequential(chunks, cfg, modality_hints)
 
 
 def _get_ipynb_bytes(envelope: IngestionEnvelope) -> bytes | None:

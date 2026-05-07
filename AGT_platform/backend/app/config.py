@@ -256,6 +256,35 @@ class Config:
     else:
         MULTIMODAL_WHISPER_TRANSCRIBE = "auto"
     OPENAI_WHISPER_MODEL = _env_str("OPENAI_WHISPER_MODEL").strip() or "whisper-1"
+    # Max audio payload size (bytes) before skipping Whisper locally. OpenAI may impose a
+    # separate upload limit; increase this if long interviews fail only with our guard.
+    MULTIMODAL_WHISPER_MAX_FILE_BYTES = max(
+        8 * 1024 * 1024,
+        _env_int(
+            "MULTIMODAL_WHISPER_MAX_FILE_BYTES",
+            default=32 * 1024 * 1024,
+        ),
+    )
+    # Split long single-file audio into duration halves, transcribe each, embed transcripts,
+    # then OpenAI trio frontload runs twice (half A / half B) and blends RAG vectors.
+    # off | on | auto (auto when bytes ≥ MULTIMODAL_AUDIO_HALF_SPLIT_AUTO_MIN_BYTES). Requires ffmpeg.
+    _ahs = _env_str("MULTIMODAL_AUDIO_HALF_SPLIT").strip().lower()
+    if _ahs in ("1", "true", "yes", "on"):
+        MULTIMODAL_AUDIO_HALF_SPLIT = "on"
+    elif _ahs in ("0", "false", "no", "off"):
+        MULTIMODAL_AUDIO_HALF_SPLIT = "off"
+    else:
+        MULTIMODAL_AUDIO_HALF_SPLIT = "auto"
+    MULTIMODAL_AUDIO_HALF_SPLIT_AUTO_MIN_BYTES = max(
+        500_000,
+        min(
+            _env_int(
+                "MULTIMODAL_AUDIO_HALF_SPLIT_AUTO_MIN_BYTES",
+                default=8_000_000,
+            ),
+            80_000_000,
+        ),
+    )
     # When true, each chunk is sent to the **structure** LLM once to fill ``evidence["trio"]``
     # (question / student_response / instructor_context) before answer-key alignment. Uses
     # Claude (Anthropic) when configured, else OpenAI — not Ollama.

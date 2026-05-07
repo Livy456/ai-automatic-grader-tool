@@ -174,7 +174,7 @@ def transcribe_video_stub(video_bytes: bytes) -> str:
 
 
 _WHISPER_SAFE_SUFFIXES = frozenset(
-    {".flac", ".m4a", ".mp3", ".mp4", ".mpeg", ".mpga", ".ogg", ".wav", ".webm"}
+    {".flac", ".m4a", ".mp3", ".mp4", ".mpa", ".mpeg", ".mpga", ".ogg", ".wav", ".webm"}
 )
 
 
@@ -187,8 +187,9 @@ def transcribe_submission_media_bytes(
     One-shot transcript for parsing/chunking (OpenAI Whisper).
 
     Controlled by ``Config.MULTIMODAL_WHISPER_TRANSCRIBE`` (``off`` / ``on`` / ``auto``).
-    ``auto`` calls Whisper only when ``OPENAI_API_KEY`` is set. Large files may exceed the
-    API size limit (~25 MB).
+    Payload size is capped locally by ``Config.MULTIMODAL_WHISPER_MAX_FILE_BYTES`` (env
+    ``MULTIMODAL_WHISPER_MAX_FILE_BYTES``, default **32 MiB**). OpenAI may still reject
+    oversize uploads; raise the cap only when you accept that risk or use shorter audio.
     """
     if not data:
         return ""
@@ -197,8 +198,13 @@ def transcribe_submission_media_bytes(
 
         mode = str(getattr(Config, "MULTIMODAL_WHISPER_TRANSCRIBE", "auto") or "auto").lower()
         model = str(getattr(Config, "OPENAI_WHISPER_MODEL", "") or "").strip() or "whisper-1"
+        max_bytes = int(
+            getattr(Config, "MULTIMODAL_WHISPER_MAX_FILE_BYTES", 32 * 1024 * 1024)
+            or 32 * 1024 * 1024
+        )
     except Exception:
         mode, model = "auto", "whisper-1"
+        max_bytes = 32 * 1024 * 1024
 
     if mode == "off":
         return transcribe_video_stub(data)
@@ -214,15 +220,18 @@ def transcribe_submission_media_bytes(
         )
         return transcribe_video_stub(data)
 
-    max_bytes = 24 * 1024 * 1024
+    max_bytes = max(8 * 1024 * 1024, int(max_bytes))
     if len(data) > max_bytes:
         _log.warning(
-            "submission media exceeds ~24MB Whisper limit (%s bytes); not transcribed",
+            "submission media exceeds MULTIMODAL_WHISPER_MAX_FILE_BYTES=%s (%s bytes); "
+            "not transcribed",
+            max_bytes,
             len(data),
         )
         return (
-            "[AUDIO_TOO_LARGE_FOR_WHISPER_API]\n"
-            "Compress or split the file; limit is about 25 MB."
+            f"[AUDIO_TOO_LARGE_FOR_WHISPER_API]\n"
+            f"Compress or split the file, or raise MULTIMODAL_WHISPER_MAX_FILE_BYTES "
+            f"(current cap {max_bytes} bytes). OpenAI may still reject very large files."
         )
 
     suf = Path(filename).suffix.lower()
@@ -237,15 +246,23 @@ def transcribe_submission_media_bytes(
 
     try:
         client = OpenAI(api_key=api_key)
-        with tempfile.NamedTemporaryFile(suffix=suf, delete=True) as tmp:
-            tmp.write(data)
-            tmp.flush()
-            tmp.seek(0)
-            resp = client.audio.transcriptions.create(model=model, file=tmp)
+        # Pass an explicit (filename, buffer) pair so multipart uploads do not rely on
+        # NamedTemporaryFile read timing (some OpenAI/httpx stacks surface that as RuntimeError).
+        fname = Path(filename).name.strip() or f"submission{suf}"
+        if "." not in fname:
+            fname = f"submission{suf}"
+        buf = io.BytesIO(data)
+        resp = client.audio.transcriptions.create(
+            model=model,
+            file=(fname, buf),
+        )
         text = str(getattr(resp, "text", "") or "").strip()
         if not text:
             return "[WHISPER_EMPTY_TRANSCRIPT]"
         return text
     except Exception as exc:
         _log.warning("OpenAI Whisper transcription failed: %s", exc, exc_info=True)
-        return f"[WHISPER_TRANSCRIPTION_FAILED: {type(exc).__name__}]"
+        detail = str(exc).strip().replace("\n", " ")
+        if len(detail) > 400:
+            detail = detail[:397] + "..."
+        return f"[WHISPER_TRANSCRIPTION_FAILED: {type(exc).__name__}: {detail}]"

@@ -290,6 +290,333 @@ def _openai_embed_batch(
     return out, total_tok
 
 
+def _openai_trio_rag_frontload_audio_halves(
+    envelope: IngestionEnvelope,
+    cfg: Config,
+    answer_key_text: str,
+) -> tuple[list[GradingChunk], dict[str, Any]]:
+    """
+    Two-pass trio extraction (one per audio-half transcript) + OpenAI embeddings,
+    blending each chunk's canonical vector with the transcript embedding for that half.
+    """
+    from .audio_half_split import blend_chunk_embedding_with_half
+
+    audit: dict[str, Any] = {"ok": False, "audio_half_split_dual_path": True}
+    key = (cfg.OPENAI_API_KEY or "").strip()
+    if not key:
+        audit["error"] = "missing_OPENAI_API_KEY"
+        return [], audit
+
+    hb = (envelope.modality_hints or {}).get("audio_half_split") or {}
+    transcripts = hb.get("transcripts") or []
+    if not isinstance(transcripts, list) or len(transcripts) != 2:
+        audit["error"] = "audio_half_split_missing_transcripts"
+        return [], audit
+    half_vecs_raw = hb.get("embeddings") or []
+    half_vecs: list[list[float]] = []
+    for i in range(2):
+        row = half_vecs_raw[i] if i < len(half_vecs_raw) else []
+        half_vecs.append(
+            [float(x) for x in row] if isinstance(row, list) else []
+        )
+
+    chat_model = (
+        getattr(cfg, "OPENAI_TRIO_RAG_CHAT_MODEL", None) or ""
+    ).strip() or "gpt-5.4-nano"
+    embed_model = (
+        getattr(cfg, "OPENAI_TRIO_RAG_EMBEDDING_MODEL", None) or ""
+    ).strip() or "text-embedding-3-small"
+    max_in = int(getattr(cfg, "MULTIMODAL_OPENAI_TRIO_INPUT_MAX_CHARS", 120_000) or 120_000)
+    max_in = max(8_000, min(max_in, 500_000))
+
+    ak = (answer_key_text or "").strip()
+    ak_max = int(getattr(cfg, "MULTIMODAL_OPENAI_TRIO_ANSWER_KEY_MAX_CHARS", 32_000) or 32_000)
+    ak_max = max(2_000, min(ak_max, max(8_000, max_in // 2)))
+    ak_use = ak[:ak_max] if ak else ""
+
+    win = int(getattr(cfg, "MULTIMODAL_OPENAI_TRIO_WINDOW_CHARS", 48_000) or 48_000)
+    ovl = int(getattr(cfg, "MULTIMODAL_OPENAI_TRIO_WINDOW_OVERLAP_CHARS", 4_096) or 4_096)
+    win = max(4_000, min(win, max_in))
+
+    client = OpenAIJsonClient(key, chat_model)
+    all_raw: list[dict[str, Any]] = []
+    usage_chat: dict[str, int] = {"prompt_tokens": 0, "completion_tokens": 0, "total_tokens": 0}
+    pre_chat_in = 0
+    submission_total = 0
+
+    for h, trans in enumerate(transcripts):
+        t = str(trans or "").strip()
+        if not t:
+            continue
+        submission_total += len(t)
+        t_use = t[:max_in] if len(t) > max_in else t
+        slices = _submission_window_slices(t_use, win, ovl)
+        for wi, (start, end, slc) in enumerate(slices):
+            prefix = (
+                f"[STUDENT_AUDIO_PART {h + 1}/2 — transcript for this half only; "
+                f"window={wi + 1}/{len(slices)}; char_range={start}:{end}]\n\n"
+            )
+            user_body = (
+                "### STUDENT_SUBMISSION\n\n"
+                + prefix
+                + slc
+                + "\n\n### ANSWER_KEY_OR_SAMPLE\n\n"
+                + (ak_use or "(none provided; use empty answer_key_segment where unknown)")
+            )
+            pre_chat_in += _chars_to_token_estimate(len(_TRIO_RAG_SYSTEM) + len(user_body))
+            try:
+                part_units, u_chat = _chat_trio_units(client, user_body)
+            except Exception as exc:
+                _log.warning(
+                    "OpenAI trio frontload (audio half %s) chat failed window %s: %s",
+                    h + 1,
+                    wi + 1,
+                    exc,
+                    exc_info=True,
+                )
+                audit["error"] = f"chat_failed_half{h}:{exc!s}"
+                audit["window_failed"] = wi + 1
+                return [], audit
+            for k in ("prompt_tokens", "completion_tokens", "total_tokens"):
+                usage_chat[k] += int((u_chat or {}).get(k) or 0)
+            for u in part_units:
+                if isinstance(u, dict):
+                    u["_audio_half_index"] = h
+            all_raw.extend(part_units)
+
+    for i, u in enumerate(all_raw):
+        if isinstance(u, dict) and not str(u.get("question_id") or "").strip():
+            h = int(u.get("_audio_half_index", 0) or 0)
+            u["question_id"] = f"h{h}_unit_{i}"
+
+    units = _dedupe_merge_trio_units(all_raw)
+    audit["trio_raw_units_before_dedupe"] = len(all_raw)
+    audit["trio_units_after_dedupe"] = len(units)
+    audit["trio_submission_chars"] = submission_total
+    audit["trio_window_count"] = len(transcripts)
+
+    if not units:
+        audit["error"] = "invalid_or_empty_units_audio_halves"
+        return [], audit
+
+    pre_chat_out = min(32_000, _chars_to_token_estimate(submission_total // 2))
+
+    hints = envelope.modality_hints or {}
+    modality: Modality = modality_from_hints(hints)
+    task_type: TaskType = task_type_from_hints(hints)
+
+    chunks: list[GradingChunk] = []
+    for i, u in enumerate(units):
+        if not isinstance(u, dict):
+            continue
+        q = str(u.get("question") or "").strip()
+        sr = str(u.get("student_response") or "").strip()
+        ak_seg = str(u.get("answer_key_segment") or "").strip()
+        ext = str(u.get("extracted_text") or "").strip()
+        if not ext:
+            parts = [p for p in (q, sr) if p]
+            ext = "\n\n".join(parts).strip()
+        if not q and not sr:
+            continue
+        qid = _safe_qid(str(u.get("question_id") or ""), i)
+        cid = f"{envelope.assignment_id}:{envelope.student_id}:openai_trio:{i}:{qid}"
+        raw_h = u.get("_audio_half_index")
+        h_int: int | None = None
+        if isinstance(raw_h, int) and raw_h in (0, 1):
+            h_int = raw_h
+        elif isinstance(raw_h, float) and int(raw_h) in (0, 1):
+            h_int = int(raw_h)
+        elif isinstance(raw_h, str) and raw_h.strip().isdigit():
+            v = int(raw_h.strip())
+            h_int = v if v in (0, 1) else None
+        ch = GradingChunk(
+            chunk_id=cid,
+            assignment_id=envelope.assignment_id,
+            student_id=envelope.student_id,
+            question_id=qid,
+            modality=modality,
+            task_type=task_type,
+            extracted_text=ext or (q + "\n\n" + sr).strip(),
+            evidence={
+                "trio": {
+                    "question": q,
+                    "student_response": sr,
+                    "answer_key_segment": ak_seg,
+                    "instructor_context": "",
+                },
+                "question_text": q[:4000],
+                "_openai_trio_rag_frontload": True,
+                "_audio_half_index": h_int,
+            },
+        )
+        chunks.append(ch)
+
+    if not chunks:
+        audit["error"] = "no_valid_units_after_parse_audio_halves"
+        return [], audit
+
+    embed_inputs: list[str] = []
+    canon_cap = int(os.getenv("MULTIMODAL_TRIO_CANONICAL_EMBED_MAX_CHARS", "24000") or 24000)
+
+    for ch in chunks:
+        trio = (ch.evidence or {}).get("trio") or {}
+        if not isinstance(trio, dict):
+            trio = {}
+        for key in ("question", "student_response", "answer_key_segment"):
+            embed_inputs.append(str(trio.get(key) or "").strip())
+        tq = str(trio.get("question") or "").strip()
+        tsr = str(trio.get("student_response") or "").strip()
+        tak = str(trio.get("answer_key_segment") or "").strip()
+        canon_parts: list[str] = []
+        if tq:
+            canon_parts.append(f"[QUESTION]\n{tq}")
+        if tsr:
+            canon_parts.append(f"[STUDENT]\n{tsr}")
+        if tak:
+            canon_parts.append(f"[REFERENCE]\n{tak}")
+        canon = "\n\n".join(canon_parts).strip() or (ch.extracted_text or "").strip() or " "
+        embed_inputs.append(canon[:canon_cap])
+
+    nonempty_texts = [t for t in embed_inputs if t.strip()]
+    pre_embed_tok = sum(_chars_to_token_estimate(len(t)) for t in nonempty_texts)
+
+    try:
+        vecs, embed_usage_tokens = _openai_embed_batch(
+            embed_inputs,
+            api_key=key,
+            model=embed_model,
+        )
+    except Exception as exc:
+        _log.warning("OpenAI trio frontload (audio halves) embeddings failed: %s", exc, exc_info=True)
+        audit["embedding_error"] = f"embed_failed:{exc!s}"
+        audit["openai_embeddings_ok"] = False
+        vecs = [[] for _ in range(len(embed_inputs))]
+        embed_usage_tokens = 0
+    else:
+        audit["openai_embeddings_ok"] = True
+
+    embed_failed = bool(audit.get("embedding_error"))
+    if embed_usage_tokens <= 0:
+        embed_usage_tokens = pre_embed_tok
+
+    stride = 4
+    for ci, ch in enumerate(chunks):
+        trio = dict((ch.evidence or {}).get("trio") or {})
+        base = ci * stride
+        seg_rag: dict[str, Any] = {}
+        for ki, key in enumerate(("question", "student_response", "answer_key_segment")):
+            blob = str(trio.get(key) or "").strip()
+            idx = base + ki
+            if not blob:
+                seg_rag[key] = {
+                    "embedding_dimension": 0,
+                    "embedding_source": "empty_segment_skipped",
+                    "embedding": [],
+                }
+                continue
+            vec = list(vecs[idx]) if idx < len(vecs) else []
+            if vec:
+                emb_src = f"openai:{embed_model}"
+            elif embed_failed:
+                emb_src = "openai_embedding_unavailable"
+            else:
+                emb_src = f"openai:{embed_model}"
+            seg_rag[key] = {
+                "embedding_dimension": len(vec),
+                "embedding_source": emb_src,
+                "embedding": vec,
+            }
+        c_idx = base + 3
+        vec2 = list(vecs[c_idx]) if c_idx < len(vecs) else []
+        ev = dict(ch.evidence or {})
+        ev["trio_segment_rag"] = seg_rag
+        raw_h = ev.get("_audio_half_index")
+        h_blend: int | None = None
+        if isinstance(raw_h, int) and raw_h in (0, 1):
+            h_blend = raw_h
+        elif isinstance(raw_h, float) and int(raw_h) in (0, 1):
+            h_blend = int(raw_h)
+        elif isinstance(raw_h, str) and raw_h.strip().isdigit():
+            v = int(raw_h.strip())
+            h_blend = v if v in (0, 1) else None
+        if h_blend is not None and half_vecs:
+            vec2, blend_src = blend_chunk_embedding_with_half(vec2, half_vecs, h_blend)
+            ev["rag_half_transcript_blend"] = blend_src
+        if vec2:
+            bundle_src = f"trio_canonical:openai:{embed_model}"
+        elif embed_failed:
+            bundle_src = "trio_canonical:openai_embedding_unavailable"
+        else:
+            bundle_src = f"trio_canonical:openai:{embed_model}"
+        ev["rag_embedding_bundle"] = {
+            "embedding_dimension": len(vec2),
+            "embedding_source": bundle_src,
+            "embedding": vec2,
+        }
+        ch.evidence = ev
+
+    pt = int(usage_chat.get("prompt_tokens") or 0)
+    ct = int(usage_chat.get("completion_tokens") or 0)
+    if pt + ct <= 0:
+        pt = pre_chat_in
+        try:
+            ct = max(
+                pre_chat_out,
+                _chars_to_token_estimate(len(json.dumps({"units": units}))),
+            )
+        except Exception:
+            ct = pre_chat_out
+
+    cost = estimate_openai_trio_rag_cost_usd(
+        cfg,
+        chat_prompt_tokens=pt,
+        chat_completion_tokens=ct,
+        embedding_tokens=embed_usage_tokens,
+    )
+    pre_cost = estimate_openai_trio_rag_cost_usd(
+        cfg,
+        chat_prompt_tokens=pre_chat_in,
+        chat_completion_tokens=pre_chat_out,
+        embedding_tokens=pre_embed_tok,
+    )
+
+    n_ch = len(chunks)
+    tot_usd = float(cost.get("total_usd") or 0.0)
+    audit.update(
+        {
+            "ok": True,
+            "chat_model": chat_model,
+            "embedding_model": embed_model,
+            "n_chunks": n_ch,
+            "chat_usage_tokens": {"prompt": pt, "completion": ct, "total": pt + ct},
+            "embedding_usage_tokens_est": embed_usage_tokens,
+            "cost_usd": cost,
+            "per_chunk_avg_cost_usd": round(tot_usd / n_ch, 10) if n_ch else 0.0,
+            "per_chunk_avg_tokens_est": {
+                "chat_prompt": round(pt / n_ch, 2) if n_ch else 0.0,
+                "chat_completion": round(ct / n_ch, 2) if n_ch else 0.0,
+                "embedding": round(embed_usage_tokens / n_ch, 2) if n_ch else 0.0,
+            },
+            "pre_call_cost_estimate_usd": pre_cost,
+            "pre_call_token_estimates": {
+                "chat_input": pre_chat_in,
+                "chat_output_guess": pre_chat_out,
+                "embedding": pre_embed_tok,
+            },
+            "trio_answer_key_chars_in_prompt": len(ak_use),
+            "pricing_note": "Chat USD/MTok from OPENAI_TRIO_RAG_CHAT_*; embedding from OPENAI_TRIO_RAG_EMBED_USD_PER_MTOK (see https://developers.openai.com/api/docs/models ).",
+        }
+    )
+    _log.info(
+        "OpenAI trio+RAG frontload (audio halves): chunks=%s chat_tokens=%s+%s embed_tokens≈%s",
+        len(chunks),
+        pt,
+        ct,
+        embed_usage_tokens,
+    )
+    return chunks, audit
+
+
 def run_openai_trio_rag_frontload(
     envelope: IngestionEnvelope,
     cfg: Config,
@@ -306,6 +633,20 @@ def run_openai_trio_rag_frontload(
     if not key:
         audit["error"] = "missing_OPENAI_API_KEY"
         return [], audit
+
+    hints_audio = envelope.modality_hints or {}
+    hb = hints_audio.get("audio_half_split")
+    if isinstance(hb, dict) and hb.get("enabled"):
+        tr = hb.get("transcripts")
+        em = hb.get("embeddings")
+        if (
+            isinstance(tr, list)
+            and len(tr) == 2
+            and isinstance(em, list)
+            and len(em) >= 2
+            and (str(tr[0] or "").strip() or str(tr[1] or "").strip())
+        ):
+            return _openai_trio_rag_frontload_audio_halves(envelope, cfg, answer_key_text)
 
     chat_model = (
         getattr(cfg, "OPENAI_TRIO_RAG_CHAT_MODEL", None) or ""

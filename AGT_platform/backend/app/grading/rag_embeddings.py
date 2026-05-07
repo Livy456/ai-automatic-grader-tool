@@ -7,6 +7,7 @@ from __future__ import annotations
 import hashlib
 import json
 import logging
+import os
 import threading
 from pathlib import Path
 from typing import Any
@@ -246,6 +247,138 @@ def compute_submission_embedding(text: str, cfg: Config) -> tuple[list[float], s
 
     dim = 256
     return deterministic_hash_embedding(snippet, dim), "deterministic_hash:sha256×256"
+
+
+def compute_submission_embeddings_batch(
+    texts: list[str], cfg: Config
+) -> list[tuple[list[float], str]]:
+    """
+    Embed many snippets with fewer model / HTTP round-trips when the backend allows it.
+
+    Used when ``MULTIMODAL_RAG_EMBED_BATCH=on`` from :func:`enrich_chunks_with_rag_embeddings`.
+    On batch failure, falls back to sequential :func:`compute_submission_embedding`.
+    """
+    max_c = int(getattr(cfg, "RAG_EMBED_MAX_CHARS", 24000))
+    snippets = [(t or "")[:max_c] for t in texts]
+    n = len(snippets)
+    if n == 0:
+        return []
+
+    backend = (getattr(cfg, "RAG_EMBEDDING_BACKEND", "") or "sentence_transformers").strip().lower()
+    if backend not in ("ollama", "sentence_transformers", "openai"):
+        backend = "sentence_transformers"
+
+    # OpenAI: one request with multiple inputs (batched).
+    if backend == "openai":
+        key = (cfg.OPENAI_API_KEY or "").strip()
+        if key:
+            model = (
+                (getattr(cfg, "OPENAI_TRIO_RAG_EMBEDDING_MODEL", "") or "").strip()
+                or "text-embedding-3-small"
+            )
+            try:
+                from openai import OpenAI
+
+                client = OpenAI(api_key=key)
+                out: list[tuple[list[float], str]] = []
+                batch_size = int(os.getenv("MULTIMODAL_RAG_EMBED_BATCH_SIZE", "64") or "64")
+                batch_size = max(1, min(batch_size, 128))
+                offset = 0
+                while offset < n:
+                    batch = snippets[offset : offset + batch_size]
+                    inputs: list[str] = []
+                    nonempty_j: list[int] = []
+                    for j, s in enumerate(batch):
+                        st = (s or "").strip()[:8000]
+                        if st:
+                            inputs.append(st)
+                            nonempty_j.append(j)
+                    if not inputs:
+                        for s in batch:
+                            out.append(compute_submission_embedding(s, cfg))
+                    else:
+                        resp = client.embeddings.create(model=model, input=inputs)
+                        rows = sorted(
+                            resp.data or [],
+                            key=lambda d: int(getattr(d, "index", 0)),
+                        )
+                        if len(rows) != len(nonempty_j):
+                            raise RuntimeError(
+                                f"OpenAI embeddings batch mismatch: "
+                                f"got {len(rows)} rows for {len(nonempty_j)} inputs"
+                            )
+                        vec_by_j: dict[int, tuple[list[float], str]] = {}
+                        for j_local, row in zip(nonempty_j, rows):
+                            emb = getattr(row, "embedding", None)
+                            if not isinstance(emb, list) or not emb:
+                                raise RuntimeError("OpenAI embedding row missing vector")
+                            vec_by_j[j_local] = (
+                                [float(x) for x in emb],
+                                f"openai_batch:{model}",
+                            )
+                        for j, s in enumerate(batch):
+                            if j in vec_by_j:
+                                out.append(vec_by_j[j])
+                            else:
+                                out.append(compute_submission_embedding(s, cfg))
+                    offset += len(batch)
+                if len(out) == n:
+                    return out
+            except Exception:
+                _log.warning(
+                    "OpenAI batch embedding failed; falling back to per-text embed",
+                    exc_info=True,
+                )
+        return [compute_submission_embedding(t, cfg) for t in snippets]
+
+    if backend == "sentence_transformers":
+        model_name = (getattr(cfg, "SENTENCE_TRANSFORMERS_MODEL", "") or "").strip()
+        if not model_name:
+            model_name = "all-MiniLM-L6-v2"
+        try:
+            model = _get_sentence_transformer(model_name)
+        except Exception:
+            return [compute_submission_embedding(t, cfg) for t in snippets]
+        out_st: list[tuple[list[float], str] | None] = [None] * n
+        nonempty_idx: list[int] = []
+        nonempty_texts: list[str] = []
+        for i, s in enumerate(snippets):
+            st = (s or "").strip()
+            if st:
+                nonempty_idx.append(i)
+                nonempty_texts.append(st)
+        if nonempty_texts:
+            try:
+                emb = model.encode(
+                    nonempty_texts,
+                    convert_to_numpy=True,
+                    show_progress_bar=False,
+                )
+                arr = np.asarray(emb, dtype=np.float64)
+                if arr.ndim == 1:
+                    arr = arr.reshape(1, -1)
+                for row, orig_i in enumerate(nonempty_idx):
+                    vec = arr[row].ravel()
+                    if vec.size < 8:
+                        out_st[orig_i] = compute_submission_embedding(snippets[orig_i], cfg)
+                    else:
+                        out_st[orig_i] = (
+                            vec.tolist(),
+                            f"sentence_transformers_batch:{model_name}",
+                        )
+            except Exception:
+                _log.warning(
+                    "SentenceTransformer batch encode failed; falling back to sequential",
+                    exc_info=True,
+                )
+                return [compute_submission_embedding(t, cfg) for t in snippets]
+        for i in range(n):
+            if out_st[i] is None:
+                out_st[i] = compute_submission_embedding(snippets[i], cfg)
+        return [out_st[i] for i in range(n)]
+
+    # ollama / unknown: sequential (no stable batch API in this module).
+    return [compute_submission_embedding(t, cfg) for t in snippets]
 
 
 def save_rag_embedding_bundle(

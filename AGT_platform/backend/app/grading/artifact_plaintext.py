@@ -70,7 +70,7 @@ def bytes_with_suffix_to_plain(data: bytes, suffix: str) -> str:
             return _csv_bytes_to_plain(data)
         if suf == ".xlsx":
             return _xlsx_bytes_to_plain(data)
-        if suf in (".mp4", ".mp3", ".wav", ".m4a", ".webm"):
+        if suf in (".mp4", ".mp3", ".wav", ".m4a", ".webm", ".mpa"):
             tr = transcribe_submission_media_bytes(data, filename=f"submission{suf}")
             return f"=== AUDIO TRANSCRIPT ===\n{tr}".strip()
         return data.decode("utf-8", errors="replace").strip()
