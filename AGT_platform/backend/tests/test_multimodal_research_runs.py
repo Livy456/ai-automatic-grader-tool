@@ -160,10 +160,27 @@ def _research_fast_mode() -> bool:
     )
 
 
+def _research_resume_enabled() -> bool:
+    """When on (default), skip stems/runs that already have ``grade_output.json`` on disk."""
+    raw = os.getenv("MULTIMODAL_RESEARCH_RESUME", "").strip().lower()
+    if not raw:
+        return True
+    return raw in ("1", "true", "yes", "on")
+
+
+def _completed_research_run_indices(safe: str, n_runs: int) -> set[int]:
+    """1-based run indices that already have ``grade_output.json``."""
+    done: set[int] = set()
+    for run in range(1, n_runs + 1):
+        p = RESEARCH_ROOT / f"{safe}_run_{run:02d}" / "grade_output.json"
+        if p.is_file():
+            done.add(run)
+    return done
+
+
 def research_modality_hints_for_run(
     *,
     run_index: int,
-    n_runs: int,
     use_chunk_cache: bool,
     cache_path: Path,
     modality_subtype: str,
@@ -175,11 +192,68 @@ def research_modality_hints_for_run(
         "answer_key_plaintext": answer_key_plaintext,
     }
     if use_chunk_cache:
-        if run_index == 1:
-            hints["multimodal_chunk_cache_write_path"] = str(cache_path)
-        elif run_index >= 2 and n_runs > 1:
+        if cache_path.is_file():
             hints["multimodal_chunk_cache_path"] = str(cache_path)
+        elif run_index == 1:
+            hints["multimodal_chunk_cache_write_path"] = str(cache_path)
     return hints
+
+
+def _load_research_grade_output(path: Path) -> dict | None:
+    if not path.is_file():
+        return None
+    try:
+        return json.loads(path.read_text(encoding="utf-8"))
+    except (OSError, json.JSONDecodeError, TypeError):
+        return None
+
+
+def _append_csv_rows_for_run(
+    stem: str,
+    run: int,
+    result: dict,
+    csv_rows: list[dict[str, str | float | int]],
+) -> None:
+    audit = (result.get("_multimodal_pipeline_audit") or {})  # type: ignore[arg-type]
+    rt_by_chunk = _rubric_type_map_from_audit(audit)
+    assign_score = float((result.get("overall") or {}).get("score") or 0.0)
+    qgs = [x for x in (result.get("question_grades") or []) if isinstance(x, dict)]
+    for qg in qgs:
+        qid = _question_id_from_grade_row(qg)
+        src_cid = str(qg.get("_source_chunk_id") or "").strip()
+        rt = rt_by_chunk.get(src_cid, "")
+        q_score = float((qg.get("overall") or {}).get("score") or 0.0)
+        csv_rows.append(
+            {
+                "question_id": qid,
+                "question score": round(q_score, 6),
+                "rubric_type": rt,
+                "assignment_id": stem,
+                "run number": run,
+                "assignment_score": round(assign_score, 6),
+            }
+        )
+
+
+def _build_full_research_csv_rows(
+    stem: str, safe: str, n_runs: int
+) -> tuple[list[dict[str, str | float | int]], int]:
+    """Rebuild CSV rows from every ``<safe>_run_<NN>/grade_output.json`` (must all exist)."""
+    csv_rows: list[dict[str, str | float | int]] = []
+    n_questions = 0
+    for run in range(1, n_runs + 1):
+        result = _load_research_grade_output(
+            RESEARCH_ROOT / f"{safe}_run_{run:02d}" / "grade_output.json"
+        )
+        if result is None:
+            raise AssertionError(
+                f"Missing grade_output.json for run {run} under stem {stem!r} (sanitized {safe!r})"
+            )
+        qgs = [x for x in (result.get("question_grades") or []) if isinstance(x, dict)]
+        if run == 1:
+            n_questions = len(qgs)
+        _append_csv_rows_for_run(stem, run, result, csv_rows)
+    return csv_rows, n_questions
 
 
 def _parse_research_assignment_ids() -> list[str]:
