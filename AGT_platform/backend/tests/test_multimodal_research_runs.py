@@ -319,7 +319,7 @@ def _execute_research_runs_for_stem(
     has_four_pack: bool,
     raw_json,
 ) -> None:
-    """Run ``n_runs`` full multimodal pipeline passes for one stem; safe for ``to_thread``."""
+    """Run up to ``n_runs`` multimodal pipeline passes for one stem (see resume policy)."""
     if stem not in groups:
         raise AssertionError(
             f"Internal: stem {stem!r} missing from groups (should be pre-validated)."
