@@ -68,6 +68,7 @@ import importlib.util
 import logging
 import os
 import re
+import tempfile
 import unittest
 from pathlib import Path
 from types import SimpleNamespace
@@ -256,6 +257,24 @@ def _build_full_research_csv_rows(
     return csv_rows, n_questions
 
 
+def _write_research_scores_csv(
+    csv_path: Path, csv_rows: list[dict[str, str | float | int]]
+) -> None:
+    fieldnames = [
+        "question_id",
+        "question score",
+        "rubric_type",
+        "assignment_id",
+        "run number",
+        "assignment_score",
+    ]
+    with csv_path.open("w", newline="", encoding="utf-8") as f:
+        w = csv.DictWriter(f, fieldnames=fieldnames)
+        w.writeheader()
+        for row in csv_rows:
+            w.writerow(row)
+
+
 def _parse_research_assignment_ids() -> list[str]:
     """
     Parse ``MULTIMODAL_RESEARCH_ASSIGNMENT_ID``.
@@ -378,15 +397,32 @@ def _execute_research_runs_for_stem(
     csv_path = RESEARCH_ROOT / f"{safe}_research_scores.csv"
     chunk_cache_path = RESEARCH_ROOT / f"{safe}_multimodal_grading_chunks_cache.json"
     use_chunk_cache = _research_use_chunk_cache()
+    resume = _research_resume_enabled()
+    completed = _completed_research_run_indices(safe, n_runs) if resume else set()
 
-    csv_rows: list[dict[str, str | float | int]] = []
-    n_questions = 0
+    if resume and len(completed) >= n_runs:
+        _log.warning(
+            "Research: skipping stem %r; already have %s/%s completed runs under %s",
+            stem,
+            len(completed),
+            n_runs,
+            RESEARCH_ROOT,
+        )
+        csv_rows, n_questions = _build_full_research_csv_rows(stem, safe, n_runs)
+        case.assertGreater(n_questions, 0, "No questions in run 1 output for skipped stem")
+        _write_research_scores_csv(csv_path, csv_rows)
+        case.assertEqual(len(csv_rows), n_runs * n_questions)
+        case.assertTrue(csv_path.is_file())
+        return
 
-    for run in range(1, n_runs + 1):
+    runs_to_do = [r for r in range(1, n_runs + 1) if r not in completed] if resume else list(
+        range(1, n_runs + 1)
+    )
+
+    for run in runs_to_do:
         ak_plain = resolve_answer_key_plaintext(stem, ANSWER_KEY_DIR)[0]
         modality_hints = research_modality_hints_for_run(
             run_index=run,
-            n_runs=n_runs,
             use_chunk_cache=use_chunk_cache,
             cache_path=chunk_cache_path,
             modality_subtype=str(modality_profile.get("modality_subtype") or ""),
@@ -407,12 +443,6 @@ def _execute_research_runs_for_stem(
         )
         validate_grading_output(result)
 
-        qgs = [
-            x for x in (result.get("question_grades") or []) if isinstance(x, dict)
-        ]
-        if run == 1:
-            n_questions = len(qgs)
-
         run_folder = RESEARCH_ROOT / f"{safe}_run_{run:02d}"
         run_folder.mkdir(parents=True, exist_ok=True)
         json_path = run_folder / "grade_output.json"
@@ -421,39 +451,9 @@ def _execute_research_runs_for_stem(
             encoding="utf-8",
         )
 
-        audit = (result.get("_multimodal_pipeline_audit") or {})  # type: ignore[arg-type]
-        rt_by_chunk = _rubric_type_map_from_audit(audit)
-        assign_score = float((result.get("overall") or {}).get("score") or 0.0)
-
-        for qg in qgs:
-            qid = _question_id_from_grade_row(qg)
-            src_cid = str(qg.get("_source_chunk_id") or "").strip()
-            rt = rt_by_chunk.get(src_cid, "")
-            q_score = float((qg.get("overall") or {}).get("score") or 0.0)
-            csv_rows.append(
-                {
-                    "question_id": qid,
-                    "question score": round(q_score, 6),
-                    "rubric_type": rt,
-                    "assignment_id": stem,
-                    "run number": run,
-                    "assignment_score": round(assign_score, 6),
-                }
-            )
-
-    fieldnames = [
-        "question_id",
-        "question score",
-        "rubric_type",
-        "assignment_id",
-        "run number",
-        "assignment_score",
-    ]
-    with csv_path.open("w", newline="", encoding="utf-8") as f:
-        w = csv.DictWriter(f, fieldnames=fieldnames)
-        w.writeheader()
-        for row in csv_rows:
-            w.writerow(row)
+    csv_rows, n_questions = _build_full_research_csv_rows(stem, safe, n_runs)
+    case.assertGreater(n_questions, 0, "No questions in grading output")
+    _write_research_scores_csv(csv_path, csv_rows)
 
     _log.warning(
         "Research runs complete: assignment=%r runs=%s csv=%s json_pattern=%s_run_*",
@@ -464,51 +464,6 @@ def _execute_research_runs_for_stem(
     )
     case.assertEqual(len(csv_rows), n_runs * n_questions)
     case.assertTrue(csv_path.is_file())
-
-
-async def _run_all_stems_concurrently(
-    case: unittest.TestCase,
-    *,
-    stems: list[str],
-    n_runs: int,
-    groups: dict,
-    cfg: Config,
-    generic_rubric,
-    four_by_type,
-    has_four_pack: bool,
-    raw_json,
-) -> None:
-    stems_total = len(stems)
-    cap = _research_max_concurrent_assignments()
-    max_workers = max(1, min(cap, stems_total))
-    sem = asyncio.Semaphore(max_workers)
-    _log.info(
-        "Research harness: %s assignment(s), %s runs each, up to %s concurrent (cap=%s)",
-        stems_total,
-        n_runs,
-        max_workers,
-        cap,
-    )
-
-    async def guarded(stem: str) -> None:
-        async with sem:
-            await asyncio.to_thread(
-                partial(
-                    _execute_research_runs_for_stem,
-                    case,
-                    stem=stem,
-                    n_runs=n_runs,
-                    stems_total=stems_total,
-                    groups=groups,
-                    cfg=cfg,
-                    generic_rubric=generic_rubric,
-                    four_by_type=four_by_type,
-                    has_four_pack=has_four_pack,
-                    raw_json=raw_json,
-                )
-            )
-
-    await asyncio.gather(*(guarded(s) for s in stems))
 
 
 @unittest.skipUnless(
@@ -522,8 +477,8 @@ async def _run_all_stems_concurrently(
 class TestMultimodalResearchRepeatedRuns(unittest.TestCase):
     """Full pipeline runs per assignment (count configurable) for variance / reliability research.
 
-    Multiple assignment stems run concurrently (default cap: 3) under a semaphore; each stem’s
-    ``n_runs`` loop stays sequential inside its worker thread.
+    Multiple stems run **sequentially**. With default resume, stems or runs that already have
+    ``grade_output.json`` on disk are skipped until every stem reaches ``N`` runs.
     """
 
     def test_research_multimodal_pipeline_repeat_runs(self) -> None:
@@ -564,11 +519,13 @@ class TestMultimodalResearchRepeatedRuns(unittest.TestCase):
             os.environ["MULTIMODAL_RAG_EMBED_UNITS"] = "false"
             cfg.MULTIMODAL_SAMPLES_PER_MODEL = 1
         try:
-            asyncio.run(
-                _run_all_stems_concurrently(
+            stems_total = len(stems)
+            for stem in stems:
+                _execute_research_runs_for_stem(
                     self,
-                    stems=stems,
+                    stem=stem,
                     n_runs=n_runs,
+                    stems_total=stems_total,
                     groups=groups,
                     cfg=cfg,
                     generic_rubric=generic_rubric,
@@ -576,7 +533,6 @@ class TestMultimodalResearchRepeatedRuns(unittest.TestCase):
                     has_four_pack=has_four_pack,
                     raw_json=raw_json,
                 )
-            )
         finally:
             if fast:
                 if prev_rag_units is None:
@@ -589,10 +545,10 @@ class TestResearchHarnessChunkCacheHints(unittest.TestCase):
     """Unit tests for research chunk-cache hint wiring (no API calls)."""
 
     def test_run1_writes_cache_path(self) -> None:
-        p = Path("/tmp/research_cache_test.json")
+        p = Path(tempfile.gettempdir()) / f"agt_research_hint_w_{os.getpid()}.json"
+        p.unlink(missing_ok=True)
         h = research_modality_hints_for_run(
             run_index=1,
-            n_runs=5,
             use_chunk_cache=True,
             cache_path=p,
             modality_subtype="nb",
@@ -602,23 +558,25 @@ class TestResearchHarnessChunkCacheHints(unittest.TestCase):
         self.assertNotIn("multimodal_chunk_cache_path", h)
 
     def test_run2_reads_cache_path(self) -> None:
-        p = Path("/tmp/research_cache_test2.json")
-        h = research_modality_hints_for_run(
-            run_index=2,
-            n_runs=5,
-            use_chunk_cache=True,
-            cache_path=p,
-            modality_subtype="nb",
-            answer_key_plaintext="ak",
-        )
-        self.assertEqual(h["multimodal_chunk_cache_path"], str(p))
-        self.assertNotIn("multimodal_chunk_cache_write_path", h)
+        p = Path(tempfile.gettempdir()) / f"agt_research_hint_r_{os.getpid()}.json"
+        p.write_text("[]", encoding="utf-8")
+        try:
+            h = research_modality_hints_for_run(
+                run_index=2,
+                use_chunk_cache=True,
+                cache_path=p,
+                modality_subtype="nb",
+                answer_key_plaintext="ak",
+            )
+            self.assertEqual(h["multimodal_chunk_cache_path"], str(p))
+            self.assertNotIn("multimodal_chunk_cache_write_path", h)
+        finally:
+            p.unlink(missing_ok=True)
 
     def test_cache_disabled_no_paths(self) -> None:
-        p = Path("/tmp/x.json")
+        p = Path(tempfile.gettempdir()) / f"agt_research_hint_d_{os.getpid()}.json"
         h = research_modality_hints_for_run(
             run_index=1,
-            n_runs=3,
             use_chunk_cache=False,
             cache_path=p,
             modality_subtype="",
