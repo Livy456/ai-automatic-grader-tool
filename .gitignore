@@ -102,6 +102,7 @@ env.production.gpu
 **/research analysis/*
 # Cursor implementation prompt (local only)
 /multi_llm_semantic_entropy.md
+**/disagreement_analysis/*
 
 # Local venv
 .venv/

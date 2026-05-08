@@ -280,7 +280,20 @@ class Config:
         min(
             _env_int(
                 "MULTIMODAL_AUDIO_HALF_SPLIT_AUTO_MIN_BYTES",
-                default=8_000_000,
+                default=3_000_000,
+            ),
+            80_000_000,
+        ),
+    )
+    # When ``MULTIMODAL_AUDIO_HALF_SPLIT=auto`` and ``modality_hints["task_type"]`` is
+    # ``oral_interview``, use this (typically lower) byte threshold so long interviews split
+    # without requiring an 8+ MiB file.
+    MULTIMODAL_AUDIO_HALF_SPLIT_AUTO_MIN_BYTES_ORAL = max(
+        500_000,
+        min(
+            _env_int(
+                "MULTIMODAL_AUDIO_HALF_SPLIT_AUTO_MIN_BYTES_ORAL",
+                default=1_200_000,
             ),
             80_000_000,
         ),
@@ -380,6 +393,18 @@ class Config:
     )
     MULTIMODAL_OPENAI_TRIO_WINDOW_OVERLAP_CHARS = _env_int(
         "MULTIMODAL_OPENAI_TRIO_WINDOW_OVERLAP_CHARS", default=4_096
+    )
+    # After trio JSON extraction, chunks whose ``student_response`` exceeds this length are
+    # split into multiple chunks (paragraph-aware) so Whisper/long oral answers grade per slice.
+    MULTIMODAL_OPENAI_TRIO_MAX_STUDENT_RESPONSE_CHARS = max(
+        4_000,
+        min(
+            _env_int(
+                "MULTIMODAL_OPENAI_TRIO_MAX_STUDENT_RESPONSE_CHARS",
+                default=14_000,
+            ),
+            200_000,
+        ),
     )
     MULTIMODAL_OPENAI_TRIO_ANSWER_KEY_MAX_CHARS = _env_int(
         "MULTIMODAL_OPENAI_TRIO_ANSWER_KEY_MAX_CHARS", default=32_000

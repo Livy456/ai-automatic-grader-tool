@@ -1,6 +1,10 @@
 """
 Optional **audio half-split** path for long single-file oral submissions.
 
+``auto`` uses ``MULTIMODAL_AUDIO_HALF_SPLIT_AUTO_MIN_BYTES`` (default ~3 MiB), or the lower
+``MULTIMODAL_AUDIO_HALF_SPLIT_AUTO_MIN_BYTES_ORAL`` when ``modality_hints["task_type"]`` is
+``oral_interview``.
+
 When ``MULTIMODAL_AUDIO_HALF_SPLIT`` is ``on`` or ``auto`` (and prerequisites match), the
 pipeline:
 
@@ -243,9 +247,19 @@ def maybe_prepare_audio_half_split(envelope: IngestionEnvelope, cfg: Config) -> 
     suf = _artifact_suffix_for_whisper(artifact_key)
 
     mode = str(getattr(cfg, "MULTIMODAL_AUDIO_HALF_SPLIT", "off") or "off").strip().lower()
-    # auto: only when submission is fairly large (Whisper / context pressure)
+    # auto: when submission is fairly large (Whisper / context pressure); oral interviews use a
+    # lower threshold so typical .m4a mock interviews still get duration halves + dual trio pass.
     if mode == "auto":
-        min_b = int(getattr(cfg, "MULTIMODAL_AUDIO_HALF_SPLIT_AUTO_MIN_BYTES", 8_000_000) or 8_000_000)
+        min_b = int(
+            getattr(cfg, "MULTIMODAL_AUDIO_HALF_SPLIT_AUTO_MIN_BYTES", 3_000_000) or 3_000_000
+        )
+        tt = str((envelope.modality_hints or {}).get("task_type") or "").strip().lower()
+        if tt == "oral_interview":
+            oral_min = int(
+                getattr(cfg, "MULTIMODAL_AUDIO_HALF_SPLIT_AUTO_MIN_BYTES_ORAL", 1_200_000)
+                or 1_200_000
+            )
+            min_b = min(min_b, oral_min)
         if len(blob) < min_b:
             return
 

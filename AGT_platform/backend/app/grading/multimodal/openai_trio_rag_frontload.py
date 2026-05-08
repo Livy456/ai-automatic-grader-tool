@@ -20,6 +20,7 @@ import json
 import logging
 import os
 import re
+from dataclasses import replace
 from typing import Any
 
 from app.config import Config
@@ -52,7 +53,122 @@ Rules:
 - **Short coding cells count:** if the only student work for a problem is a single line (e.g. ``import csv``), that is still a **complete** unit—copy it verbatim and set ``answer_key_segment`` to the matching key line(s), even when the rest of the notebook is long.
 - When the submission begins with a ``[STUDENT_SUBMISSION_PART …]`` header, you are seeing **one slice** of a longer file. Extract every gradable unit that appears **fully inside this slice**; still use the full ``ANSWER_KEY_OR_SAMPLE`` block below to choose ``answer_key_segment`` for each unit.
 - **Answer key alignment:** when ``ANSWER_KEY_OR_SAMPLE`` contains numbered sections, sample solutions, or instructor prose that maps to a unit, copy the **shortest** matching ``answer_key_segment`` (can be a paragraph or bullet list). Use empty string only when the key truly has no relevant part.
-- **JSON safety:** your reply is parsed as strict JSON; the API enforces ``json_object`` — still avoid bare control characters inside strings."""
+- **JSON safety:** your reply is parsed as strict JSON; the API enforces ``json_object`` — still avoid bare control characters inside strings.
+- **Long oral / interview answers:** do **not** place an entire multi-minute monologue into one unit's ``student_response``. Split at natural breaks (topic shifts, new interviewer question, paragraph-sized pauses in the transcript). Each ``student_response`` should stay under ~14,000 characters; use sequential ``question_id`` values such as ``q3`` then ``q3__part2`` when one spoken answer must continue across units.
+- **Interview Q&A:** when the submission is Q&A, prefer **one gradable unit per question's student answer**; do not merge unrelated questions into one giant ``student_response``."""
+
+
+def _trio_max_student_response_chars(cfg: Config) -> int:
+    v = int(
+        getattr(cfg, "MULTIMODAL_OPENAI_TRIO_MAX_STUDENT_RESPONSE_CHARS", 14_000) or 14_000
+    )
+    return max(4_000, min(v, 200_000))
+
+
+def _segment_text_for_max_chars(text: str, max_chars: int) -> list[str]:
+    """Split ``text`` into segments each at most ``max_chars``, preferring blank-line paragraphs."""
+    text = (text or "").strip()
+    if not text:
+        return []
+    max_chars = max(2_000, int(max_chars))
+    if len(text) <= max_chars:
+        return [text]
+    paras = re.split(r"\n{2,}", text)
+    segments: list[str] = []
+    buf = ""
+    for p in paras:
+        p = p.strip()
+        if not p:
+            continue
+        if len(p) > max_chars:
+            if buf.strip():
+                segments.append(buf.strip())
+                buf = ""
+            for i in range(0, len(p), max_chars):
+                piece = p[i : i + max_chars].strip()
+                if piece:
+                    segments.append(piece)
+            continue
+        cand = (buf + "\n\n" + p).strip() if buf else p
+        if len(cand) <= max_chars:
+            buf = cand
+        else:
+            if buf.strip():
+                segments.append(buf.strip())
+            buf = p
+    if buf.strip():
+        segments.append(buf.strip())
+    return [s for s in segments if s.strip()]
+
+
+def _split_chunks_for_oversized_trio_student_response(
+    chunks: list[GradingChunk],
+    envelope: IngestionEnvelope,
+    cfg: Config,
+    audit: dict[str, Any],
+) -> list[GradingChunk]:
+    """
+    When trio extraction returns one huge ``student_response`` (common for Q1 long audio),
+    split into multiple ``GradingChunk`` rows so per-chunk grading and JSON parsing stay stable.
+    """
+    max_sr = _trio_max_student_response_chars(cfg)
+    out: list[GradingChunk] = []
+    split_units = 0
+    for ch in chunks:
+        ev = ch.evidence or {}
+        trio = ev.get("trio")
+        if not isinstance(trio, dict):
+            out.append(ch)
+            continue
+        sr = str(trio.get("student_response") or "").strip()
+        if len(sr) <= max_sr:
+            out.append(ch)
+            continue
+        segs = _segment_text_for_max_chars(sr, max_sr)
+        if len(segs) <= 1:
+            out.append(ch)
+            continue
+        split_units += 1
+        base_qid = (ch.question_id or "").strip() or "unit"
+        for si, piece in enumerate(segs):
+            new_qid = f"{base_qid}__part{si + 1}" if len(segs) > 1 else base_qid
+            cid = f"{envelope.assignment_id}:{envelope.student_id}:openai_trio:{len(out)}:{new_qid}"
+            q = str(trio.get("question") or "").strip()
+            ak_seg = str(trio.get("answer_key_segment") or "").strip()
+            parts_et = [p for p in (q, piece) if p]
+            ext = "\n\n".join(parts_et).strip()
+            ev_new = dict(ev)
+            trio_new = dict(trio)
+            trio_new["student_response"] = piece
+            trio_new["answer_key_segment"] = ak_seg if si == 0 else ""
+            ev_new["trio"] = trio_new
+            ev_new["trio_long_response_split"] = {
+                "original_chunk_id": ch.chunk_id,
+                "original_question_id": ch.question_id,
+                "part_index": si + 1,
+                "part_count": len(segs),
+                "max_student_response_chars": max_sr,
+            }
+            ev_new["question_text"] = q[:4000]
+            out.append(
+                replace(
+                    ch,
+                    chunk_id=cid,
+                    question_id=new_qid,
+                    parent_chunk_id=ch.chunk_id,
+                    extracted_text=ext or piece,
+                    evidence=ev_new,
+                )
+            )
+    if split_units:
+        audit["trio_long_student_response_split_units"] = split_units
+        audit["trio_max_student_response_chars_applied"] = max_sr
+        _log.info(
+            "openai_trio_rag: split %s oversized trio units (max student_response chars=%s)",
+            split_units,
+            max_sr,
+        )
+    return out
 
 
 def _submission_window_slices(text: str, window: int, overlap: int) -> list[tuple[int, int, str]]:
@@ -451,6 +567,8 @@ def _openai_trio_rag_frontload_audio_halves(
         )
         chunks.append(ch)
 
+    chunks = _split_chunks_for_oversized_trio_student_response(chunks, envelope, cfg, audit)
+
     if not chunks:
         audit["error"] = "no_valid_units_after_parse_audio_halves"
         return [], audit
@@ -762,6 +880,8 @@ def run_openai_trio_rag_frontload(
             },
         )
         chunks.append(ch)
+
+    chunks = _split_chunks_for_oversized_trio_student_response(chunks, envelope, cfg, audit)
 
     if not chunks:
         audit["error"] = "no_valid_units_after_parse"

@@ -15,7 +15,7 @@ from .rag_embeddings import (
     _optional_positive_int_env,
     sanitize_evidence_for_grading_prompt,
 )
-from .schemas import GradingChunk, RubricType
+from .schemas import GradingChunk, RubricType, TaskType
 
 
 SYSTEM_CHUNK_GRADER = """\
@@ -77,7 +77,11 @@ MODALITY GUIDANCE:
 - **Visualization:** judge only what is visible in charts/tables provided.
 - **Oral/interview:** transcript/summary only — do not invent delivery traits.
 
-Ignore other questions; grade **only** this chunk.
+ORAL / MOCK INTERVIEW — **Bias & limitations** (when rubric rows include that theme):
+- Oral transcripts are noisy: disfluencies and interviewer overlap must not lower unrelated scores.
+- For **Bias & Limitations Awareness** (match the rubric row name exactly): treat **implicit** signals as on-topic — hedging, uncertainty, caveats, "I don't know," missing data, alternative explanations, trade-offs, or what the analysis cannot prove. **Do not** reserve credit only for explicit words "bias" or "limitation."
+- Use **0** on that row only when nothing in the quoted student text plausibly reflects uncertainty, risk, or scope limits for the question asked. When any such signal appears, prefer **≥ 0.5** on the half-step ladder over 0.
+- Behavioral or storytelling questions may not invite deep technical limitation talk; calibrate that row to what the prompt reasonably expects.
 
 When ``chunk.evidence.trio`` is present, use **question** / **student_response** / **answer_key_segment**
 as structured hints; if ``student_response`` is empty or too short, you **must** still use
@@ -98,7 +102,23 @@ PROGRAMMING / SCAFFOLDED RUBRIC — **MANDATORY** WHEN ``exact_scaffolded_code_m
 - When that field is **true**, you **must** output **raw_score = max_points** (the top of the 0…R ladder, i.e. **R**) for **every** criterion in ``rubric.rows`` for this chunk — including **Functional Correctness**, **Logical Implementation**, **Code Quality**, and **Edge Case Awareness**. At this scope, “no extra edge-case code” means **not applicable**: award **full** Edge Case Awareness. Do **not** deduct for missing setup, runtime hooks, or commentary that the reference does not show.
 - ``reasoning`` / ``justification`` must state explicitly that the student code matches the reference for the required lines; ``evidence`` must still quote only the student’s submission.
 
+Ignore other questions; grade **only** this chunk.
+
 Return **only** one JSON object (no markdown fences, no prose outside JSON)."""
+
+
+SYSTEM_CHUNK_GRADER_ORAL_INTERVIEW_SUPPLEMENT = """\
+
+ORAL / MOCK INTERVIEW — duplicate calibration (same chunk; rubric_type is oral):
+- **Bias & Limitations Awareness:** implicit caveats, hedging, acknowledged gaps, and "what we cannot conclude" language count as evidence. Prefer mid-scale partial credit over an all-zero sweep when the student shows any reflective awareness of limits or uncertainty.
+"""
+
+
+def chunk_multimodal_grading_system_prompt(chunk: GradingChunk) -> str:
+    """System prompt for per-chunk multimodal grading (oral mock interviews get extra calibration)."""
+    if chunk.rubric_type == RubricType.ORAL_INTERVIEW or chunk.task_type == TaskType.ORAL_INTERVIEW:
+        return SYSTEM_CHUNK_GRADER + "\n\n" + SYSTEM_CHUNK_GRADER_ORAL_INTERVIEW_SUPPLEMENT.strip()
+    return SYSTEM_CHUNK_GRADER
 
 
 def _is_programming_scaffolded_rubric(chunk: GradingChunk) -> bool:
@@ -279,6 +299,13 @@ def build_chunk_grading_prompt(
             "matches the instructor reference for this chunk. Follow the system prompt: "
             "output **raw_score = max_points** for **every** row in ``rubric.rows`` (all four "
             "scaffolded criteria including Edge Case Awareness)."
+        )
+    if chunk.rubric_type == RubricType.ORAL_INTERVIEW:
+        instr_parts.append(
+            "\nOral / mock interview: for **Bias & Limitations Awareness** (exact rubric name), "
+            "score hedging, uncertainty, caveats, and acknowledged gaps as relevant evidence; "
+            "avoid giving 0 when the transcript shows any plausible reflection on limits or what "
+            "is unknown, unless the rubric level text truly excludes that interpretation."
         )
     payload: dict[str, Any] = {
         "instructions": "".join(instr_parts),

@@ -103,7 +103,10 @@ from .custom_rubric_export import apply_custom_rubric_plan_to_chunks
 from .ingestion import IngestionEnvelope, ingest_raw_submission
 from .model_runner import ChunkModelRunner, MultiModelChunkRunner
 from .parser import parse_chunk_grade_json
-from .prompts_chunk import SYSTEM_CHUNK_GRADER, build_chunk_grading_prompt
+from .prompts_chunk import (
+    build_chunk_grading_prompt,
+    chunk_multimodal_grading_system_prompt,
+)
 from .review_router import evaluate_chunk_review
 from .rubric_router import route_rubric
 from .semantic_confidence import (
@@ -666,7 +669,7 @@ class MultimodalGradingPipeline:
             )
             raw_samples = self.runner.run_chunk_samples(
                 chunk,
-                system_prompt=SYSTEM_CHUNK_GRADER,
+                system_prompt=chunk_multimodal_grading_system_prompt(chunk),
                 user_prompt=user_prompt,
             )
 
@@ -738,7 +741,7 @@ class MultimodalGradingPipeline:
                 for s in parsed_samples
             ]
             outcome.stage_artifacts = {
-                "system_prompt": SYSTEM_CHUNK_GRADER,
+                "system_prompt": chunk_multimodal_grading_system_prompt(chunk),
                 "user_prompt": user_prompt,
                 "raw_sample_count": len(raw_samples),
                 "confidence_trace": {

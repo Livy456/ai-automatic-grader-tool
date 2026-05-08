@@ -2746,6 +2746,103 @@ class MultimodalHuggingFaceRoutingTests(unittest.TestCase):
         self.assertGreater(inst.chat_json_with_usage.call_count, 1)
         self.assertEqual(len(chunks), 1)
 
+    def test_openai_trio_rag_splits_long_student_response(self) -> None:
+        """Oversized trio ``student_response`` is split before embeddings / grading."""
+        from unittest.mock import MagicMock, patch
+
+        from app.grading.multimodal.ingestion import ingest_raw_submission
+        from app.grading.multimodal.openai_trio_rag_frontload import (
+            run_openai_trio_rag_frontload,
+        )
+
+        cfg = Config()
+        cfg.OPENAI_API_KEY = "sk-test"
+        cfg.OPENAI_TRIO_RAG_CHAT_MODEL = "gpt-test"
+        cfg.OPENAI_TRIO_RAG_EMBEDDING_MODEL = "text-embedding-3-small"
+        cfg.MULTIMODAL_OPENAI_TRIO_MAX_STUDENT_RESPONSE_CHARS = 120
+
+        para = ("segment " * 25).strip() + "\n\n"
+        big_sr = (para * 30).strip()
+
+        inst = MagicMock()
+        inst.chat_json_with_usage.return_value = (
+            {
+                "units": [
+                    {
+                        "question_id": "q1",
+                        "question": "Tell me about your project.",
+                        "student_response": big_sr,
+                        "answer_key_segment": "",
+                        "extracted_text": "Tell me about your project.\n\n" + big_sr,
+                    }
+                ]
+            },
+            {"prompt_tokens": 20, "completion_tokens": 10, "total_tokens": 30},
+        )
+
+        def fake_embed(texts, **kwargs):
+            return [[0.1, 0.2] for _ in range(len(texts))], 12
+
+        with patch(
+            "app.grading.multimodal.openai_trio_rag_frontload.OpenAIJsonClient",
+            return_value=inst,
+        ), patch(
+            "app.grading.multimodal.openai_trio_rag_frontload._openai_embed_batch",
+            side_effect=fake_embed,
+        ):
+            env = ingest_raw_submission(
+                assignment_id="a1",
+                student_id="s1",
+                artifacts={},
+                extracted_plaintext="submission preamble " + big_sr,
+            )
+            chunks, audit = run_openai_trio_rag_frontload(env, cfg, "")
+
+        self.assertTrue(audit.get("ok"))
+        self.assertGreater(len(chunks), 1)
+        self.assertGreater(int(audit.get("trio_long_student_response_split_units") or 0), 0)
+        for ch in chunks:
+            trio = (ch.evidence or {}).get("trio") or {}
+            self.assertLessEqual(len(str(trio.get("student_response") or "")), 150)
+
+    def test_chunk_multimodal_grading_system_prompt_oral_supplement(self) -> None:
+        from app.grading.multimodal.prompts_chunk import (
+            SYSTEM_CHUNK_GRADER,
+            chunk_multimodal_grading_system_prompt,
+        )
+        from app.grading.multimodal.schemas import (
+            GradingChunk,
+            Modality,
+            RubricType,
+            TaskType,
+        )
+
+        ch = GradingChunk(
+            chunk_id="c1",
+            assignment_id="a1",
+            student_id="s1",
+            question_id="q1",
+            modality=Modality.VIDEO_ORAL,
+            task_type=TaskType.ORAL_INTERVIEW,
+            extracted_text="x",
+            rubric_type=RubricType.ORAL_INTERVIEW,
+        )
+        oral_sys = chunk_multimodal_grading_system_prompt(ch)
+        self.assertIn("Bias & Limitations Awareness", oral_sys)
+        self.assertGreater(len(oral_sys), len(SYSTEM_CHUNK_GRADER))
+
+        ch2 = GradingChunk(
+            chunk_id="c2",
+            assignment_id="a1",
+            student_id="s1",
+            question_id="q1",
+            modality=Modality.WRITTEN,
+            task_type=TaskType.FREE_RESPONSE_SHORT,
+            extracted_text="x",
+            rubric_type=RubricType.FREE_RESPONSE,
+        )
+        self.assertEqual(chunk_multimodal_grading_system_prompt(ch2), SYSTEM_CHUNK_GRADER)
+
 
 if __name__ == "__main__":
     unittest.main()
