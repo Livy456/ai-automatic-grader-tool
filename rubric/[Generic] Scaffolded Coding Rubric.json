@@ -1,0 +1,42 @@
+{
+    "rubric_name": "[Generic] Scaffolded Coding Rubric",
+    "total_points": 9,
+    "sections": [
+      {
+        "name": "Scaffolded Coding",
+        "total_points": 9,
+        "criteria": [
+          {
+            "name": "Functional Correctness",
+            "points_range": "0-4",
+            "levels": {
+              "4": "Output is fully correct across all required cases; aligns exactly with expected behavior; no logical errors.",
+              "3": "Output is mostly correct; minor errors (e.g., formatting, small edge cases) do not affect core correctness.",
+              "2": "Output partially correct; correct logic in some cases but fails in others.",
+              "1": "Attempt made but logic is flawed; produces incorrect outputs, might not have fully executable solution.",
+              "0": "No meaningful attempt or little to no response."
+            }
+          },
+          {
+            "name": "Logical Implementation",
+            "points_range": "0-3",
+            "levels": {
+              "3": "Uses correct algorithmic approach; the solution is logically sound and appropriate.",
+              "2": "Approach is valid but inefficient or slightly misapplied; still produces acceptable results.",
+              "1": "Partial logic; demonstrates some understanding but key steps missing or incorrect.",
+              "0": "Incorrect or irrelevant approach."
+            }
+          },
+          {
+            "name": "Code Quality",
+            "points_range": "0-2",
+            "levels": {
+              "2": "Clean, readable, well-structured; appropriate variable naming and organization.",
+              "1": "Some readability or structure issues; still understandable.",
+              "0": "Poorly structured, difficult to read or follow or no response."
+            }
+          }
+        ]
+      }
+    ]
+  }

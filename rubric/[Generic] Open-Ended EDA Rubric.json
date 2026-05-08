@@ -1,0 +1,75 @@
+{
+    "rubric_name": "[Generic] Open-Ended EDA Rubric",
+    "total_points": 20,
+    "criteria": [
+      {
+        "name": "Problem Framing",
+        "points_range": "0-3",
+        "levels": {
+          "3": "Clearly defines question/hypothesis; well-scoped and meaningful.",
+          "2": "Reasonable framing but lacks precision or clarity.",
+          "1": "Vague or incomplete problem definition.",
+          "0": "No clear framing."
+        }
+      },
+      {
+        "name": "Data Manipulation",
+        "points_range": "0-4",
+        "levels": {
+          "4": "Correct, efficient transformations; appropriate preprocessing.",
+          "3": "Mostly correct with minor issues.",
+          "2": "Partial transformations; some incorrect steps.",
+          "1": "Major issues in manipulation.",
+          "0": "No meaningful data processing."
+        }
+      },
+      {
+        "name": "Method Appropriateness",
+        "points_range": "0-3",
+        "levels": {
+          "3": "Analysis methods are well-matched to problems and data.",
+          "2": "Reasonable methods but not optimal.",
+          "1": "Weak or partially inappropriate methods.",
+          "0": "Incorrect or missing methods."
+        }
+      },
+      {
+        "name": "Visualization",
+        "points_range": "0-3",
+        "levels": {
+          "3": "Clear, appropriate visualization; labeled and interpretable.",
+          "2": "Mostly correct visualization with minor issues.",
+          "1": "Poor or unclear visualization.",
+          "0": "No visualization or incorrect."
+        }
+      },
+      {
+        "name": "Interpretation",
+        "points_range": "0-4",
+        "levels": {
+          "4": "Accurate, evidence-based conclusions directly tied to analysis.",
+          "3": "Mostly correct interpretation; minor gaps.",
+          "2": "Partial interpretation; some unsupported claims.",
+          "1": "Incorrect interpretation.",
+          "0": "No interpretation."
+        }
+      },
+      {
+        "name": "Insight",
+        "points_range": "0-2",
+        "levels": {
+          "2": "Provides meaningful, non-obvious insights.",
+          "1": "Basic or obvious observations.",
+          "0": "No insight."
+        }
+      },
+      {
+        "name": "Limitations",
+        "points_range": "0-1",
+        "levels": {
+          "1": "Acknowledges uncertainty, bias, or limitations.",
+          "0": "No acknowledgement."
+        }
+      }
+    ]
+  }

@@ -102,3 +102,57 @@ For notebook submissions, you can use a **single structured LLM call** that read
 - **`MULTIMODAL_TRIO_EMBED_NO_CAPS=1`** — when using SentenceTransformers (or non–OpenAI-frontload) RAG, embed full trio strings without the usual per-field character caps (watch memory on huge cells).
 
 When triplet mode is on **and** blank + answer key are present, **OpenAI trio+RAG frontload** is skipped so this path owns chunk boundaries.
+
+## Multimodal grading pipeline (local)
+
+These flows use fixtures next to the repo root: `assignments_to_grade/`, `rubric/`, and (when present) `answer_key/`. Configure models and keys in **`AGT_platform/backend/.env`** (at minimum **`OPENAI_API_KEY`** for per-chunk multimodal grading; optional keys for embeddings, Whisper, and so on match `app/config.py`).
+
+Work from **`AGT_platform/backend/`** so `pytest` picks up `tests/` and `app` on the path the same way CI does.
+
+### Single pipeline run
+
+Runs the full multimodal pipeline once per selected assignment stem, writes `grading_output/<stem>_grade_output.json`, and updates `RAG_embedding/` exports for that run.
+
+```bash
+cd AGT_platform/backend
+pytest tests/test_grading_pipeline_local_files.py::TestGradingPipelineLocalFiles::test_grade_local_assignments_write_json -v
+```
+
+Useful overrides (see the test module docstring in `tests/test_grading_pipeline_local_files.py` for full detail):
+
+- **`MULTIMODAL_LOCAL_TEST_MAX_ASSIGNMENTS`** — default **1** (first basename only). Use **`0`** or **`all`** to grade every stem under `assignments_to_grade/`.
+- **`MULTIMODAL_LOCAL_TEST_GRADING_SAMPLES`** — default **1** (overrides **`MULTIMODAL_SAMPLES_PER_MODEL`** for this test). Use **`from_config`** to honor `.env`, or an integer **1–16**.
+- **`MULTIMODAL_LOCAL_TEST_MAX_GRADING_UNITS`** — default **8** chunk cap per assignment; **`0`** / **`all`** removes the cap.
+- **`SKIP_LOCAL_LLM_TESTS=1`** — skips the test so CI or laptops without API access do not call providers.
+
+### Multiple runs (research harness, e.g. 15 runs)
+
+The opt-in test **`tests/test_multimodal_research_runs.py`** repeats the multimodal pipeline for variance or evaluation. It is **skipped** unless **`MULTIMODAL_RESEARCH_ASSIGNMENT_ID`** is set, so normal `pytest` does not issue many paid calls.
+
+**15 runs** for one assignment (stem = basename under `assignments_to_grade/`, without the file extension):
+
+```bash
+cd AGT_platform/backend
+MULTIMODAL_RESEARCH_ASSIGNMENT_ID='[Student 1] Week7_Pset7' \
+MULTIMODAL_RESEARCH_RUN_COUNT=15 \
+pytest tests/test_multimodal_research_runs.py -v -rs
+```
+
+- Stems that start with **`[`** should be passed in **single quotes** (as above) or included in a **JSON array** if you grade several assignments in one go.
+- **`MULTIMODAL_RESEARCH_RUN_COUNT`** defaults to **30** when unset; maximum **100**.
+- **Resume (default on):** if `research analysis/<sanitized_stem>_run_01` … `_run_15/` already exist, only missing runs are executed and the CSV is rebuilt. Set **`MULTIMODAL_RESEARCH_RESUME=0`** (or `false` / `off`) to re-run all **N** passes from scratch.
+
+**Outputs** (under repo root `research analysis/`):
+
+- `research analysis/<sanitized_stem>_run_<NN>/grade_output.json` per run
+- `research analysis/<sanitized_stem>_research_scores.csv` — one row per question per run
+
+**Multiple assignments** (15 runs each, processed in list order):
+
+```bash
+MULTIMODAL_RESEARCH_ASSIGNMENT_ID='["[Student 1] Week6_pset6.2","[Student 2] Week6_pset6.2"]' \
+MULTIMODAL_RESEARCH_RUN_COUNT=15 \
+pytest tests/test_multimodal_research_runs.py -v -rs
+```
+
+Optional research-only toggles (**`MULTIMODAL_RESEARCH_USE_CHUNK_CACHE`**, **`MULTIMODAL_RESEARCH_FAST`**, and others) are documented in the module docstring at the top of `tests/test_multimodal_research_runs.py`.

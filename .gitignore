@@ -87,7 +87,7 @@ env.production.gpu
 
 # student assignments and rubric for grading
 **/assignments_to_grade/*
-**/rubric/*
+# **/rubric/*
 **/grading_output/*
 **/RAG_embedding/*
 **/multi-modal_assignments_to_grade/*
