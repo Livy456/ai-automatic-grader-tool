@@ -39,13 +39,6 @@ services:
       exit 0;
       "
 
-  ollama:
-    image: ollama/ollama:latest
-    container_name: ai_grader_ollama
-    ports: ["11434:11434"]
-    volumes:
-      - ollama:/root/.ollama
-
   backend:
     build: ./backend
     container_name: ai_grader_backend
@@ -70,7 +63,7 @@ services:
       ALLOW_FLASK_MULTIPART_UPLOAD: "${ALLOW_FLASK_MULTIPART_UPLOAD:-true}"
       SESSION_COOKIE_SECURE: "${SESSION_COOKIE_SECURE:-false}"
     ports: ["5000:5000"]
-    depends_on: [postgres, redis, minio, createbuckets, ollama]
+    depends_on: [postgres, redis, minio, createbuckets]
 
   worker:
     build: ./backend
@@ -90,7 +83,7 @@ services:
       MAX_UPLOAD_MB: "${MAX_UPLOAD_MB:-1024}"
       ALLOW_FLASK_MULTIPART_UPLOAD: "${ALLOW_FLASK_MULTIPART_UPLOAD:-true}"
     command: celery -A app.tasks:celery_app worker --loglevel=INFO -Q gpu,celery --concurrency=1 --prefetch-multiplier=1
-    depends_on: [backend, redis, postgres, minio, ollama]
+    depends_on: [backend, redis, postgres, minio]
 
   frontend:
     build: ./frontend
@@ -102,4 +95,3 @@ services:
 volumes:
   pgdata:
   miniodata:
-  ollama:

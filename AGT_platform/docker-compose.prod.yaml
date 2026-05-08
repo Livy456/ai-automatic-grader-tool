@@ -1,5 +1,5 @@
 # Web / App EC2 — same as docker-compose.web.prod.yaml (kept for workflows using -f docker-compose.prod.yaml).
-# Ollama and GPU Celery workers belong on docker-compose.gpu.prod.yaml only.
+# GPU Celery workers belong on docker-compose.gpu.prod.yaml only.
 
 services:
   postgres:

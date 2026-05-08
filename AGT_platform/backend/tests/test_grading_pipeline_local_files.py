@@ -35,7 +35,7 @@ Grading uses :class:`app.grading.multimodal.MultimodalGradingPipeline` with
 :class:`app.grading.multimodal.MultiModelChunkRunner` (``MULTIMODAL_SAMPLES_PER_MODEL`` /
 ``GRADING_SAMPLE_TEMPERATURE``). Per-chunk grading uses **OpenAI only**
 (``OPENAI_API_KEY`` + ``OPENAI_MULTIMODAL_GRADING_MODEL``); optional ``GRADING_MODEL_2`` /
-``GRADING_MODEL_3`` must be ``openai:…`` specs. This test no longer requires Ollama.
+``GRADING_MODEL_3`` must be ``openai:…`` specs. No local inference daemon is required.
 
 **Why this test can run a long time (it is usually not stuck):** the multimodal pipeline
 issues **OpenAI** ``chat_json`` calls **sequentially** — for each grading chunk,
@@ -63,7 +63,6 @@ import logging
 import os
 import unittest
 
-import requests
 from collections import defaultdict
 from pathlib import Path
 from types import SimpleNamespace
@@ -144,66 +143,6 @@ def _skip_if_no_local_llm() -> None:
         raise unittest.SkipTest(
             "SKIP_LOCAL_LLM_TESTS is set; skipping integration calls to remote LLM APIs."
         )
-
-
-def _ollama_reachable_quick(cfg: Config) -> bool:
-    """Legacy helper (multimodal grading no longer requires Ollama)."""
-    base = (cfg.INTERNAL_OLLAMA_URL or cfg.OLLAMA_BASE_URL or "").strip().rstrip("/")
-    if not base:
-        return False
-    try:
-        r = requests.get(f"{base}/api/tags", timeout=4)
-        return r.status_code == 200
-    except OSError:
-        return False
-
-
-def _ollama_primary_chat_smoke(cfg: Config) -> tuple[bool, str]:
-    """
-    Fail fast if /api/chat cannot complete quickly.
-
-    ``/api/tags`` can return 200 while embeddings return 404 (hash fallback is fine) and
-    while /api/chat hangs until OLLAMA_CHAT_TIMEOUT_SEC — this smoke avoids ~300s waits
-    per failing call when the daemon or model is misconfigured.
-    """
-    base = (cfg.INTERNAL_OLLAMA_URL or cfg.OLLAMA_BASE_URL or "").strip().rstrip("/")
-    if not base:
-        return False, "OLLAMA_BASE_URL / INTERNAL_OLLAMA_URL is empty"
-    model = (cfg.OLLAMA_MODEL or "llama3.2:3b").strip()
-    raw = os.getenv("LOCAL_LLM_SMOKE_TIMEOUT_SEC", "").strip()
-    # Default 60s: first load of llama3.2 on CPU often exceeds 25s without being "broken".
-    smoke_to = int(raw) if raw else 60
-    smoke_to = max(5, min(smoke_to, 180))
-    try:
-        r = requests.post(
-            f"{base}/api/chat",
-            json={
-                "model": model,
-                "messages": [
-                    {"role": "user", "content": 'Reply with exactly the JSON object: {"ok":true}'}
-                ],
-                "stream": False,
-            },
-            timeout=smoke_to,
-        )
-        if r.status_code != 200:
-            return False, (
-                f"/api/chat returned HTTP {r.status_code} for model {model!r}. "
-                f"Body (truncated): {r.text[:300]!r}. Try: ollama pull {model}"
-            )
-        body = r.json()
-        content = (body.get("message") or {}).get("content") or ""
-        if not content.strip():
-            return False, f"/api/chat returned empty content for model {model!r}"
-        return True, ""
-    except requests.exceptions.ReadTimeout:
-        return False, (
-            f"/api/chat timed out after {smoke_to}s (LOCAL_LLM_SMOKE_TIMEOUT_SEC). "
-            f"Is model {model!r} pulled and loaded? Is the GPU busy? "
-            f"(Full grading uses OLLAMA_CHAT_TIMEOUT_SEC, often 300s.)"
-        )
-    except requests.exceptions.RequestException as e:
-        return False, f"/api/chat request failed: {e}"
 
 
 def _assignment_groups() -> dict[str, list[Path]]:
@@ -553,7 +492,7 @@ class TestGradingPipelineLocalFiles(unittest.TestCase):
         if not build_multimodal_grading_clients(cfg):
             raise unittest.SkipTest(
                 "Multimodal per-chunk grading requires OPENAI_API_KEY (and a valid "
-                "OPENAI_MULTIMODAL_GRADING_MODEL). Ollama is not used for this path anymore."
+                "OPENAI_MULTIMODAL_GRADING_MODEL)."
             )
 
         for stem, paths in sorted(groups.items()):
@@ -636,16 +575,14 @@ class TestGradingPipelineLocalFiles(unittest.TestCase):
                 if u_cap is not None:
                     n_grading_units = min(n_grading_units, u_cap)
                 n_calls = n_grading_units * n_models * k_samples
-                chat_to = int(getattr(cfg, "OLLAMA_CHAT_TIMEOUT_SEC", 300))
                 logging.getLogger(__name__).warning(
                     "Multimodal grading for %r: ~%s grading unit(s) × %s model(s) × %s sample(s)/model "
-                    "≈ %s sequential /api/chat calls (up to %ss each).",
+                    "≈ %s sequential OpenAI chat requests.",
                     stem,
                     n_grading_units,
                     n_models,
                     k_samples,
                     n_calls,
-                    chat_to,
                 )
 
                 raw_json = _try_load_generic_rubric_raw_json()

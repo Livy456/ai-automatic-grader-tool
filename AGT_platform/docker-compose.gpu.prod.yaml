@@ -1,22 +1,8 @@
-# GPU / private inference EC2 — Ollama + Celery workers only. Not internet-facing.
+# GPU EC2 — Celery workers for grading queues. Not internet-facing.
 # REDIS_URL in .env.production.gpu must point to the web tier Redis (private IP / VPC).
 # DATABASE_URL must reach the same Postgres as the API (for worker DB access).
 
 services:
-  ollama:
-    image: ollama/ollama:latest
-    container_name: ai_grader_ollama_prod
-    volumes:
-      - ollamadata_prod:/root/.ollama
-    restart: unless-stopped
-    # Bind to container network only; do not publish 11434 publicly.
-    deploy:
-      resources:
-        reservations:
-          memory: 4G
-        limits:
-          memory: 16G
-
   worker:
     build:
       context: ./backend
@@ -25,20 +11,12 @@ services:
     env_file: .env.production.gpu
     environment:
       DEPLOYMENT_TIER: gpu
-      OLLAMA_BASE_URL: "${OLLAMA_BASE_URL:-http://ollama:11434}"
-      INTERNAL_OLLAMA_URL: "${INTERNAL_OLLAMA_URL:-http://ollama:11434}"
     command: >
       celery -A app.tasks.celery_app worker
       --loglevel=INFO
       -Q gpu,celery
       --concurrency=${CELERY_WORKER_CONCURRENCY:-1}
       --prefetch-multiplier=${CELERY_WORKER_PREFETCH:-1}
-    depends_on:
-      ollama:
-        condition: service_started
     restart: unless-stopped
     # On AWS GPU instances install nvidia-container-toolkit and use Docker's --gpus all
     # or add a deploy.resources.reservations.devices block compatible with your Compose version.
-
-volumes:
-  ollamadata_prod:

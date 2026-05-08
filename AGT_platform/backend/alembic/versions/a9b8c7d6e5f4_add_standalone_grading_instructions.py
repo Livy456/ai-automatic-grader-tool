@@ -3,7 +3,7 @@
 Revision ID: a9b8c7d6e5f4
 Revises: f1a2b3c4d5e6
 
-Optional instructor prompt used with rubric / sample response in the Ollama grading pipeline.
+Optional instructor prompt used with rubric / sample response in the LLM grading pipeline.
 
 """
 from typing import Sequence, Union

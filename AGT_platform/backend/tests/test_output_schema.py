@@ -23,7 +23,7 @@ class OutputSchemaTests(unittest.TestCase):
                 }
             ],
             "flags": [],
-            "_model_used": "ollama:x",
+            "_model_used": "openai:gpt-4o-mini",
         }
         out = validate_grading_output(d)
         self.assertAlmostEqual(out["overall"]["score"], 0.8, places=5)

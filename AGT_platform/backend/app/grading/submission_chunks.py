@@ -69,7 +69,7 @@ def reflow_pdf_sections_in_plaintext(text: str) -> str:
     """
     Apply :func:`app.grading.tools.normalize_verticalized_pdf_text` to every
     ``=== PDF TEXT ===`` region. Used by the multimodal grading pipeline so PDF
-    submissions are reflowed before Ollama QA segmentation and before structured
+    submissions are reflowed before LLM QA segmentation and before structured
     chunking (which also reflows per section as a second pass).
     """
 

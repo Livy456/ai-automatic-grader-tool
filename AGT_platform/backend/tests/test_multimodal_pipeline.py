@@ -2,7 +2,7 @@
 Tests for the multimodal grading pipeline.
 
 When integration logs show ``grading_llm_sample_failed`` or JSON/HTTP errors, those are
-**LLM inference** failures (Ollama HTTP or local Hugging Face ``transformers``) during
+**LLM inference** failures (OpenAI API or local Hugging Face ``transformers``) during
 per-chunk grading, not notebook or RAG chunking.
 Chunking is recorded under ``pipeline_audit`` → ``chunking``; failures there would indicate
 a chunking issue.
@@ -14,8 +14,8 @@ a chunking issue.
   JSON files merged for ``rubric_rows_by_type``, via ``create_multimodal_pipeline_from_app_config``.
   By default the **chat / structure LLM** is **OpenAI** (``gpt-5.4-nano``) when
   ``OPENAI_API_KEY`` is set in the environment; otherwise **Hugging Face** Maverick
-  (``Llama-4-Maverick-17B-128E-Instruct:fp8``). Set ``MULTIMODAL_INTEGRATION_LLM_BACKEND=huggingface``
-  or ``=ollama`` to force those backends. **RAG embeddings** default to SentenceTransformers.
+  (``Llama-4-Maverick-17B-128E-Instruct:fp8``).   Set ``MULTIMODAL_INTEGRATION_LLM_BACKEND=huggingface`` or ``=openai`` to force those backends.
+  **RAG embeddings** default to SentenceTransformers.
   Run ``pytest -rs`` for full ``SkipTest`` reasons; use
   ``--log-cli-level=WARNING`` for phased ``[integration]`` diagnostics.
 
@@ -156,7 +156,7 @@ def _hf_integration_preflight(cfg: Config) -> tuple[bool, str]:
         return (
             False,
             "NO_HF_TOKEN: set HUGGINGFACE_HUB_TOKEN or HF_TOKEN (gated meta-llama/*). "
-            "Or run with MULTIMODAL_INTEGRATION_LLM_BACKEND=ollama if you only use Ollama.",
+            "Or run with MULTIMODAL_INTEGRATION_LLM_BACKEND=openai when OPENAI_API_KEY is set.",
         )
 
     _integration_log(
@@ -325,115 +325,9 @@ def _load_rubric_json() -> dict | None:
     return merge_four_generics_to_sections_document(RUBRIC_DIR)
 
 
-def _ollama_reachable(cfg: Config) -> bool:
-    base = (cfg.INTERNAL_OLLAMA_URL or cfg.OLLAMA_BASE_URL or "").strip().rstrip("/")
-    if not base:
-        return False
-    try:
-        return requests.get(f"{base}/api/tags", timeout=4).status_code == 200
-    except OSError:
-        return False
-
-
-def _ollama_chat_smoke(cfg: Config) -> tuple[bool, str]:
-    """Optional heavy check: /api/chat on ``OLLAMA_MODEL`` (large models may cold-load slowly)."""
-    base = (cfg.INTERNAL_OLLAMA_URL or cfg.OLLAMA_BASE_URL or "").strip().rstrip("/")
-    model = (cfg.OLLAMA_MODEL or "llama3.2:3b").strip()
-    timeout = int(getattr(cfg, "OLLAMA_CHAT_TIMEOUT_SEC", 120))
-    try:
-        r = requests.post(
-            f"{base}/api/chat",
-            json={
-                "model": model,
-                "messages": [{"role": "user", "content": 'Reply: {"ok":true}'}],
-                "stream": False,
-                "keep_alive": getattr(cfg, "OLLAMA_KEEP_ALIVE", "5m"),
-            },
-            timeout=timeout,
-        )
-        if r.status_code != 200:
-            return False, f"HTTP {r.status_code} for {model!r}"
-        body = r.json()
-        if not (body.get("message") or {}).get("content", "").strip():
-            return False, f"Empty content from {model!r}"
-        return True, ""
-    except requests.exceptions.ReadTimeout:
-        return False, f"Timeout ({timeout}s) for {model!r}"
-    except requests.exceptions.RequestException as e:
-        return False, str(e)
-
-
-def _ollama_embedding_smoke(cfg: Config) -> tuple[bool, str]:
-    """
-    Fast Ollama check for multimodal integration on the RAG model (default
-    ``nomic-embed-text``). Matches :func:`app.grading.rag_embeddings._ollama_embed_snippet`:
-    try legacy ``POST /api/embeddings`` first, then ``POST /api/embed`` (current Ollama).
-    """
-    base = (cfg.INTERNAL_OLLAMA_URL or cfg.OLLAMA_BASE_URL or "").strip().rstrip("/")
-    embed_model = (getattr(cfg, "OLLAMA_EMBEDDINGS_MODEL", "") or "nomic-embed-text").strip()
-    if not base or not embed_model:
-        return False, "missing OLLAMA_BASE_URL or OLLAMA_EMBEDDINGS_MODEL"
-
-    def _ok_embedding_list(obj: object) -> bool:
-        return isinstance(obj, list) and len(obj) >= 8
-
-    try:
-        r = requests.post(
-            f"{base}/api/embeddings",
-            json={"model": embed_model, "prompt": "ping"},
-            timeout=45,
-        )
-        if r.status_code == 200:
-            emb = r.json().get("embedding")
-            if _ok_embedding_list(emb):
-                return True, ""
-        # Many Ollama builds return 404 on /api/embeddings but serve /api/embed.
-        if r.status_code != 200:
-            _integration_log(
-                "ollama_embedding_smoke: /api/embeddings HTTP %s for model=%r — trying /api/embed",
-                r.status_code,
-                embed_model,
-            )
-    except requests.exceptions.RequestException as e:
-        _integration_log(
-            "ollama_embedding_smoke: /api/embeddings request error (%s) — trying /api/embed",
-            e,
-        )
-
-    embed_candidates = [embed_model]
-    if ":" not in embed_model:
-        embed_candidates.append(f"{embed_model}:latest")
-
-    last_embed_err = ""
-    for m in embed_candidates:
-        try:
-            r2 = requests.post(
-                f"{base}/api/embed",
-                json={"model": m, "input": "ping"},
-                timeout=45,
-            )
-            if r2.status_code != 200:
-                last_embed_err = (
-                    f"HTTP {r2.status_code} /api/embed model={m!r} body={r2.text[:200]!r}"
-                )
-                continue
-            data = r2.json()
-            vecs = data.get("embeddings")
-            if isinstance(vecs, list) and vecs and isinstance(vecs[0], list):
-                if _ok_embedding_list(vecs[0]):
-                    return True, ""
-            emb_one = data.get("embedding")
-            if _ok_embedding_list(emb_one):
-                return True, ""
-            last_embed_err = f"bad /api/embed payload for {m!r}"
-        except requests.exceptions.RequestException as e:
-            last_embed_err = str(e)
-    return False, last_embed_err or "Ollama /api/embed failed for all model name candidates"
-
-
 def _rag_embedding_smoke(cfg: Config) -> tuple[bool, str]:
     """
-    Match :func:`compute_submission_embedding` gating: SentenceTransformers, OpenAI, or Ollama.
+    Match :func:`compute_submission_embedding` gating: SentenceTransformers or OpenAI.
     """
     backend = (getattr(cfg, "RAG_EMBEDDING_BACKEND", "") or "").strip().lower()
     if backend == "sentence_transformers":
@@ -454,104 +348,7 @@ def _rag_embedding_smoke(cfg: Config) -> tuple[bool, str]:
         if hit:
             return True, ""
         return False, "OpenAI embeddings.create failed (check key, model, network)"
-    return _ollama_embedding_smoke(cfg)
-
-
-def _ollama_model_compact_key(name: str) -> str:
-    """Normalize model id for fuzzy match (Ollama tags differ in casing / punctuation)."""
-    base = (name or "").strip().split(":", 1)[0]
-    return re.sub(r"[^a-z0-9]+", "", base.lower())
-
-
-def _ollama_show_succeeds(base: str, model: str, *, timeout: float = 25.0) -> bool:
-    ok, _ = _ollama_show_detail(base, model, timeout=timeout)
-    return ok
-
-
-def _ollama_show_detail(
-    base: str, model: str, *, timeout: float = 25.0
-) -> tuple[bool, str]:
-    try:
-        r = requests.post(
-            f"{base}/api/show",
-            json={"model": (model or "").strip()},
-            timeout=timeout,
-        )
-        if r.status_code == 200:
-            return True, ""
-        return False, f"HTTP {r.status_code} body={r.text[:400]!r}"
-    except requests.RequestException as e:
-        return False, str(e)
-
-
-def _resolve_ollama_grading_model_name(
-    base: str, preferred: str, local_models: set[str]
-) -> tuple[str | None, str]:
-    """
-    Return ``(ollama_model_name, note)`` for ``/api/chat`` — Ollama only accepts names that
-    pass ``POST /api/show``. ``preferred`` may differ from the tag shown in ``ollama list``
-    (e.g. Meta download name vs Modelfile name).
-    """
-    pref = (preferred or "").strip()
-    if not pref:
-        return None, "empty OLLAMA_MODEL / MULTIMODAL_INTEGRATION_OLLAMA_MODEL"
-
-    candidates: list[str] = []
-    for p in (pref, pref.lower()):
-        if not p:
-            continue
-        candidates.append(p)
-        if ":" not in p:
-            candidates.append(f"{p}:latest")
-
-    seen: set[str] = set()
-    ordered: list[str] = []
-    for c in candidates:
-        if c and c not in seen:
-            seen.add(c)
-            ordered.append(c)
-
-    last_err = ""
-    _to = 25.0
-    for c in ordered:
-        ok, err = _ollama_show_detail(base, c, timeout=_to)
-        if ok:
-            return c, "" if c == pref else f"resolved {pref!r} → {c!r} via /api/show"
-        last_err = err or last_err
-
-    pref_key = _ollama_model_compact_key(pref)
-    tag_keys = [(tag, _ollama_model_compact_key(tag)) for tag in sorted(local_models)]
-    for tag, tk in tag_keys:
-        if tk and tk == pref_key:
-            ok, err = _ollama_show_detail(base, tag, timeout=_to)
-            if ok:
-                return (
-                    tag,
-                    f"resolved {pref!r} → {tag!r} (normalized id == + /api/show)",
-                )
-            last_err = err or last_err
-    for tag, tk in tag_keys:
-        if not tk or tk == pref_key:
-            continue
-        if pref_key in tk or tk in pref_key:
-            ok, err = _ollama_show_detail(base, tag, timeout=_to)
-            if ok:
-                return (
-                    tag,
-                    f"resolved {pref!r} → {tag!r} (normalized id fuzzy + /api/show)",
-                )
-            last_err = err or last_err
-
-    preview = ", ".join(sorted(local_models)[:12])
-    more = " …" if len(local_models) > 12 else ""
-    err_tail = f" Last /api/show error: {last_err}" if last_err else ""
-    return (
-        None,
-        f"GRADING_MODEL_NOT_IN_OLLAMA: {pref!r} not registered (see `ollama list`).{err_tail} "
-        f"Tags sample: [{preview}]{more}. "
-        f"Fix: `ollama pull <name>` or Modelfile `FROM /path/to.gguf` then `ollama create`. "
-        f"Or set MULTIMODAL_INTEGRATION_OLLAMA_MODEL to the exact tag.",
-    )
+    return False, f"unsupported RAG_EMBEDDING_BACKEND={backend!r}"
 
 
 def _configure_for_integration_test(cfg: Config) -> None:
@@ -561,49 +358,36 @@ def _configure_for_integration_test(cfg: Config) -> None:
       1. **Notebook cell-order** — ipynb files are parsed directly by
          ``build_notebook_qa_chunks``, preserving cell order for accurate
          question/answer pairing.  No LLM required.
-      2. **LLM QA segmentation** — when ``MULTIMODAL_OLLAMA_QA_SEGMENT=on``, non-notebook
-         files use the **structure LLM** (Hugging Face or Ollama per
-         ``MULTIMODAL_INTEGRATION_LLM_BACKEND``).
+      2. **LLM QA segmentation** — when ``MULTIMODAL_ASSIGNMENT_PARSING`` or
+         ``MULTIMODAL_LLM_QA_SEGMENT`` is on, non-notebook files use the **structure LLM**
+         (Hugging Face or OpenAI per ``MULTIMODAL_INTEGRATION_LLM_BACKEND``).
       3. **Structured heuristic** — deterministic PDF reflow + journal-style boundaries when
          the above is off or fails/timeouts.
 
     **Grading** (default ``openai`` when ``OPENAI_API_KEY`` is set, else ``huggingface``):
-      **OpenAI** path uses ``OPENAI_MULTIMODAL_GRADING_MODEL`` / ``MULTIMODAL_INTEGRATION_OPENAI_GRADING_MODEL``.
+      **OpenAI** path uses ``OPENAI_MULTIMODAL_GRADING_MODEL`` /
+      ``MULTIMODAL_INTEGRATION_OPENAI_GRADING_MODEL``.
       **Hugging Face** uses ``Llama-4-Maverick-17B-128E-Instruct:fp8`` (override with
-      ``MULTIMODAL_INTEGRATION_HF_MODEL_ID``). Set ``MULTIMODAL_INTEGRATION_LLM_BACKEND=ollama``
-      to use ``MULTIMODAL_INTEGRATION_OLLAMA_MODEL`` against ``ollama list`` instead.
+      ``MULTIMODAL_INTEGRATION_HF_MODEL_ID``).
 
     **RAG embeddings**: default **SentenceTransformers** ``all-MiniLM-L6-v2`` (override with
-    ``MULTIMODAL_INTEGRATION_SENTENCE_TRANSFORMERS_MODEL``). Set
-    ``MULTIMODAL_INTEGRATION_RAG_EMBEDDING_BACKEND=ollama`` to smoke Ollama
-    ``MULTIMODAL_INTEGRATION_EMBEDDINGS_MODEL`` instead. Fallback order:
-    ``MULTIMODAL_INTEGRATION_RAG_EMBED_ORDER`` (default ``ollama_only``).
+    ``MULTIMODAL_INTEGRATION_SENTENCE_TRANSFORMERS_MODEL``). Fallback order:
+    ``MULTIMODAL_INTEGRATION_RAG_EMBED_ORDER`` (default ``auto``).
 
     Default **2** multimodal samples per chunk (``MULTIMODAL_LOCAL_TEST_GRADING_SAMPLES``).
-    ``MULTIMODAL_OLLAMA_QA_SEGMENT`` is **off** for deterministic ipynb runs.
 
     All overrides are **unconditional** so that stale values from parent
     ``.env`` files or host env vars never leak through.
     """
-    # --- Chunking: skip Ollama QA segmentation for faster, deterministic ipynb tests ---
-    os.environ["MULTIMODAL_OLLAMA_QA_SEGMENT"] = "off"
-
-    # --- Memory: one model loaded at a time (no swap on 24 GB) ---
-    # keep_alive="5m" lets consecutive samples reuse the loaded model across reps.
-    os.environ["OLLAMA_MAX_LOADED_MODELS"] = "1"
-    cfg.OLLAMA_KEEP_ALIVE = "5m"
-
-    cfg.OLLAMA_BASE_URL = cfg.OLLAMA_BASE_URL or "http://localhost:11434"
-    cfg.INTERNAL_OLLAMA_URL = cfg.INTERNAL_OLLAMA_URL or cfg.OLLAMA_BASE_URL
-
-    # --- Chat / structure LLM: OpenAI (default when OPENAI_API_KEY) | Hugging Face | Ollama ---
     raw_backend = os.getenv("MULTIMODAL_INTEGRATION_LLM_BACKEND", "").strip().lower()
     if not raw_backend:
         raw_backend = (
             "openai" if os.getenv("OPENAI_API_KEY", "").strip() else "huggingface"
         )
     normalized = {"hf": "huggingface"}.get(raw_backend, raw_backend)
-    cfg.MULTIMODAL_LLM_BACKEND = normalized
+    cfg.MULTIMODAL_LLM_BACKEND = (
+        normalized if normalized in ("huggingface", "openai") else "openai"
+    )
 
     if multimodal_llm_backend_uses_huggingface(cfg):
         cfg.HUGGINGFACE_GRADING_MODEL_ID = (
@@ -619,10 +403,6 @@ def _configure_for_integration_test(cfg: Config) -> None:
         if tok:
             cfg.HUGGINGFACE_HUB_TOKEN = tok
             cfg.HF_TOKEN = tok
-        cfg.OLLAMA_MODEL = (
-            os.getenv("MULTIMODAL_INTEGRATION_OLLAMA_AUX_MODEL", "llama3.2:3b").strip()
-            or "llama3.2:3b"
-        )
         cfg.OPENAI_API_KEY = ""
     elif multimodal_llm_backend_uses_openai(cfg):
         cfg.OPENAI_API_KEY = os.getenv("OPENAI_API_KEY", "").strip()
@@ -631,41 +411,26 @@ def _configure_for_integration_test(cfg: Config) -> None:
             cfg.OPENAI_MULTIMODAL_GRADING_MODEL = gmod
         fr = os.getenv("MULTIMODAL_INTEGRATION_OPENAI_FRONTLOAD", "").strip().lower()
         cfg.MULTIMODAL_OPENAI_TRIO_RAG_FRONTLOAD = fr or "auto"
-        cfg.OLLAMA_MODEL = (
-            os.getenv("MULTIMODAL_INTEGRATION_OLLAMA_AUX_MODEL", "llama3.2:3b").strip()
-            or "llama3.2:3b"
-        )
     else:
-        cfg.OLLAMA_MODEL = (
-            os.getenv(
-                "MULTIMODAL_INTEGRATION_OLLAMA_MODEL",
-                "Llama-4-Maverick-17B-128E-Instruct:fp8",
-            ).strip()
-        )
-        cfg.OPENAI_API_KEY = ""
+        cfg.MULTIMODAL_LLM_BACKEND = "openai"
+        cfg.OPENAI_API_KEY = os.getenv("OPENAI_API_KEY", "").strip()
 
     cfg.GRADING_MODEL_2 = ""
     cfg.GRADING_MODEL_3 = ""
-
-    cfg.OLLAMA_CHAT_TIMEOUT_SEC = max(
-        int(getattr(cfg, "OLLAMA_CHAT_TIMEOUT_SEC", 300)),
-        600,
-    )
 
     cfg.MULTIMODAL_SAMPLES_PER_MODEL = int(
         os.getenv("MULTIMODAL_LOCAL_TEST_GRADING_SAMPLES", "2") or 2
     )
     cfg.GRADING_SAMPLE_TEMPERATURE = 0.3
 
-    # RAG vectors (not the chat LLM): SentenceTransformers by default; Ollama optional fallback.
-    cfg.RAG_EMBEDDING_BACKEND = (
-        os.getenv(
-            "MULTIMODAL_INTEGRATION_RAG_EMBEDDING_BACKEND",
-            "sentence_transformers",
-        )
+    _rag_int = (
+        os.getenv("MULTIMODAL_INTEGRATION_RAG_EMBEDDING_BACKEND", "sentence_transformers")
         .strip()
         .lower()
         or "sentence_transformers"
+    )
+    cfg.RAG_EMBEDDING_BACKEND = (
+        _rag_int if _rag_int in ("sentence_transformers", "openai") else "sentence_transformers"
     )
     cfg.SENTENCE_TRANSFORMERS_MODEL = (
         os.getenv(
@@ -675,16 +440,9 @@ def _configure_for_integration_test(cfg: Config) -> None:
         .strip()
         or "all-MiniLM-L6-v2"
     )
-    cfg.OLLAMA_EMBEDDINGS_MODEL = (
-        os.getenv("MULTIMODAL_INTEGRATION_EMBEDDINGS_MODEL", "nomic-embed-text").strip()
-        or "nomic-embed-text"
-    )
-    cfg.RAG_EMBED_ORDER = (
-        os.getenv("MULTIMODAL_INTEGRATION_RAG_EMBED_ORDER", "ollama_only").strip().lower()
-        or "ollama_only"
-    )
+    _ord = os.getenv("MULTIMODAL_INTEGRATION_RAG_EMBED_ORDER", "auto").strip().lower() or "auto"
+    cfg.RAG_EMBED_ORDER = _ord if _ord in ("auto", "openai_first", "openai_only") else "auto"
 
-    # Optional LLM trio labeling: off unless MULTIMODAL_INTEGRATION_LLM_TRIO_CHUNKING=1.
     cfg.MULTIMODAL_LLM_TRIO_CHUNKING = (
         os.getenv("MULTIMODAL_INTEGRATION_LLM_TRIO_CHUNKING", "").strip().lower()
         in ("1", "true", "yes")
@@ -696,7 +454,9 @@ def _configure_for_integration_test(cfg: Config) -> None:
         elif multimodal_llm_backend_uses_huggingface(cfg):
             cfg.MULTIMODAL_TRIO_CHUNKING_MODEL = ""
         else:
-            cfg.MULTIMODAL_TRIO_CHUNKING_MODEL = cfg.OLLAMA_MODEL
+            cfg.MULTIMODAL_TRIO_CHUNKING_MODEL = (
+                (cfg.OPENAI_MODEL or "gpt-4o-mini").strip() or "gpt-4o-mini"
+            )
 
 
 # ---------------------------------------------------------------------------
@@ -1833,15 +1593,12 @@ class LocalAssignmentGradingTests(unittest.TestCase):
     """Grade every assignment in ``assignments_to_grade/`` using real LLM calls.
 
     If this class is skipped, run ``pytest -rs tests/test_multimodal_pipeline.py`` to print
-    full skip reasons. Codes include ``NO_OLLAMA``, ``NO_RAG_EMBED``, ``NO_HF_TOKEN``,
-    ``NO_HF_DEPS``, ``HF_HUB_MODEL_CHECK_FAILED``, ``GRADING_MODEL_NOT_IN_OLLAMA`` (Ollama
-    mode only), ``CHAT_SMOKE_FAIL``.
+    full skip reasons. Codes include ``NO_RAG_EMBED``, ``NO_HF_TOKEN``,
+    ``NO_HF_DEPS``, ``HF_HUB_MODEL_CHECK_FAILED``.
 
-    **Default:** ``MULTIMODAL_INTEGRATION_LLM_BACKEND=huggingface`` — grading uses
+    **Default:** ``MULTIMODAL_INTEGRATION_LLM_BACKEND=huggingface`` — structure uses
     ``transformers`` + ``Llama-4-Maverick-17B-128E-Instruct:fp8`` (HF repo); **RAG** uses
-    **SentenceTransformers** RAG (or Ollama if ``MULTIMODAL_INTEGRATION_RAG_EMBEDDING_BACKEND=ollama``).
-    Set ``MULTIMODAL_INTEGRATION_LLM_BACKEND=ollama`` for an
-    all-Ollama grader (``MULTIMODAL_INTEGRATION_OLLAMA_MODEL``).
+    **SentenceTransformers** by default. Per-chunk grading uses **OpenAI** when configured.
 
     Use ``pytest --log-cli-level=WARNING`` to see phased ``[integration]`` logs before each
     gate or skip.
@@ -1911,16 +1668,14 @@ class LocalAssignmentGradingTests(unittest.TestCase):
         cls.cfg = Config()
         _configure_for_integration_test(cls.cfg)
         _integration_log(
-            "phase=config done: MULTIMODAL_LLM_BACKEND=%r chat_grading=%r OLLAMA_BASE=%r "
-            "RAG_EMBEDDING_BACKEND=%r SENTENCE_TRANSFORMERS_MODEL=%r OLLAMA_EMBEDDINGS_MODEL=%r",
+            "phase=config done: MULTIMODAL_LLM_BACKEND=%r structure_or_grading_model=%r "
+            "RAG_EMBEDDING_BACKEND=%r SENTENCE_TRANSFORMERS_MODEL=%r",
             getattr(cls.cfg, "MULTIMODAL_LLM_BACKEND", ""),
             huggingface_grading_model_id(cls.cfg)
             if multimodal_llm_backend_uses_huggingface(cls.cfg)
-            else (cls.cfg.OLLAMA_MODEL or ""),
-            (cls.cfg.INTERNAL_OLLAMA_URL or cls.cfg.OLLAMA_BASE_URL or "").strip(),
+            else (cls.cfg.OPENAI_MULTIMODAL_GRADING_MODEL or ""),
             getattr(cls.cfg, "RAG_EMBEDDING_BACKEND", ""),
             getattr(cls.cfg, "SENTENCE_TRANSFORMERS_MODEL", ""),
-            getattr(cls.cfg, "OLLAMA_EMBEDDINGS_MODEL", "") or "nomic-embed-text",
         )
 
         _integration_log(
@@ -1932,52 +1687,22 @@ class LocalAssignmentGradingTests(unittest.TestCase):
             msg = (
                 "[integration] NO_RAG_EMBED: smoke failed (RAG_EMBEDDING_BACKEND="
                 f"{getattr(cls.cfg, 'RAG_EMBEDDING_BACKEND', '')!r}): {emb_detail}. "
-                "Install sentence-transformers for ST, set RAG_EMBEDDING_BACKEND=openai with "
-                "OPENAI_API_KEY, or set RAG_EMBEDDING_BACKEND=ollama and ensure Ollama /api/embed "
-                "works for OLLAMA_EMBEDDINGS_MODEL."
+                "Install sentence-transformers for ST, or set RAG_EMBEDDING_BACKEND=openai with "
+                "OPENAI_API_KEY."
             )
             _integration_log("SKIP: %s", msg)
             raise unittest.SkipTest(msg)
         _integration_log("phase=rag_embeddings: OK")
 
-        _rag_be = (getattr(cls.cfg, "RAG_EMBEDDING_BACKEND", "") or "").strip().lower()
-        skip_ollama_ping = (
-            multimodal_llm_backend_uses_openai(cls.cfg) and _rag_be != "ollama"
-        ) or (
-            multimodal_llm_backend_uses_huggingface(cls.cfg)
-            and ok_emb
-            and _rag_be in ("sentence_transformers", "openai")
-        )
-        if skip_ollama_ping:
-            _integration_log(
-                "phase=ollama_daemon: skipped (HF grading + RAG backend=%r)", _rag_be
-            )
-        else:
-            _integration_log("phase=ollama_daemon: GET /api/tags (reachability) …")
-            if not _ollama_reachable(cls.cfg):
-                msg = (
-                    "[integration] NO_OLLAMA: daemon not HTTP 200 at "
-                    f"{(cls.cfg.INTERNAL_OLLAMA_URL or cls.cfg.OLLAMA_BASE_URL or '').strip()!r}. "
-                    "Start `ollama serve` or fix OLLAMA_BASE_URL / INTERNAL_OLLAMA_URL."
-                )
-                _integration_log("SKIP: %s", msg)
-                raise unittest.SkipTest(msg)
-
-        base = (cls.cfg.INTERNAL_OLLAMA_URL or cls.cfg.OLLAMA_BASE_URL or "").strip().rstrip(
-            "/"
-        )
-
         if multimodal_llm_backend_uses_huggingface(cls.cfg):
-            _integration_log(
-                "phase=hf_grading: skipping Ollama /api/show grader check (chat via transformers)"
-            )
+            _integration_log("phase=hf_grading: transformers preflight …")
             ok_hf, hf_detail = _hf_integration_preflight(cls.cfg)
             if not ok_hf:
                 msg = "[integration] " + hf_detail
                 _integration_log("SKIP: %s", hf_detail)
                 raise unittest.SkipTest(msg)
         elif multimodal_llm_backend_uses_openai(cls.cfg):
-            _integration_log("phase=openai_grading: OpenAI API (skip HF + Ollama grader checks)")
+            _integration_log("phase=openai_grading: OpenAI API check")
             if not (cls.cfg.OPENAI_API_KEY or "").strip():
                 msg = (
                     "[integration] MULTIMODAL_LLM_BACKEND=openai requires OPENAI_API_KEY "
@@ -1986,54 +1711,9 @@ class LocalAssignmentGradingTests(unittest.TestCase):
                 _integration_log("SKIP: %s", msg)
                 raise unittest.SkipTest(msg)
         else:
-            _integration_log(
-                "phase=ollama_grader: resolve MULTIMODAL_INTEGRATION_OLLAMA_MODEL via /api/show …"
+            raise unittest.SkipTest(
+                "MULTIMODAL_LLM_BACKEND must be huggingface or openai for integration tests."
             )
-            preferred = (cls.cfg.OLLAMA_MODEL or "").strip()
-            try:
-                tags_resp = requests.get(f"{base}/api/tags", timeout=8).json()
-                local_models = {m["name"] for m in tags_resp.get("models", [])}
-            except (requests.RequestException, KeyError, ValueError, TypeError) as e:
-                msg = f"Could not read Ollama /api/tags for grading model check: {e}"
-                _integration_log("SKIP: %s", msg)
-                raise unittest.SkipTest(msg) from e
-
-            resolved, resolve_note = _resolve_ollama_grading_model_name(
-                base, preferred, local_models
-            )
-            if not resolved:
-                msg = "[integration] " + resolve_note
-                _integration_log("SKIP: %s", resolve_note)
-                raise unittest.SkipTest(msg)
-            if resolve_note:
-                _integration_log("%s", resolve_note)
-            cls.cfg.OLLAMA_MODEL = resolved
-            _integration_log("phase=ollama_grader: resolved OLLAMA_MODEL=%r", resolved)
-
-        if os.getenv("MULTIMODAL_INTEGRATION_CHAT_SMOKE", "").strip().lower() in (
-            "1",
-            "true",
-            "yes",
-        ):
-            if multimodal_llm_backend_uses_openai(cls.cfg):
-                _integration_log(
-                    "phase=ollama_chat_smoke: skipped (OpenAI multimodal grader; no Ollama smoke)"
-                )
-            else:
-                if multimodal_llm_backend_uses_huggingface(cls.cfg):
-                    _integration_log(
-                        "phase=ollama_chat_smoke: MULTIMODAL_INTEGRATION_CHAT_SMOKE on — "
-                        "smoking auxiliary OLLAMA_MODEL=%r (not the HF grader)",
-                        (cls.cfg.OLLAMA_MODEL or "").strip(),
-                    )
-                ok_chat, chat_detail = _ollama_chat_smoke(cls.cfg)
-                if not ok_chat:
-                    msg = (
-                        f"[integration] CHAT_SMOKE_FAIL: /api/chat on OLLAMA_MODEL failed: {chat_detail}. "
-                        "Unset MULTIMODAL_INTEGRATION_CHAT_SMOKE to skip this check."
-                    )
-                    _integration_log("SKIP: %s", msg)
-                    raise unittest.SkipTest(msg)
 
         OUTPUT_DIR.mkdir(parents=True, exist_ok=True)
         RAG_DIR.mkdir(parents=True, exist_ok=True)
@@ -2316,7 +1996,7 @@ class LocalAssignmentGradingTests(unittest.TestCase):
                 ).strip().lower() in ("1", "true", "yes")
                 if degraded_llm:
                     _log.warning(
-                        "  [%s] Degraded run: no criterion justifications/evidence (Ollama "
+                        "  [%s] Degraded run: no criterion justifications/evidence (LLM "
                         "timeouts/500/invalid JSON). Set MULTIMODAL_INTEGRATION_STRICT_QUALITY=1 "
                         "to fail on empty LLM text when models are healthy.",
                         stem,
@@ -2494,14 +2174,12 @@ class MultimodalHuggingFaceRoutingTests(unittest.TestCase):
         self.assertEqual(len(vec), 16)
         self.assertTrue(src.startswith("openai:"))
 
-    def test_build_multimodal_grading_clients_openai_only_ignores_ollama_backend(self) -> None:
-        """Multimodal per-chunk grading uses OpenAI even if MULTIMODAL_LLM_BACKEND was ollama."""
+    def test_build_multimodal_grading_clients_openai_only_ignores_structure_backend(self) -> None:
+        """Multimodal per-chunk grading uses OpenAI regardless of structure MULTIMODAL_LLM_BACKEND."""
         from app.grading.llm_router import build_multimodal_grading_clients
 
         cfg = Config()
-        cfg.MULTIMODAL_LLM_BACKEND = "ollama"
-        cfg.OLLAMA_BASE_URL = "http://127.0.0.1:11434"
-        cfg.OLLAMA_MODEL = "llama3.2:3b"
+        cfg.MULTIMODAL_LLM_BACKEND = "huggingface"
         cfg.OPENAI_API_KEY = "sk-test"
         cfg.OPENAI_MULTIMODAL_GRADING_MODEL = "gpt-5.4-nano"
         b = [lbl for _, lbl in build_multimodal_grading_clients(cfg)]
@@ -2547,7 +2225,7 @@ class MultimodalHuggingFaceRoutingTests(unittest.TestCase):
     def test_refine_trio_invokes_structure_client(self) -> None:
         from unittest.mock import MagicMock, patch
 
-        from app.grading.multimodal.rag_embeddings import refine_chunks_trio_with_ollama
+        from app.grading.multimodal.rag_embeddings import refine_chunks_trio_with_structure_llm
 
         mock_client = MagicMock()
         mock_client.chat_json.return_value = {
@@ -2571,7 +2249,7 @@ class MultimodalHuggingFaceRoutingTests(unittest.TestCase):
             "app.grading.multimodal.rag_embeddings._multimodal_structure_chat_client",
             return_value=(mock_client, "meta-llama/Llama-4-Maverick-17B-128E-Instruct-FP8"),
         ):
-            refine_chunks_trio_with_ollama([ch], cfg)
+            refine_chunks_trio_with_structure_llm([ch], cfg)
         mock_client.chat_json.assert_called_once()
         trio = (ch.evidence or {}).get("trio") or {}
         self.assertEqual(trio.get("question"), "Q")

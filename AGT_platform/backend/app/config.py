@@ -137,18 +137,6 @@ class Config:
     GOOGLE_CLIENT_ID = _env_str("GOOGLE_CLIENT_ID")
     GOOGLE_CLIENT_SECRET = _env_str("GOOGLE_CLIENT_SECRET")
 
-    # GPU / private inference (workers only in split prod; never expose Ollama publicly).
-    OLLAMA_BASE_URL = _env_str("OLLAMA_BASE_URL")
-    # Name as shown by ``ollama list`` on the host that serves OLLAMA_BASE_URL. Multimodal
-    # grading calls Ollama HTTP only; Meta ``llama-model download`` checkpoints under
-    # ``~/.llama/checkpoints`` are not read until you import or otherwise register the same
-    # weights with Ollama (see backend ReadMe.md, “Ollama vs Meta llama-models”).
-    OLLAMA_MODEL = _env_str("OLLAMA_MODEL")
-    # Optional override when Ollama is on a different private host than default compose DNS.
-    INTERNAL_OLLAMA_URL = _env_str("INTERNAL_OLLAMA_URL").strip() or _env_str(
-        "OLLAMA_BASE_URL"
-    ).strip()
-
     OPENAI_API_KEY = _env_str("OPENAI_API_KEY")
     # Anthropic (Claude) for optional assignment parsing / QA segmentation (see ``rag_embeddings``).
     ANTHROPIC_API_KEY = _env_str("ANTHROPIC_API_KEY")
@@ -201,7 +189,7 @@ class Config:
     ESCALATE_TO_OPENAI = _env_bool("ESCALATE_TO_OPENAI")
 
     # Multi-LLM grading: two additional models grade alongside the primary.
-    # Format: "ollama:<model>" or "openai:<model>". Empty = disabled (single-model flow).
+    # Format: ``openai:<model>`` or a bare OpenAI model id. Empty = disabled (single-model flow).
     GRADING_MODEL_2 = _env_str("GRADING_MODEL_2").strip()
     GRADING_MODEL_3 = _env_str("GRADING_MODEL_3").strip()
 
@@ -229,13 +217,13 @@ class Config:
         1,
         min(_env_int("GRADING_SAMPLES_PER_MODEL", default=3), 16),
     )
-    # Temperature for grade() when entropy sampling is active (k>1). Ollama/OpenAI both support.
+    # Temperature for grade() when entropy sampling is active (k>1).
     GRADING_SAMPLE_TEMPERATURE = max(
         0.0,
         min(_env_float("GRADING_SAMPLE_TEMPERATURE", default=0.3), 2.0),
     )
     # Multimodal chunk grading only: k stochastic chat_json calls per model in
-    # build_multimodal_grading_clients() (Ollama or Hugging Face primary when GRADING_MODEL_2/3 unset).
+    # build_multimodal_grading_clients() (Hugging Face primary when GRADING_MODEL_2/3 unset).
     # Separate from GRADING_SAMPLES_PER_MODEL so legacy entropy pipelines are unchanged.
     MULTIMODAL_SAMPLES_PER_MODEL = max(
         1,
@@ -300,16 +288,18 @@ class Config:
     )
     # When true, each chunk is sent to the **structure** LLM once to fill ``evidence["trio"]``
     # (question / student_response / instructor_context) before answer-key alignment. Uses
-    # Claude (Anthropic) when configured, else OpenAI — not Ollama.
+    # Claude (Anthropic) when configured, else OpenAI.
     MULTIMODAL_LLM_TRIO_CHUNKING = _env_bool("MULTIMODAL_LLM_TRIO_CHUNKING")
     MULTIMODAL_TRIO_CHUNKING_MODEL = _env_str("MULTIMODAL_TRIO_CHUNKING_MODEL").strip()
-    # ollama | huggingface | hf | openai — legacy env name; multimodal **per-chunk grading** always
-    # uses OpenAI (``OPENAI_MULTIMODAL_GRADING_MODEL``) when ``OPENAI_API_KEY`` is set. Structure
-    # (parsing / trio chunking) uses Claude (Anthropic) then OpenAI — never Ollama in this pipeline.
+    # huggingface | hf | openai — multimodal **per-chunk grading** uses OpenAI
+    # (``OPENAI_MULTIMODAL_GRADING_MODEL``) when ``OPENAI_API_KEY`` is set. Structure
+    # (parsing / trio chunking) uses Claude (Anthropic) then OpenAI.
     _mm_lb = _env_str("MULTIMODAL_LLM_BACKEND").strip().lower()
     if _mm_lb:
         raw = {"hf": "huggingface"}.get(_mm_lb, _mm_lb)
-        MULTIMODAL_LLM_BACKEND = "openai" if raw == "ollama" else raw
+        MULTIMODAL_LLM_BACKEND = (
+            raw if raw in ("huggingface", "openai") else "openai"
+        )
     else:
         MULTIMODAL_LLM_BACKEND = "openai"
     # OpenAI chat model for multimodal per-chunk grading when ``MULTIMODAL_LLM_BACKEND=openai``.
@@ -340,38 +330,32 @@ class Config:
         "GRADING_ENTROPY_REVIEW_NATURAL_H", default=1.0
     )
 
-    # Ollama /api/chat: request JSON-shaped replies (reduces parse errors). Set to "false" to disable.
-    OLLAMA_CHAT_JSON_FORMAT = _env_str("OLLAMA_CHAT_JSON_FORMAT").strip().lower() != "false"
-    # Per-request timeout for Ollama /api/chat (seconds). Lower on laptops; GPU hosts may use 300+.
-    OLLAMA_CHAT_TIMEOUT_SEC = max(
-        30,
-        min(_env_int("OLLAMA_CHAT_TIMEOUT_SEC", default=300), 3600),
-    )
-
     # RAG / local embedding export (submission text → vector).
-    # RAG_EMBEDDING_BACKEND: sentence_transformers (default) | openai | ollama
+    # RAG_EMBEDDING_BACKEND: sentence_transformers (default) | openai
     # — multimodal RAG uses :func:`app.grading.rag_embeddings.compute_submission_embedding`.
     # ``openai`` uses ``OPENAI_TRIO_RAG_EMBEDDING_MODEL`` (default text-embedding-3-small);
     # requires OPENAI_API_KEY (falls back to sentence_transformers then hash on failure).
-    _rag_be = _env_str("RAG_EMBEDDING_BACKEND").strip().lower()
-    RAG_EMBEDDING_BACKEND = _rag_be or "sentence_transformers"
+    _rag_be_raw = _env_str("RAG_EMBEDDING_BACKEND").strip().lower()
+    RAG_EMBEDDING_BACKEND = (
+        _rag_be_raw
+        if _rag_be_raw in ("sentence_transformers", "openai")
+        else "sentence_transformers"
+    )
     # Hugging Face id for ``sentence_transformers.SentenceTransformer`` when backend is ST.
     SENTENCE_TRANSFORMERS_MODEL = (
         _env_str("SENTENCE_TRANSFORMERS_MODEL").strip() or "all-MiniLM-L6-v2"
     )
-    # Ollama embed model when ``RAG_EMBEDDING_BACKEND=ollama`` (or ST load fails and order falls back).
-    OLLAMA_EMBEDDINGS_MODEL = (
-        _env_str("OLLAMA_EMBEDDINGS_MODEL").strip() or "nomic-embed-text"
-    )
     RAG_EMBED_MAX_CHARS = _env_int("RAG_EMBED_MAX_CHARS", default=24000)
-    # auto | openai_first | ollama_first | openai_only | ollama_only
-    # auto: try OpenAI before Ollama when OPENAI_API_KEY is set (avoids Ollama /api/embed 404 noise).
-    RAG_EMBED_ORDER = _env_str("RAG_EMBED_ORDER").strip().lower() or "auto"
+    # auto | openai_first | openai_only — when ``auto``, try OpenAI first if OPENAI_API_KEY is set.
+    _rag_order = _env_str("RAG_EMBED_ORDER").strip().lower() or "auto"
+    RAG_EMBED_ORDER = (
+        _rag_order if _rag_order in ("auto", "openai_first", "openai_only") else "auto"
+    )
     # auto | on | off — auto enables OpenAI notebook digest when OPENAI_API_KEY is set.
     NOTEBOOK_OPENAI_DIGEST = _env_str("NOTEBOOK_OPENAI_DIGEST").strip().lower() or "auto"
 
     # Multimodal: one OpenAI chat (trio JSON) + OpenAI embeddings for all units, then
-    # local Maverick/Ollama for per-chunk grading only. Requires OPENAI_API_KEY.
+    # local Hugging Face or OpenAI for structure; per-chunk grading uses OpenAI. Requires OPENAI_API_KEY.
     # Values: off | false — disabled. on | true — forced on (still needs API key).
     # Empty or ``auto`` (default): on when OPENAI_API_KEY is set (chunk+trio+RAG via OpenAI).
     MULTIMODAL_OPENAI_TRIO_RAG_FRONTLOAD = (

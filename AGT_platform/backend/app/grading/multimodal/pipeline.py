@@ -18,7 +18,7 @@ runs one or more chat calls (overlapping windows when the submission is long) wi
 trio JSON plus OpenAI **Embeddings** for each unit (``OPENAI_TRIO_RAG_EMBEDDING_MODEL``), and
 trio relabeling via ``MULTIMODAL_LLM_TRIO_CHUNKING`` is skipped. Otherwise optional
 :func:`app.grading.multimodal.rag_embeddings.refine_chunks_trio_with_structure_llm` uses **Claude**
-(Anthropic) when configured, else **OpenAI**, for trio fields—**Ollama is not used**. Per-chunk
+(Anthropic) when configured, else **OpenAI**, for trio fields. Per-chunk
 **grading** uses **OpenAI only** (``OPENAI_MULTIMODAL_GRADING_MODEL`` / ``OPENAI_API_KEY``).
 RAG embeddings otherwise use
 ``RAG_EMBEDDING_BACKEND`` (``sentence_transformers`` default, or ``openai`` for the same OpenAI
@@ -835,7 +835,7 @@ def create_multimodal_pipeline_from_app_config(
 
     Uses :func:`~app.grading.llm_router.build_multimodal_grading_clients` (**OpenAI only** for
     per-chunk grading via ``OPENAI_MULTIMODAL_GRADING_MODEL``), plus optional
-    ``GRADING_MODEL_2`` / ``GRADING_MODEL_3`` (``openai:`` specs only; Ollama is ignored),
+    ``GRADING_MODEL_2`` / ``GRADING_MODEL_3`` (``openai:`` specs only),
     ``MULTIMODAL_SAMPLES_PER_MODEL`` and ``GRADING_SAMPLE_TEMPERATURE`` for stochastic
     multi-sample grading; semantic entropy is computed downstream from cluster counts over those samples.
     """

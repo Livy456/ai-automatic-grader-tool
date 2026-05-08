@@ -42,7 +42,7 @@ python -m alembic upgrade head
 
 Review generated SQL carefully; autogenerate is not always complete.
 
-## Ollama vs Meta llama-models (Llama 4 / Maverick)
+## Meta llama-models (Llama 4 / Maverick) downloads
 
 Official download instructions: [meta-llama/llama-models — Download](https://github.com/meta-llama/llama-models?tab=readme-ov-file#download).
 
@@ -66,39 +66,29 @@ Remove the broken tree (example path from a successful-but-unverified run):
 rm -rf ~/.llama/checkpoints/Llama-4-Maverick-17B-128E-Instruct-fp8
 ```
 
-Then re-download only when you have **enough free space**, a **stable network**, and a **fresh signed URL** from [llama.com downloads](https://www.llama.com/llama-downloads/) if using `--source meta`. Alternatively use **`--source huggingface`** with a Hugging Face token if the README’s HF path fits your disk and access.
+Then re-download only when you have **enough free space**, a **stable network**, and a **fresh signed URL** from [llama.com downloads](https://www.llama.com/llama-downloads/) if using `--source meta`. Alternatively use **`--source huggingface`** with a Hugging Face token if the HF path fits your disk and access.
 
-**Using a large open-weight model with this backend’s multimodal pipeline**
+**Hugging Face for multimodal structure / grading**
 
-**Option A — Ollama for chat; RAG via SentenceTransformers (default) or Ollama**
-
-Chunk grading can use **Ollama’s HTTP API** (`OLLAMA_BASE_URL` / `INTERNAL_OLLAMA_URL`, `OLLAMA_MODEL`). It does **not** load `~/.llama/checkpoints` directly. RAG vectors default to **SentenceTransformers** (`RAG_EMBEDDING_BACKEND`, `SENTENCE_TRANSFORMERS_MODEL`); set **`RAG_EMBEDDING_BACKEND=ollama`** to use **`OLLAMA_EMBEDDINGS_MODEL`** (e.g. nomic) instead. To grade with Maverick (or any other large model) through Ollama:
-
-1. Ensure the model is **available to Ollama** on that host (`ollama list` shows it), e.g. via `ollama pull` if published, or import/create from a supported artifact per Ollama docs.
-2. Set **`OLLAMA_MODEL`** to that exact tag (and raise **`OLLAMA_CHAT_TIMEOUT_SEC`** for slow GPUs).
-3. For **multiple stochastic grades per chunk** with a single model, use **`MULTIMODAL_SAMPLES_PER_MODEL`** (see `app/config.py`). Optional second/third graders: **`GRADING_MODEL_2`** / **`GRADING_MODEL_3`** (`ollama:…` or `openai:…`).
-
-**Integration test env** (`tests/test_multimodal_pipeline.py::LocalAssignmentGradingTests`): defaults to **`MULTIMODAL_INTEGRATION_LLM_BACKEND=huggingface`** (Maverick FP8 on the Hub + `HF_TOKEN`). Set **`MULTIMODAL_INTEGRATION_LLM_BACKEND=ollama`** to exercise the Ollama-only path. Run **`pytest -rs`** for full skip text and **`--log-cli-level=WARNING`** for `[integration]` phase logs.
-
-**Option B — Hugging Face for chat; RAG via SentenceTransformers (default)**
-
-Use local **transformers** for structure + grading; **RAG vectors** use **SentenceTransformers** by default (`all-MiniLM-L6-v2` via `requirements.txt`). Optional Ollama is only needed if you set **`RAG_EMBEDDING_BACKEND=ollama`** or use Ollama-backed extras.
+Use local **transformers** for structure + grading where configured; **RAG vectors** use **SentenceTransformers** by default (`all-MiniLM-L6-v2` via `requirements.txt`).
 
 1. `pip install -r requirements.txt -r requirements-huggingface.txt`
 2. Set **`MULTIMODAL_LLM_BACKEND=huggingface`** (alias: **`hf`**).
 3. **`HUGGINGFACE_HUB_TOKEN`** or **`HF_TOKEN`** with access to the gated repo.
 4. **`HUGGINGFACE_GRADING_MODEL_ID`** — optional; defaults to **`meta-llama/Llama-4-Maverick-17B-128E-Instruct-FP8`**. The Meta **llama-model** id `Llama-4-Maverick-17B-128E-Instruct:fp8` is accepted and mapped to that repo.
-5. **`RAG_EMBEDDING_BACKEND`** / **`SENTENCE_TRANSFORMERS_MODEL`** — defaults match the multimodal pipeline (no Ollama required for embeddings on this path).
+5. **`RAG_EMBEDDING_BACKEND`** / **`SENTENCE_TRANSFORMERS_MODEL`** — defaults match the multimodal pipeline.
 
-Optional trio/QA segmentation and per-chunk grading both use this Hugging Face primary; **`GRADING_MODEL_2` / `GRADING_MODEL_3`** remain `ollama:` or `openai:` if you add them.
+Per-chunk multimodal **grading** uses **OpenAI** when **`OPENAI_API_KEY`** is set (`OPENAI_MULTIMODAL_GRADING_MODEL`). Optional extra graders **`GRADING_MODEL_2`** / **`GRADING_MODEL_3`** must be **`openai:…`** specs or bare OpenAI model ids.
+
+**Integration test env** (`tests/test_multimodal_pipeline.py::LocalAssignmentGradingTests`): defaults to **`MULTIMODAL_INTEGRATION_LLM_BACKEND=huggingface`** (Maverick FP8 on the Hub + `HF_TOKEN`). Run **`pytest -rs`** for full skip text and **`--log-cli-level=WARNING`** for `[integration]` phase logs.
 
 ## LLM triplet chunking (blank + student + answer key)
 
 For notebook submissions, you can use a **single structured LLM call** that reads the instructor **blank** (from `blank_assignments/`), the **student** `.ipynb`, and the resolved **answer key** text, and emits `units` with `question` / `student_response` / `answer_key_segment` (same JSON contract as OpenAI trio frontload). The multimodal pipeline then runs answer-key enrichment, **RAG embeddings** on each trio (unless OpenAI frontload already embedded), and writes `{assignment_id}_trio_chunks.json` under `RAG_embedding/` as usual.
 
-- **`MULTIMODAL_LLM_TRIPLET_THREE_SOURCE=on`** — enable this path (default: off). Requires a resolved blank notebook in `modality_hints`, non-empty `answer_key_plaintext`, and **`OPENAI_API_KEY`** (recommended; uses `OPENAI_TRIO_RAG_CHAT_MODEL`) or a working structure LLM from `MULTIMODAL_LLM_BACKEND` / Ollama.
+- **`MULTIMODAL_LLM_TRIPLET_THREE_SOURCE=on`** — enable this path (default: off). Requires a resolved blank notebook in `modality_hints`, non-empty `answer_key_plaintext`, and **`OPENAI_API_KEY`** (recommended; uses `OPENAI_TRIO_RAG_CHAT_MODEL`) or a working structure LLM from `MULTIMODAL_LLM_BACKEND`.
 - **`MULTIMODAL_LLM_TRIPLET_MAX_CHARS_PER_SOURCE`** — max characters per source (blank / student / key) sent to the model before truncation (default **1000000**). Provider context limits still apply.
-- **`MULTIMODAL_LLM_TRIPLET_THREE_SOURCE_PREFER_OPENAI=0`** — force the structure client (Ollama/HF/OpenAI per backend) instead of OpenAI JSON chat when a key exists.
+- **`MULTIMODAL_LLM_TRIPLET_THREE_SOURCE_PREFER_OPENAI=0`** — force the structure client (HF/OpenAI per backend) instead of OpenAI JSON chat when a key exists.
 - **`MULTIMODAL_TRIO_EMBED_NO_CAPS=1`** — when using SentenceTransformers (or non–OpenAI-frontload) RAG, embed full trio strings without the usual per-field character caps (watch memory on huge cells).
 
 When triplet mode is on **and** blank + answer key are present, **OpenAI trio+RAG frontload** is skipped so this path owns chunk boundaries.

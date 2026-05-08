@@ -1,7 +1,7 @@
 """
 LLM routing for grading: **OpenAI** (server-side) plus optional **Anthropic** for structure.
 
-Course grading and multimodal per-chunk grading use OpenAI chat clients; Ollama is not supported.
+Course grading and multimodal per-chunk grading use OpenAI chat clients.
 """
 from __future__ import annotations
 
@@ -241,8 +241,8 @@ def _parse_model_spec(spec: str, cfg: Config) -> tuple[ChatClient, str] | None:
     if not spec:
         return None
     s = spec.strip()
-    if s.lower().startswith("ollama:"):
-        _log.warning("Ignoring Ollama model spec %r (Ollama grading has been removed).", spec)
+    if ":" in s and not s.lower().startswith("openai:"):
+        _log.warning("Ignoring unsupported model spec %r (only openai:… is supported).", spec)
         return None
     if s.startswith("openai:"):
         model_name = s[len("openai:") :].strip()
@@ -261,7 +261,7 @@ def build_grading_clients(cfg: Config) -> list[tuple[ChatClient, str]]:
     Return 1–3 ``(client, model_label)`` pairs for multi-LLM **course** grading (OpenAI only).
 
     Primary model is ``OPENAI_MODEL``; optional ``GRADING_MODEL_2`` / ``GRADING_MODEL_3``
-    must be ``openai:…`` specs or bare OpenAI model ids. Ollama specs are ignored.
+    must be ``openai:…`` specs or bare OpenAI model ids. Unsupported prefixes are ignored.
     """
     key = (cfg.OPENAI_API_KEY or "").strip()
     if not key:
@@ -332,7 +332,7 @@ def build_multimodal_grading_clients(cfg: Config) -> list[tuple[ChatClient, str]
     Multimodal per-chunk **grading** via **OpenAI only** (``OPENAI_MULTIMODAL_GRADING_MODEL``).
 
     Optional ``GRADING_MODEL_2`` / ``GRADING_MODEL_3`` may add extra ``openai:`` models.
-    Ollama specs are ignored. Parsing and trio chunking use Claude/OpenAI via
+    Parsing and trio chunking use Claude/OpenAI via
     :func:`anthropic_multimodal_structure_client` and :func:`app.grading.multimodal.rag_embeddings._multimodal_structure_chat_client`.
     """
     key = (cfg.OPENAI_API_KEY or "").strip()

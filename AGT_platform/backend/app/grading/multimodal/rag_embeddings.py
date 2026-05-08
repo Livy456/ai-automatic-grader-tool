@@ -26,11 +26,11 @@ chunking: ``MULTIMODAL_RAG_PREWINDOW_EMBED=on`` (see :func:`precompute_document_
 2. Otherwise **PDF plaintext** is reflowed via
    :func:`app.grading.submission_chunks.reflow_pdf_sections_in_plaintext` before any LLM
    segmentation so verticalized extractors do not confuse the model.
-3. If ``MULTIMODAL_ASSIGNMENT_PARSING`` or ``MULTIMODAL_OLLAMA_QA_SEGMENT`` (or
-   ``MULTIMODAL_LLM_QA_SEGMENT``) is on, an **LLM** returns JSON Q/A units. **Claude** runs when
+3. If ``MULTIMODAL_ASSIGNMENT_PARSING`` or ``MULTIMODAL_LLM_QA_SEGMENT`` is on, an **LLM**
+   returns JSON Q/A units. **Claude** runs when
    ``ANTHROPIC_API_KEY`` is set and ``MULTIMODAL_ANTHROPIC_ASSIGNMENT_PARSING`` is not ``off``
    (default ``auto``); otherwise **OpenAI** is used for this step if ``OPENAI_API_KEY`` is set.
-   Ollama is not used. On failure,
+   On failure,
    :func:`chunker.default_chunker_build_units` runs structured chunking
    (:func:`app.grading.submission_chunks.build_submission_chunks`, which reflows each PDF
    section again and applies journal-style prompt boundaries when hints match).
@@ -101,14 +101,11 @@ def multimodal_llm_qa_segment_enabled() -> bool:
     """
     True to run LLM JSON Q/A segmentation on plain submissions.
 
-    Enable with ``MULTIMODAL_ASSIGNMENT_PARSING=on`` (preferred), ``MULTIMODAL_LLM_QA_SEGMENT=on``,
-    or the legacy env name ``MULTIMODAL_OLLAMA_QA_SEGMENT=on`` (structure LLM is Claude or OpenAI;
-    see :data:`ASSIGNMENT_PARSING_SYSTEM_PROMPT`).
+    Enable with ``MULTIMODAL_ASSIGNMENT_PARSING=on`` (preferred) or ``MULTIMODAL_LLM_QA_SEGMENT=on``
+    (structure LLM is Claude or OpenAI; see :data:`ASSIGNMENT_PARSING_SYSTEM_PROMPT`).
     """
-    return (
-        _env_bool("MULTIMODAL_ASSIGNMENT_PARSING", default=False)
-        or _env_bool("MULTIMODAL_LLM_QA_SEGMENT", default=False)
-        or _env_bool("MULTIMODAL_OLLAMA_QA_SEGMENT", default=False)
+    return _env_bool("MULTIMODAL_ASSIGNMENT_PARSING", default=False) or _env_bool(
+        "MULTIMODAL_LLM_QA_SEGMENT", default=False
     )
 
 
@@ -142,8 +139,8 @@ def _multimodal_structure_chat_client(
     Client for multimodal **structure** only (assignment parsing, trio refinement, blank LLM).
 
     Uses **Claude** when :func:`app.grading.llm_router.anthropic_multimodal_structure_client`
-    returns a client; otherwise **OpenAI** when ``OPENAI_API_KEY`` is set. Ollama is never used
-    in this pipeline. ``purpose`` is kept for call-site compatibility and is ignored.
+    returns a client; otherwise **OpenAI** when ``OPENAI_API_KEY`` is set.
+    ``purpose`` is kept for call-site compatibility and is ignored.
     """
     del purpose
     anth = anthropic_multimodal_structure_client(cfg)
@@ -697,7 +694,7 @@ def refine_chunks_trio_with_structure_llm(chunks: list[GradingChunk], cfg: Confi
     :func:`answer_key_chunk_enrich.enrich_chunks_with_per_question_answer_key`.
 
     Controlled by ``MULTIMODAL_LLM_TRIO_CHUNKING`` / ``cfg.MULTIMODAL_LLM_TRIO_CHUNKING`` and
-    :func:`_multimodal_structure_chat_client` (Ollama is not used).
+    :func:`_multimodal_structure_chat_client`.
 
     ``MULTIMODAL_LLM_TRIO_INPUT_MAX_CHARS``: unset or ``0`` = send the full ``extracted_text``
     to the structure model; set a positive int to cap (clamped up to 2_000_000).
@@ -789,11 +786,6 @@ def refine_chunks_trio_with_structure_llm(chunks: list[GradingChunk], cfg: Confi
         ev["trio_llm_refined"] = True
         ev["trio_llm_chunking_model"] = model
         ch.evidence = ev
-
-
-def refine_chunks_trio_with_ollama(chunks: list[GradingChunk], cfg: Config) -> None:
-    """Backward-compatible alias for :func:`refine_chunks_trio_with_structure_llm`."""
-    refine_chunks_trio_with_structure_llm(chunks, cfg)
 
 
 def build_multimodal_grading_chunks(

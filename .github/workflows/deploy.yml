@@ -8,7 +8,7 @@ on:
 
 jobs:
   # --- Web / App EC2: Flask API, Postgres, Redis broker, MinIO/S3-sidecar (or point to AWS S3). ---
-  # No Ollama and no GPU Celery workers on this host. Migrations run here.
+  # No GPU Celery workers on this host. Migrations run here.
   deploy-web:
     name: Deploy web / app tier
     runs-on: ubuntu-latest
@@ -57,7 +57,7 @@ jobs:
               COMPOSE_FILE=docker-compose.prod.yaml
             fi
 
-            echo "🐳 Web tier ($COMPOSE_FILE) — no Ollama / no GPU workers on this host"
+            echo "🐳 Web tier ($COMPOSE_FILE) — API tier only (no GPU workers on this host)"
             docker compose -f "$COMPOSE_FILE" --env-file .env.production pull
             docker compose -f "$COMPOSE_FILE" --env-file .env.production up -d --build
             echo "⏳ Waiting for backend…"
@@ -67,7 +67,7 @@ jobs:
             docker compose -f "$COMPOSE_FILE" --env-file .env.production restart backend
             echo "✅ Web / app deploy complete"
 
-  # --- GPU EC2: Ollama + Celery worker only. Private subnet; pull models here only. ---
+  # --- GPU EC2: Celery worker only. Private subnet; pre-pull HF weights on this host if needed. ---
   deploy-gpu:
     name: Deploy GPU inference tier
     runs-on: ubuntu-latest
@@ -93,12 +93,10 @@ jobs:
             set -e
             cd /opt/ai-grader/AGT_platform || { echo "❌ Missing /opt/ai-grader/AGT_platform"; exit 1; }
             git pull origin main
-            echo "🐳 GPU tier (docker-compose.gpu.prod.yaml) — Ollama + worker only"
+            echo "🐳 GPU tier (docker-compose.gpu.prod.yaml) — Celery worker"
             docker compose -f docker-compose.gpu.prod.yaml --env-file .env.production.gpu pull
             docker compose -f docker-compose.gpu.prod.yaml --env-file .env.production.gpu up -d --build
             sleep 10
-            echo "🤖 Ollama model pull on GPU host (match OLLAMA_MODEL in .env.production.gpu)…"
-            docker exec ai_grader_ollama_prod ollama pull llama3.2:3b || true
             docker compose -f docker-compose.gpu.prod.yaml --env-file .env.production.gpu restart worker
             echo "✅ GPU deploy complete"
 

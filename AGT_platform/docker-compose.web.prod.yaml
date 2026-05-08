@@ -1,5 +1,5 @@
 # Web / App EC2 only — public API, auth, presigned S3 orchestration, DB migrations.
-# Do NOT add Ollama or GPU grading workers here (keeps RAM for gunicorn/Flask + Redis broker).
+# Do not add GPU grading workers here (keeps RAM for gunicorn/Flask + Redis broker).
 # GPU tier: docker-compose.gpu.prod.yaml on a private GPU instance.
 
 services:

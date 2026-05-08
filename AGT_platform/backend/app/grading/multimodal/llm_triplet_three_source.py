@@ -23,7 +23,7 @@ of the three bodies before the API call; provider context limits still apply.
 when ``ANTHROPIC_API_KEY`` is set and ``MULTIMODAL_ANTHROPIC_ASSIGNMENT_PARSING`` is not ``off``,
 unless ``MULTIMODAL_LLM_TRIPLET_THREE_SOURCE_PREFER_OPENAI=on`` forces
 :class:`~app.grading.llm_router.OpenAIJsonClient` with ``OPENAI_TRIO_RAG_CHAT_MODEL``. If Claude is
-unavailable, falls back to OpenAI when ``OPENAI_API_KEY`` is set. Ollama is not used.
+unavailable, falls back to OpenAI when ``OPENAI_API_KEY`` is set.
 """
 
 from __future__ import annotations
