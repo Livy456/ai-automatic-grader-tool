@@ -86,8 +86,6 @@ env.production.gpu
 
 # student assignments and rubric for grading
 # **/assignments_to_grade/*
-
-
 # **/rubric/*
 **/grading_output/*
 **/RAG_embedding/*
@@ -103,7 +101,9 @@ env.production.gpu
 **/research analysis/*
 # Cursor implementation prompt (local only)
 /multi_llm_semantic_entropy.md
-**/disagreement_analysis/*
+README [OLD].md
+
+**/thesis_research_analysis/*
 
 # Local venv
 .venv/

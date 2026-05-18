@@ -44,7 +44,6 @@ class ReviewStatus(str, Enum):
     FLAGGED = "flagged"
     ESCALATION = "escalation"
 
-
 @dataclass
 class MultimodalGradingConfig:
     """Configurable thresholds for entropy, disagreement, and review routing."""

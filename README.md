@@ -1,21 +1,35 @@
-# ai-automatic-grader-tool
+# Multiagent Autograder
 
-Monorepo for the **AGT** grading platform. The production API, Celery workers, and **multimodal grading pipeline** live under `AGT_platform/backend/` (Python package `app`).
+# Setting up the environment 
+## Make a virtual environment
+python3 -m venv .venv
 
-## Backend tests
-
-From the repo root (with dev dependencies installed for the backend):
-
+## Install dependencies
 ```bash
 cd AGT_platform/backend
-pytest tests/ -q
+pip install -r requirements.txt
 ```
+# Running the Multimodal grading pipeline [Research Run ==> running the multimodal grading pipeline n times for a specific assignment]
+### Backend tests
 
-Or using root `pyproject.toml` paths:
-
+<!-- In order to run the multimodal grading pipeline you need to specific which assignment you want to grade and the number
+of times you want to run the multimodal grading pipeline -->
 ```bash
-pytest -q
+cd AGT_platform/backend
+export MULTIMODAL_RESEARCH_ASSIGNMENT_ID='[Student 1] Week7_JournalEntry7.3'
+export MULTIMODAL_RESEARCH_RUN_COUNT=5
+pytest tests/test_multimodal_research_runs.py -v # when you want to see what test is being run, see terminal output
 ```
+
+<!-- In order to run all the test run [showing terminal output]: -->
+``` bash
+cd AGT_platform/backend
+export MULTIMODAL_RESEARCH_ASSIGNMENT_ID='[Student 1] Week7_JournalEntry7.3'
+export MULTIMODAL_RESEARCH_RUN_COUNT=5
+pytest test/ -v 
+```
+<!-- when you want to hide the terminal output replace -v with -q -->
+
 
 ### Multimodal pipeline (single run vs repeated research runs)
 
@@ -25,10 +39,3 @@ pytest -q
 
 - **Many repeated runs** (e.g. **15**), for analysis under `research analysis/`: set **`MULTIMODAL_RESEARCH_ASSIGNMENT_ID`** to the assignment stem and **`MULTIMODAL_RESEARCH_RUN_COUNT=15`**, then run **`pytest tests/test_multimodal_research_runs.py -v -rs`** from `AGT_platform/backend/`. Full examples, resume behavior, and outputs are documented in **`AGT_platform/backend/ReadMe.md`** (section *Multimodal grading pipeline (local)*).
 
-## Layout (high level)
-
-- `AGT_platform/backend/` — Flask app, SQLAlchemy models, Celery tasks, `app/grading/multimodal/`
-- `AGT_platform/frontend/` — web UI
-- `assignments_to_grade/`, `rubric/`, `answer_key/` — optional local fixtures for integration-style runs (see backend test docstrings)
-
-The former standalone `assignment-parser` library and `specs/` example bundles were removed; they were not imported by the multimodal pipeline.

@@ -86,8 +86,20 @@ def _docx_bytes_to_plain(data: bytes) -> str:
         return "[.docx present; install python-docx for text extraction]"
     try:
         document = docx.Document(io.BytesIO(data))
-        lines = [p.text for p in document.paragraphs if (p.text or "").strip()]
-        return "\n".join(lines).strip()
+        parts: list[str] = []
+        for p in document.paragraphs:
+            t = (p.text or "").strip()
+            if t:
+                parts.append(t)
+        for table in document.tables:
+            row_texts: list[str] = []
+            for row in table.rows:
+                cells = [(c.text or "").strip() for c in row.cells]
+                row_texts.append("\t".join(cells))
+            block = "\n".join(row_texts).strip()
+            if block:
+                parts.append(block)
+        return "\n\n".join(parts).strip()
     except Exception:
         _log.warning("docx plaintext extraction failed", exc_info=True)
         return "[.docx binary; text extraction failed]"

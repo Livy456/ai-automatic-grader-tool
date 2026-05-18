@@ -62,7 +62,9 @@ def _trio_max_student_response_chars(cfg: Config) -> int:
     v = int(
         getattr(cfg, "MULTIMODAL_OPENAI_TRIO_MAX_STUDENT_RESPONSE_CHARS", 14_000) or 14_000
     )
-    return max(4_000, min(v, 200_000))
+    # Lower bound stays small so unit tests (and aggressive local caps) can force splits;
+    # production defaults still come from Config / env (typically ≥ 4_000).
+    return max(64, min(v, 200_000))
 
 
 def _segment_text_for_max_chars(text: str, max_chars: int) -> list[str]:
@@ -70,7 +72,7 @@ def _segment_text_for_max_chars(text: str, max_chars: int) -> list[str]:
     text = (text or "").strip()
     if not text:
         return []
-    max_chars = max(2_000, int(max_chars))
+    max_chars = max(32, int(max_chars))
     if len(text) <= max_chars:
         return [text]
     paras = re.split(r"\n{2,}", text)

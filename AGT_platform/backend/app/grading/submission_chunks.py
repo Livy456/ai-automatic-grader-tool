@@ -13,9 +13,11 @@ Chunking strategy (high level)
 2. **PDF vertical reflow (new chunking method)** — For ``=== PDF TEXT ===`` bodies,
    :func:`app.grading.tools.normalize_verticalized_pdf_text` runs **again** here so
    chunking stays correct even if plaintext bypassed :func:`~app.grading.tools.extract_text_from_pdf`.
-   Reflow joins one-word-per-line extractor output, breaks paragraphs on ``?`` / ``.`` /
-   ``Homework N`` boundaries, and keeps internal multi-part prompts (``…? If … Which …?``)
-   together using continuation-token rules (see ``new_chunking_method.md``).
+   **Word (``=== DOCX ===``)** sections skip PDF reflow (paragraph structure is already normal);
+   with a journal / free-response ``modality_subtype``, the same **journal ?-line** rules as PDF
+   apply (see :func:`_prose_boundary_matches`).
+   For PDF bodies, reflow also joins one-word-per-line extractor output and applies
+   ``new_chunking_method.md`` continuation rules.
 
 3. **Question / answer pairs (prose sections)** — Within each prose block we find
    *question-like* **single lines**:
@@ -23,8 +25,9 @@ Chunking strategy (high level)
    * **Structured headers** — ``Part 1.``, ``Question 2``, ``Q3:``, numbered items,
      ``## Heading`` (regex ``_CHUNK_HEADER``; ``Question`` must be numbered or ``Question:``,
      so the English word *questions* alone is not a header).
-   * **Journal / free-response PDFs** — When ``modality_subtype`` suggests a journal-style
-     PDF (substring ``journal``, ``free_response``, ``reflection``, etc.), lines that look
+   * **Journal / free-response documents** — When ``modality_subtype`` suggests a journal-style
+     submission (substring ``journal``, ``free_response``, ``reflection``, etc.) and the section
+     is treated as structured prose (``pdf`` or ``docx`` in :func:`_infer_section_kind`), lines that look
      like full-sentence instructor prompts (start with ``What`` / ``Did`` / …, end with ``?``)
      are extra boundaries (regex ``_JOURNAL_INSTRUCTOR_PROMPT``).
 
@@ -268,7 +271,9 @@ def _prose_boundary_matches(
     spans: list[tuple[int, int, re.Match[str]]] = []
     for m in _CHUNK_HEADER.finditer(body):
         spans.append((m.start(), m.end(), m))
-    if section_kind == "pdf" and _pdf_uses_journal_style_prompts(modality_subtype):
+    if section_kind in ("pdf", "docx") and _pdf_uses_journal_style_prompts(
+        modality_subtype
+    ):
         for m in _JOURNAL_INSTRUCTOR_PROMPT.finditer(body):
             spans.append((m.start(), m.end(), m))
     spans.sort(key=lambda x: x[0])
@@ -300,6 +305,8 @@ def _infer_section_kind(banner: str, modality_subtype: str) -> str:
         return "markdown"
     if "PDF TEXT" in u:
         return "pdf"
+    if "DOCX" in u:
+        return "docx"
     if "TXT" in u and "NOTEBOOK" not in u:
         return "txt"
     if modality_subtype == "notebook":
@@ -450,6 +457,7 @@ def _chunks_from_prose_section(
     body = (body or "").strip()
     if section_kind == "pdf":
         body = normalize_verticalized_pdf_text(body)
+    # Word bodies are already paragraph-structured; skip PDF vertical reflow.
 
     boundaries = _prose_boundary_matches(
         body, section_kind=section_kind, modality_subtype=modality_subtype
@@ -614,7 +622,7 @@ def build_submission_chunks(
             all_chunks.extend(packed)
             continue
 
-        if sec_kind in ("markdown", "pdf", "txt", "body", "mixed"):
+        if sec_kind in ("markdown", "pdf", "docx", "txt", "body", "mixed"):
             effective_kind = sec_kind
             if sec_kind == "mixed" and _looks_like_code(body, section_kind="body"):
                 effective_kind = "code"

@@ -130,8 +130,9 @@ def augment_prompt_for_modality_profile(
         )
     elif st == "pdf_written":
         parts.append(
-            "\n\n---\nGrading context: Submission is primarily **PDF prose**. Rely on `artifacts.text` "
-            "(full extracted text). Score each rubric criterion from the student's written evidence."
+            "\n\n---\nGrading context: Submission is primarily **document prose** (PDF or Word `.docx`). "
+            "Rely on `artifacts.text` (full extracted text). Score each rubric criterion from the "
+            "student's written evidence."
         )
     elif st == "audio_transcript":
         parts.append(

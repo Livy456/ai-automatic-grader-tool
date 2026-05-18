@@ -78,6 +78,8 @@ def default_chunker_build_units(
         u = plain.upper()
         if has_pdf or "=== PDF TEXT ===" in u:
             modality_subtype = "free_response"
+        elif "=== DOCX ===" in u:
+            modality_subtype = "free_response"
         elif "=== NOTEBOOK" in u:
             modality_subtype = "notebook"
         elif "=== AUDIO TRANSCRIPT ===" in u or "=== VIDEO / AUDIO" in u:

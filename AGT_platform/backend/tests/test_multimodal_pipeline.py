@@ -184,7 +184,7 @@ OUTPUT_DIR = REPO_ROOT / "grading_output"
 RAG_DIR = REPO_ROOT / "RAG_embedding"
 ANSWER_KEY_DIR = REPO_ROOT / "answer_key"
 
-_SUPPORTED_SUFFIXES = {".ipynb", ".py", ".pdf", ".txt", ".md", ".mp4"}
+_SUPPORTED_SUFFIXES = {".ipynb", ".py", ".pdf", ".txt", ".md", ".mp4", ".docx"}
 # Tabular / data files in ``assignments_to_grade/`` are for ``dataset_resolve`` — not separate submissions.
 _DATA_ONLY_SUFFIXES = frozenset({".csv", ".tsv", ".xlsx"})
 _SUFFIX_TO_ARTIFACT_KEY = {
@@ -194,6 +194,7 @@ _SUFFIX_TO_ARTIFACT_KEY = {
     ".txt": "txt",
     ".md": "md",
     ".mp4": "mp4",
+    ".docx": "docx",
 }
 
 _SECTION_NAME_TO_RUBRIC_TYPE = {
@@ -1543,6 +1544,24 @@ class ModalityAndArtifactFormatTests(unittest.TestCase):
         arts = {"docx": b"x"}
         prof = resolve_modality_profile(assignment, arts, "entry body " * 10)
         self.assertEqual(prof["modality_subtype"], "journal_entry")
+
+    def test_docx_section_journal_style_question_boundaries(self) -> None:
+        """``=== DOCX ===`` prose uses the same journal ?-line boundaries as PDF when subtype matches."""
+        text = (
+            "=== DOCX ===\n"
+            "Reflect on the reading.\n\n"
+            "What did you learn from this unit that applies to your project?\n"
+            "My lesson applied to the course project in several ways."
+        )
+        chunks = build_submission_chunks(
+            text,
+            assignment_title="Journal",
+            modality_subtype="journal_entry",
+            max_chunk_chars=None,
+        )
+        roles = [c.get("role") for c in chunks]
+        self.assertIn("question", roles)
+        self.assertIn("response", roles)
 
 
 class NotebookChunkerInstructorScaffoldTests(unittest.TestCase):
