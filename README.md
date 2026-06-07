@@ -17,7 +17,7 @@ of times you want to run the multimodal grading pipeline -->
 ```bash
 cd AGT_platform/backend
 export MULTIMODAL_RESEARCH_ASSIGNMENT_ID='[Student 1] Week7_JournalEntry7.3'
-export MULTIMODAL_RESEARCH_RUN_COUNT=5
+export MULTIMODAL_RESEARCH_RUN_COUNT=1
 pytest tests/test_multimodal_research_runs.py -v # when you want to see what test is being run, see terminal output
 ```
 
