@@ -1,6 +1,5 @@
 import { useEffect, useState } from "react";
-import { Link, useLocation, Navigate } from "react-router-dom";
-import { jwtDecode } from "jwt-decode";
+import { Link, useLocation } from "react-router-dom";
 import {
   Alert,
   Box,
@@ -14,17 +13,10 @@ import {
 } from "@mui/material";
 import InfoOutlined from "@mui/icons-material/InfoOutlined";
 import SchoolOutlined from "@mui/icons-material/SchoolOutlined";
-import { getToken } from "../auth";
 import { listCourseAssignments, listCourses } from "../api";
 import StatCard from "../components/StatCard";
 import AdminDashboard from "./AdminDashboard";
 import TeacherDashboard from "./TeacherDashboard";
-
-interface JwtPayload {
-  id: number;
-  email: string;
-  role: string;
-}
 
 type CourseCard = {
   id: number;
@@ -56,16 +48,6 @@ const MOCK_COURSES: CourseCard[] = [
     submitted: 1,
   },
 ];
-
-function useRole(): JwtPayload | null {
-  const token = getToken();
-  if (!token) return null;
-  try {
-    return jwtDecode<JwtPayload>(token);
-  } catch {
-    return null;
-  }
-}
 
 function StudentDashboard() {
   const [courses, setCourses] = useState<CourseCard[]>([]);
@@ -215,18 +197,13 @@ function StudentDashboard() {
 }
 
 export default function Dashboard() {
-  const me = useRole();
   const location = useLocation();
-  if (!me) return <Navigate to="/login" replace />;
 
   const adminPath = location.pathname === "/admin";
 
   if (adminPath) {
-    if (me.role !== "admin") return <Navigate to="/" replace />;
     return <AdminDashboard />;
   }
 
-  if (me.role === "admin") return <AdminDashboard />;
-  if (me.role === "teacher") return <TeacherDashboard />;
-  return <StudentDashboard />;
+  return <TeacherDashboard />;
 }

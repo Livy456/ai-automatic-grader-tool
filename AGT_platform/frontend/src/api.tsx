@@ -1,119 +1,23 @@
 /// <reference types="vite/client" />
-import { getToken, setToken } from "./auth";
-
 function withAuthHeaders(extra?: HeadersInit): Headers {
-  const h = new Headers(extra ?? {});
-  const token = getToken();
-  if (token) h.set("Authorization", `Bearer ${token}`);
-  return h;
+  return new Headers(extra ?? {});
 }
 
 const API_BASE = import.meta.env.VITE_API_BASE ?? "";
 
-/** Public API origin for logout and other callers outside this module. */
+/** Public API origin for callers outside this module. */
 export function apiBase(): string {
   return API_BASE;
 }
 
-let refreshInFlight: Promise<boolean> | null = null;
-
-/**
- * Uses HttpOnly refresh cookie; returns a new access JWT into memory on success.
- */
-export async function refreshAccessToken(): Promise<boolean> {
-  const res = await fetch(`${API_BASE}/api/auth/refresh`, {
-    method: "POST",
-    credentials: "include",
-    headers: { "Content-Type": "application/json" },
-  });
-  if (!res.ok) return false;
-  const data = (await res.json().catch(() => ({}))) as { access_token?: string };
-  if (!data.access_token) return false;
-  setToken(data.access_token);
-  return true;
-}
-
-async function synchronizedRefresh(): Promise<boolean> {
-  if (!refreshInFlight) {
-    refreshInFlight = refreshAccessToken().finally(() => {
-      refreshInFlight = null;
-    });
-  }
-  return refreshInFlight;
-}
-
 async function fetchWithAuthRetry(path: string, init: RequestInit): Promise<Response> {
   const url = `${API_BASE}${path}`;
-  let res = await fetch(url, init);
-  if (res.status === 401) {
-    const ok = await synchronizedRefresh();
-    if (ok) {
-      const h = new Headers(init.headers as HeadersInit);
-      const token = getToken();
-      if (token) h.set("Authorization", `Bearer ${token}`);
-      else h.delete("Authorization");
-      res = await fetch(url, { ...init, headers: h });
-    }
-  }
-  return res;
+  return fetch(url, init);
 }
 
-let sessionVerifyInflight: Promise<"valid" | "invalid"> | null = null;
-
-function verifySessionStatus(): Promise<"valid" | "invalid"> {
-  if (!sessionVerifyInflight) {
-    sessionVerifyInflight = (async () => {
-      const me = `${API_BASE}/api/auth/me`;
-      let r = await fetch(me, {
-        method: "GET",
-        headers: withAuthHeaders(),
-        credentials: "include",
-      });
-      if (r.status !== 401) return "valid" as const;
-      const refreshed = await synchronizedRefresh();
-      if (!refreshed) return "invalid" as const;
-      r = await fetch(me, {
-        method: "GET",
-        headers: withAuthHeaders(),
-        credentials: "include",
-      });
-      return r.status === 401 ? ("invalid" as const) : ("valid" as const);
-    })().finally(() => {
-      sessionVerifyInflight = null;
-    });
-  }
-  return sessionVerifyInflight;
-}
-
-let logoutScheduled = false;
-
-function scheduleSessionExpiredLogout() {
-  if (logoutScheduled) return;
-  logoutScheduled = true;
-  void import("./auth").then(({ clearToken }) => {
-    clearToken();
-    window.dispatchEvent(new CustomEvent("session-expired"));
-    setTimeout(() => {
-      window.location.replace("/login?reason=session_expired");
-    }, 2000);
-  });
-}
-
-/**
- * On 401: confirm with GET /api/auth/me before clearing session (avoids transient false 401s).
- */
+/** Parse and validate API responses. */
 async function handleResponse(res: Response, label: string): Promise<string> {
   const text = await res.text().catch(() => "");
-  if (res.status === 401) {
-    const verdict = await verifySessionStatus();
-    if (verdict === "valid") {
-      throw new Error(
-        `${label}: request unauthorized (session still valid). Please retry.`,
-      );
-    }
-    scheduleSessionExpiredLogout();
-    return "";
-  }
   if (!res.ok) throw new Error(`${label} failed: ${res.status} ${text}`);
   return text;
 }
@@ -129,7 +33,7 @@ export type Assignment = {
 };
 
 /**
- * Browser → S3 (presigned PUT). Do not send auth headers; signature embeds access.
+ * Browser → MinIO (presigned PUT). Do not send auth headers; signature embeds access.
  */
 export async function putToPresignedUrl(
   url: string,
@@ -152,7 +56,7 @@ export async function putToPresignedUrl(
     }
     const dockerish = host === "minio" || /\.svc\.cluster\.local$/i.test(host);
     const hint = dockerish
-      ? " The upload URL uses a hostname only reachable inside Docker (e.g. minio). Set S3_PRESIGN_ENDPOINT to a URL your browser can open, such as http://127.0.0.1:9000, and restart the API."
+      ? " The upload URL uses a hostname only reachable inside Docker (e.g. minio). Set MINIO_PRESIGN_ENDPOINT to a URL your browser can open, such as http://127.0.0.1:9000, and restart the API."
       : " Check that object storage is running, CORS allows your app origin, and the URL is HTTPS/HTTP as expected.";
     if (e instanceof TypeError) {
       throw new Error(`Storage upload failed (network / blocked request).${hint} (${e.message})`);
@@ -161,7 +65,7 @@ export async function putToPresignedUrl(
   }
   if (!res.ok) {
     const t = await res.text().catch(() => "");
-    throw new Error(`S3 PUT failed: ${res.status} ${t}`);
+    throw new Error(`Object-store PUT failed: ${res.status} ${t}`);
   }
 }
 
@@ -171,14 +75,14 @@ export type DirectUploadStartResponse = {
   status: string;
   uploads: Array<{
     artifact_id: number;
-    s3_key: string;
+    object_key: string;
     upload_url: string;
     content_type: string;
   }>;
 };
 
 /**
- * Presigned flow: start → PUT each file to S3 → finalize. Keeps large files off the API EC2.
+ * Presigned flow: start → PUT each file to MinIO → finalize. Keeps large files off the API EC2.
  */
 export async function submitAssignmentDirect(
   assignmentId: number,
@@ -385,17 +289,9 @@ export function adminRemoveEnrollment(enrollmentId: number): Promise<{ ok: boole
 
 async function standaloneAutograderFetch(path: string, init: RequestInit): Promise<Response> {
   const url = `${API_BASE}${path}`;
-  const h = new Headers(init.headers);
-  const token = getToken();
-  if (token) {
-    h.set("Authorization", `Bearer ${token}`);
-  } else {
-    h.delete("Authorization");
-  }
   return fetch(url, {
     ...init,
-    headers: h,
-    credentials: token ? "include" : "omit",
+    credentials: "include",
   });
 }
 
@@ -424,7 +320,7 @@ export type StandaloneSubmissionDetail = {
   grading_instructions?: string | null;
   grading_dispatch_at: string | null;
   created_at?: string | null;
-  grading_report_s3_key?: string | null;
+  grading_report_object_key?: string | null;
   ai_scores: Array<{
     criterion: string;
     score: number;
@@ -538,7 +434,7 @@ export async function enqueueStandaloneGrading(submissionId: number): Promise<{
 }
 
 /**
- * Standalone autograder: presigned start → S3 PUTs → finalize with grading enqueued.
+ * Standalone autograder: presigned start → MinIO PUTs → finalize with grading enqueued.
  * Mirrors {@link submitAssignmentDirect}; caller supplies parallel `files` and `fileSpecs` (with artifact_kind).
  */
 export async function submitStandaloneDirect(
@@ -584,7 +480,7 @@ export async function getStandaloneSubmission(id: number): Promise<StandaloneSub
 
 export async function getStandaloneGradingReportUrl(
   submissionId: number,
-): Promise<{ download_url: string; s3_key: string }> {
+): Promise<{ download_url: string; object_key: string }> {
   const res = await standaloneAutograderFetch(
     `/api/standalone/submissions/${submissionId}/report`,
     { method: "GET" },

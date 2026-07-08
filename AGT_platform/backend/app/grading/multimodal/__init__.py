@@ -33,7 +33,9 @@ from .pipeline import (
     PipelineArtifactStore,
     build_envelope_from_plaintext,
     create_multimodal_pipeline_from_app_config,
+    default_rubric_dir,
 )
+from .pipeline_runner import run_multimodal_grading
 from .schemas import (
     AssignmentGradeResult,
     ChunkGradeOutcome,
@@ -71,4 +73,6 @@ __all__ = [
     "TaskType",
     "build_envelope_from_plaintext",
     "create_multimodal_pipeline_from_app_config",
+    "default_rubric_dir",
+    "run_multimodal_grading",
 ]

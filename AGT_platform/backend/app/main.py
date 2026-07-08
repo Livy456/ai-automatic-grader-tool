@@ -1,5 +1,7 @@
 from flask import Flask
 from flask_cors import CORS
+from sqlalchemy import text
+
 from .config import Config
 # from extensions import init_db, Base, engine
 
@@ -8,7 +10,6 @@ from .config import Config
 from app.extensions import init_db
 from app.models import Base
 
-from .auth import bp as auth_bp, init_oauth
 from .tasks import init_celery
 from .routes.health import bp as health_bp
 from .routes.submissions import bp as submissions_bp
@@ -19,34 +20,56 @@ from .routes_assignments import bp as assignments_bp
 from .routes.assignment_materials import bp as assignment_materials_bp
 
 
+def _init_database_with_fallback(app: Flask):
+    """
+    Initialize SQLAlchemy using DATABASE_URL and probe connectivity.
+    If the configured database is unreachable (common in local dev when Postgres
+    is down), fall back to a local SQLite file so grading endpoints can still run.
+    """
+    configured_url = app.config["DATABASE_URL"]
+    engine = init_db(configured_url)
+    try:
+        with engine.connect() as conn:
+            conn.execute(text("SELECT 1"))
+        app.logger.info("Database connected: %s", configured_url)
+    except Exception as exc:
+        sqlite_url = "sqlite:///./backend_local_fallback.db"
+        app.logger.warning(
+            "Primary database unavailable (%s). Falling back to %s",
+            exc,
+            sqlite_url,
+        )
+        engine = init_db(sqlite_url)
+
+    # Ensure required tables exist for local/dev startup and fallback DBs.
+    Base.metadata.create_all(bind=engine)
+    return engine
+
+
 def create_app():
     app = Flask(__name__)
     app.config.from_object(Config)
     app.config_obj = Config()  # for celery task access
     _cfg = Config()
     if (
-        _cfg.S3_ENDPOINT
-        and "minio" in _cfg.S3_ENDPOINT.lower()
-        and _cfg.S3_BUCKET
-        and _cfg.S3_BUCKET != "ai-grader"
+        _cfg.MINIO_ENDPOINT
+        and "minio" in _cfg.MINIO_ENDPOINT.lower()
+        and _cfg.MINIO_BUCKET
+        and _cfg.MINIO_BUCKET != "ai-grader"
     ):
         app.logger.warning(
-            "S3_ENDPOINT targets MinIO but S3_BUCKET=%r is not the default dev bucket "
+            "MINIO_ENDPOINT targets MinIO but MINIO_BUCKET=%r is not the default dev bucket "
             "'ai-grader'. Requests go to MinIO, which returns NoSuchBucket if that name "
-            "was never created there. For local Docker use S3_BUCKET=ai-grader; for AWS S3 "
-            "leave S3_ENDPOINT empty and set IAM credentials. See "
+            "was never created there. For local Docker use MINIO_BUCKET=ai-grader. See "
             "AGT_platform/docs/s3_bucket_and_presigned_uploads_setup.md",
-            _cfg.S3_BUCKET,
+            _cfg.MINIO_BUCKET,
         )
-    # Production: keep API bodies small (JSON + presign metadata only). Large files go to S3.
+    # Production: keep API bodies small (JSON + presign metadata only). Large files go to MinIO.
     if _cfg.ALLOW_FLASK_MULTIPART_UPLOAD:
         app.config["MAX_CONTENT_LENGTH"] = _cfg.MAX_UPLOAD_BYTES
     else:
         app.config["MAX_CONTENT_LENGTH"] = _cfg.WEB_MAX_BODY_BYTES
     
-    # Flask session cookie: used only for OAuth (Authlib) state/CSRF during provider redirects.
-    # Authenticated API access: short-lived JWT in Authorization (held in SPA memory) plus
-    # HttpOnly refresh cookie (see /api/auth/refresh and REFRESH_* / JWT_* env vars).
     # SECRET_KEY comes from Config / .env.local + .env (see app.config.from_object above).
     if not (app.config.get("SECRET_KEY") or "").strip():
         app.config["SECRET_KEY"] = "dev_secret"
@@ -73,13 +96,10 @@ def create_app():
 
     print("DATABASE_URL =", app.config.get("DATABASE_URL"))
     print("DATABASE_URL_ACTUAL: ", app.config["DATABASE_URL"])
-    engine = init_db(app.config["DATABASE_URL"])
-    #Base.metadata.create_all(bind=engine) # affects alembic migration, will remove later!!
+    _init_database_with_fallback(app)
 
-    init_oauth(app)
     init_celery(app)
 
-    app.register_blueprint(auth_bp)
     app.register_blueprint(health_bp)
     app.register_blueprint(assignments_bp)
     app.register_blueprint(assignment_materials_bp)

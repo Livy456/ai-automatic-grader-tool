@@ -16,7 +16,7 @@ from app.audit import log_event
 from app.config import Config
 from app.extensions import SessionLocal
 from app.models import StandaloneAIScore, StandaloneArtifact, StandaloneSubmission
-from app.rbac import get_user_from_token
+from app.access import get_user_from_token
 from app.storage import get_presigned_url, object_exists, presigned_put_url
 from app.tasks import grade_standalone_submission
 
@@ -147,7 +147,7 @@ def standalone_start():
             art = StandaloneArtifact(
                 submission_id=sub.id,
                 kind=skind,
-                s3_key=key,
+                object_key=key,
                 filename=filename,
             )
             db.add(art)
@@ -156,7 +156,7 @@ def standalone_start():
             uploads_out.append(
                 {
                     "artifact_id": art.id,
-                    "s3_key": key,
+                    "object_key": key,
                     "upload_url": url,
                     "content_type": content_type,
                 }
@@ -232,8 +232,8 @@ def standalone_finalize(submission_id: int):
             return jsonify({"error": f"invalid state: {sub.status}"}), 409
 
         for art in sub.artifacts:
-            if not object_exists(cfg, art.s3_key):
-                return jsonify({"error": f"missing object: {art.s3_key}"}), 400
+            if not object_exists(cfg, art.object_key):
+                return jsonify({"error": f"missing object: {art.object_key}"}), 400
 
         sub.status = "uploaded"
         sub.updated_at = datetime.utcnow()
@@ -388,7 +388,7 @@ def standalone_presign_context_files(submission_id: int):
             art = StandaloneArtifact(
                 submission_id=sub.id,
                 kind=skind,
-                s3_key=key,
+                object_key=key,
                 filename=filename,
             )
             db.add(art)
@@ -397,7 +397,7 @@ def standalone_presign_context_files(submission_id: int):
             uploads_out.append(
                 {
                     "artifact_id": art.id,
-                    "s3_key": key,
+                    "object_key": key,
                     "upload_url": url,
                     "content_type": content_type,
                 }
@@ -460,8 +460,8 @@ def standalone_enqueue_grading(submission_id: int):
             return jsonify({"error": f"expected status uploaded, got {sub.status}"}), 409
 
         for art in sub.artifacts:
-            if not object_exists(cfg, art.s3_key):
-                return jsonify({"error": f"missing object: {art.s3_key}"}), 400
+            if not object_exists(cfg, art.object_key):
+                return jsonify({"error": f"missing object: {art.object_key}"}), 400
 
         sub.status = "queued"
         sub.grading_dispatch_at = datetime.utcnow()
@@ -565,7 +565,7 @@ def standalone_get(submission_id: int):
                 if sub.grading_dispatch_at
                 else None,
                 "created_at": sub.created_at.isoformat() if sub.created_at else None,
-                "grading_report_s3_key": sub.grading_report_s3_key,
+                "grading_report_object_key": sub.grading_report_object_key,
                 "ai_scores": [
                     {
                         "criterion": s.criterion,
@@ -583,7 +583,7 @@ def standalone_get(submission_id: int):
 
 @bp.get("/api/standalone/submissions/<int:submission_id>/report")
 def standalone_get_report(submission_id: int):
-    """Return a presigned GET URL for the grading report JSON in S3."""
+    """Return a presigned GET URL for the grading report JSON in MinIO."""
     user = _optional_user()
     if not user:
         return jsonify({"error": "authentication required"}), 401
@@ -596,17 +596,17 @@ def standalone_get_report(submission_id: int):
             return jsonify({"error": "not found"}), 404
         if not _can_view_standalone(sub, user):
             return jsonify({"error": "forbidden"}), 403
-        if not sub.grading_report_s3_key:
+        if not sub.grading_report_object_key:
             return jsonify({"error": "report not available yet"}), 404
         url = get_presigned_url(
             cfg,
-            sub.grading_report_s3_key,
+            sub.grading_report_object_key,
             method="GET",
             expires=3600,
-            bucket=cfg.S3_GRADING_REPORTS_BUCKET,
+            bucket=cfg.MINIO_GRADING_REPORTS_BUCKET,
         )
         return jsonify(
-            {"download_url": url, "s3_key": sub.grading_report_s3_key}
+            {"download_url": url, "object_key": sub.grading_report_object_key}
         )
     finally:
         db.close()

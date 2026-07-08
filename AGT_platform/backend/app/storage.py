@@ -1,7 +1,5 @@
 """
-S3-compatible object storage via boto3.
-
-Works with AWS S3 (leave S3_ENDPOINT unset) or MinIO / other S3 APIs (set S3_ENDPOINT).
+MinIO object storage via boto3.
 
 Large uploads use multipart transfers (see TransferConfig). Uploads stream through a spooled
 temp file so memory stays bounded for big student/teacher files.
@@ -29,57 +27,57 @@ _TRANSFER = TransferConfig(
 
 
 def _addressing_style(cfg: Config) -> str:
-    raw = (cfg.S3_ADDRESSING_STYLE or "").strip().lower()
+    raw = (cfg.MINIO_ADDRESSING_STYLE or "").strip().lower()
     if raw in ("path", "virtual"):
         return raw
-    return "path" if cfg.S3_ENDPOINT else "virtual"
+    return "path"
 
 
-def s3_client(cfg: Config):
-    """Low-level boto3 S3 client (AWS or MinIO)."""
+def minio_client(cfg: Config):
+    """Low-level boto3 client for MinIO object storage."""
     kwargs: dict = {
-        "region_name": cfg.AWS_REGION or cfg.S3_REGION or "us-east-1",
+        "region_name": cfg.OBJECT_STORAGE_REGION or cfg.MINIO_REGION or "us-east-1",
         "config": BotoClientConfig(
             signature_version="s3v4",
             s3={"addressing_style": _addressing_style(cfg)},
         ),
     }
-    if cfg.S3_ACCESS_KEY:
-        kwargs["aws_access_key_id"] = cfg.S3_ACCESS_KEY
-    if cfg.S3_SECRET_KEY:
-        kwargs["aws_secret_access_key"] = cfg.S3_SECRET_KEY
-    if cfg.S3_ENDPOINT:
-        kwargs["endpoint_url"] = cfg.S3_ENDPOINT
-    use_ssl = cfg.S3_SECURE
+    if cfg.MINIO_ACCESS_KEY:
+        kwargs["aws_access_key_id"] = cfg.MINIO_ACCESS_KEY
+    if cfg.MINIO_SECRET_KEY:
+        kwargs["aws_secret_access_key"] = cfg.MINIO_SECRET_KEY
+    if cfg.MINIO_ENDPOINT:
+        kwargs["endpoint_url"] = cfg.MINIO_ENDPOINT
+    use_ssl = cfg.MINIO_SECURE
     kwargs["use_ssl"] = use_ssl
     return boto3.client("s3", **kwargs)
 
 
-def s3_client_for_presign(cfg: Config):
+def minio_client_for_presign(cfg: Config):
     """
     Boto client used only to build presigned URLs returned to browsers.
 
     The URL's host must be reachable from the user's machine (not a Docker-only hostname like
-    ``minio``). Server-side S3 calls continue to use :func:`s3_client`.
+    ``minio``). Server-side object-store calls continue to use :func:`minio_client`.
     """
-    ep = (cfg.S3_PRESIGN_ENDPOINT or cfg.S3_ENDPOINT or "").strip()
+    ep = (cfg.MINIO_PRESIGN_ENDPOINT or cfg.MINIO_ENDPOINT or "").strip()
     kwargs: dict = {
-        "region_name": cfg.AWS_REGION or cfg.S3_REGION or "us-east-1",
+        "region_name": cfg.OBJECT_STORAGE_REGION or cfg.MINIO_REGION or "us-east-1",
         "config": BotoClientConfig(
             signature_version="s3v4",
             s3={"addressing_style": "path" if ep else _addressing_style(cfg)},
         ),
     }
-    if cfg.S3_ACCESS_KEY:
-        kwargs["aws_access_key_id"] = cfg.S3_ACCESS_KEY
-    if cfg.S3_SECRET_KEY:
-        kwargs["aws_secret_access_key"] = cfg.S3_SECRET_KEY
+    if cfg.MINIO_ACCESS_KEY:
+        kwargs["aws_access_key_id"] = cfg.MINIO_ACCESS_KEY
+    if cfg.MINIO_SECRET_KEY:
+        kwargs["aws_secret_access_key"] = cfg.MINIO_SECRET_KEY
     if ep:
         kwargs["endpoint_url"] = ep
     if ep:
         kwargs["use_ssl"] = ep.lower().startswith("https://")
     else:
-        kwargs["use_ssl"] = cfg.S3_SECURE
+        kwargs["use_ssl"] = cfg.MINIO_SECURE
     return boto3.client("s3", **kwargs)
 
 
@@ -90,24 +88,24 @@ def _upload_fileobj(
     content_type: Optional[str],
     extra_args: Optional[dict] = None,
 ) -> str:
-    client = s3_client(cfg)
+    client = minio_client(cfg)
     extra = dict(extra_args or {})
     if content_type:
         extra["ContentType"] = content_type
     upload_kw = {"Config": _TRANSFER}
     if extra:
         upload_kw["ExtraArgs"] = extra
-    client.upload_fileobj(fileobj, cfg.S3_BUCKET, key, **upload_kw)
+    client.upload_fileobj(fileobj, cfg.MINIO_BUCKET, key, **upload_kw)
     return key
 
 
 def upload_from_werkzeug_file(cfg: Config, file_storage, key: str) -> str:
     """
-    Stream upload from Flask/Werkzeug FileStorage into S3 without loading whole file into RAM.
+    Stream upload from Flask/Werkzeug FileStorage into MinIO without loading whole file into RAM.
     Uses a SpooledTemporaryFile (spills to disk after max_size bytes in memory).
     """
     content_type = file_storage.mimetype or "application/octet-stream"
-    max_mem = cfg.S3_UPLOAD_SPOOL_MAX_MEMORY_BYTES
+    max_mem = cfg.MINIO_UPLOAD_SPOOL_MAX_MEMORY_BYTES
     spool: tempfile.SpooledTemporaryFile = tempfile.SpooledTemporaryFile(max_size=max_mem)
     try:
         while True:
@@ -133,10 +131,10 @@ def put_object(
     Prefer upload_from_werkzeug_file for arbitrary large uploads.
     """
     key = f"{prefix}/{uuid.uuid4().hex}"
-    if length <= cfg.S3_INLINE_UPLOAD_MAX_BYTES:
+    if length <= cfg.MINIO_INLINE_UPLOAD_MAX_BYTES:
         body = data_stream.read(length)
-        s3_client(cfg).put_object(
-            Bucket=cfg.S3_BUCKET,
+        minio_client(cfg).put_object(
+            Bucket=cfg.MINIO_BUCKET,
             Key=key,
             Body=body,
             ContentType=content_type or "application/octet-stream",
@@ -147,7 +145,7 @@ def put_object(
 
 def get_object_bytes(cfg: Config, key: str) -> bytes:
     """Download full object (used by Celery grading)."""
-    r = s3_client(cfg).get_object(Bucket=cfg.S3_BUCKET, Key=key)
+    r = minio_client(cfg).get_object(Bucket=cfg.MINIO_BUCKET, Key=key)
     return r["Body"].read()
 
 
@@ -159,9 +157,9 @@ def get_presigned_url(
     *,
     bucket: str | None = None,
 ) -> str:
-    """Presign GET/PUT. Use ``bucket`` when the object lives in ``S3_GRADING_REPORTS_BUCKET`` etc."""
-    b = (bucket or "").strip() or cfg.S3_BUCKET
-    client = s3_client_for_presign(cfg)
+    """Presign GET/PUT. Use ``bucket`` when the object lives in a non-default reports bucket."""
+    b = (bucket or "").strip() or cfg.MINIO_BUCKET
+    client = minio_client_for_presign(cfg)
     m = method.upper()
     if m == "GET":
         return client.generate_presigned_url(
@@ -185,16 +183,16 @@ def presigned_put_url(
     expires: Optional[int] = None,
 ) -> str:
     """
-    Browser → S3 direct upload. Client must send the same Content-Type header on PUT.
+    Browser → MinIO direct upload. Client must send the same Content-Type header on PUT.
     Keeps large files off the Flask host (production ingress is metadata + presign only).
     """
-    exp = expires if expires is not None else cfg.S3_PRESIGN_PUT_EXPIRES
-    client = s3_client_for_presign(cfg)
+    exp = expires if expires is not None else cfg.MINIO_PRESIGN_PUT_EXPIRES
+    client = minio_client_for_presign(cfg)
     ct = content_type or "application/octet-stream"
     return client.generate_presigned_url(
         "put_object",
         Params={
-            "Bucket": cfg.S3_BUCKET,
+            "Bucket": cfg.MINIO_BUCKET,
             "Key": key,
             "ContentType": ct,
         },
@@ -206,10 +204,11 @@ def presigned_put_url(
 def object_exists(cfg: Config, key: str) -> bool:
     """Return True if object is present (used to finalize direct uploads)."""
     try:
-        s3_client(cfg).head_object(Bucket=cfg.S3_BUCKET, Key=key)
+        minio_client(cfg).head_object(Bucket=cfg.MINIO_BUCKET, Key=key)
         return True
     except ClientError as e:
         code = e.response.get("Error", {}).get("Code", "")
         if code in ("404", "NoSuchKey", "NotFound", "404 Not Found"):
             return False
         raise
+

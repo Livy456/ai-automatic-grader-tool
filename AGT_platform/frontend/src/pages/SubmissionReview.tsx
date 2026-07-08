@@ -1,6 +1,5 @@
 import { useCallback, useEffect, useMemo, useState } from "react";
 import { useNavigate, useParams } from "react-router-dom";
-import { jwtDecode } from "jwt-decode";
 import {
   Box,
   Button,
@@ -25,17 +24,10 @@ import ArrowBackOutlined from "@mui/icons-material/ArrowBackOutlined";
 import ContentCopyOutlined from "@mui/icons-material/ContentCopyOutlined";
 import ExpandMoreOutlined from "@mui/icons-material/ExpandMoreOutlined";
 import { api } from "../api";
-import { getToken } from "../auth";
 import StatusChip from "../components/StatusChip";
 import EvidenceBlock from "../components/EvidenceBlock";
 
 const POLL_STATUSES = new Set(["uploading", "uploaded", "queued", "grading"]);
-
-interface JwtPayload {
-  id: number;
-  email: string;
-  role: string;
-}
 
 type AiScore = {
   criterion: string;
@@ -83,17 +75,7 @@ export default function SubmissionReview() {
   const [overrideBusy, setOverrideBusy] = useState(false);
   const [overrideErr, setOverrideErr] = useState<string | null>(null);
 
-  const role = useMemo(() => {
-    const t = getToken();
-    if (!t) return "student";
-    try {
-      return jwtDecode<JwtPayload>(t).role;
-    } catch {
-      return "student";
-    }
-  }, []);
-
-  const canOverride = role === "teacher" || role === "admin";
+  const canOverride = true;
 
   useEffect(() => {
     let cancelled = false;

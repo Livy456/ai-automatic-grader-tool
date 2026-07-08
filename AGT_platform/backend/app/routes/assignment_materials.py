@@ -1,6 +1,6 @@
 """
 Teacher/admin uploads: rubric and answer-key files for a course Assignment (DB id).
-Objects land in S3 under assignments/by-id/<id>/materials/<kind>/...
+Objects land in MinIO under assignments/by-id/<id>/materials/<kind>/...
 """
 import uuid
 
@@ -10,7 +10,7 @@ from werkzeug.utils import secure_filename
 from app.config import Config
 from app.extensions import SessionLocal
 from app.models import Assignment, AssignmentAttachment
-from app.rbac import require_role
+from app.access import require_role
 from app.storage import upload_from_werkzeug_file
 
 bp = Blueprint("assignment_materials", __name__)
@@ -56,7 +56,7 @@ def upload_assignment_file(assignment_id: int):
         row = AssignmentAttachment(
             assignment_id=assignment_id,
             kind=kind,
-            s3_key=key,
+            object_key=key,
             filename=filename,
             uploaded_by_id=user.get("id"),
         )
@@ -69,7 +69,7 @@ def upload_assignment_file(assignment_id: int):
                 "assignment_id": assignment_id,
                 "kind": row.kind,
                 "filename": row.filename,
-                "s3_key": row.s3_key,
+                "object_key": row.object_key,
             }
         ), 201
     finally:

@@ -12,16 +12,20 @@ from .grading.multimodal.course_multimodal_runner import (
     run_db_submission_multimodal_pipeline,
     run_standalone_multimodal_pipeline,
 )
-from .grading.tools import extract_text_from_pdf
+from .grading.multimodal.pipeline_runner import (
+    build_submission_artifacts,
+    excerpt_attachment_bytes,
+)
 from .models import (
     AIScore,
     Assignment,
+    AssignmentAttachment,
     StandaloneAIScore,
     StandaloneArtifact,
     StandaloneSubmission,
     Submission,
 )
-from .storage import get_object_bytes, s3_client
+from .storage import get_object_bytes, minio_client
 
 celery_app = Celery(__name__)
 
@@ -103,57 +107,43 @@ def grade_submission(self, submission_id: int):
             db.commit()
             return
 
-        def _filename_hint_from_s3_key(key: str) -> str:
+        def _filename_hint_from_object_key(key: str) -> str:
             part = (key or "").rsplit("/", 1)[-1]
             if "_" in part:
                 return part.split("_", 1)[-1]
             return part
 
-        artifacts: dict = {}
+        submission_parts: list[tuple[str, bytes]] = []
         rubric_ex = ""
         answer_ex = ""
         for art in sub.artifacts:
-            data = get_object_bytes(cfg, art.s3_key)
-            fn_hint = _filename_hint_from_s3_key(art.s3_key)
+            data = get_object_bytes(cfg, art.object_key)
+            fn_hint = _filename_hint_from_object_key(art.object_key)
             if art.kind in ("rubric", "answer_key"):
-                ex = _excerpt_file_bytes(fn_hint, data)
+                ex = excerpt_attachment_bytes(fn_hint, data)
                 if art.kind == "rubric":
                     rubric_ex = (rubric_ex + "\n\n" + ex).strip() if rubric_ex else ex
                 else:
                     answer_ex = (answer_ex + "\n\n" + ex).strip() if answer_ex else ex
                 continue
-            if art.kind.endswith("pdf"):
-                artifacts["pdf"] = data
-            if art.kind.endswith("txt"):
-                artifacts["txt"] = data
-            if art.kind.endswith("ipynb"):
-                artifacts["ipynb"] = data
-            if art.kind.endswith("py"):
-                artifacts["py"] = data
-            if art.kind.endswith("mp4"):
-                artifacts["mp4"] = data
-            if art.kind.endswith("mp3"):
-                artifacts["mp3"] = data
-            if art.kind.endswith("wav"):
-                artifacts["wav"] = data
-            if art.kind.endswith("m4a"):
-                artifacts["m4a"] = data
-            if art.kind.endswith("webm"):
-                artifacts["webm"] = data
-            if art.kind.endswith("zip"):
-                artifacts["zip"] = data
-            if art.kind.endswith("png"):
-                artifacts["png"] = data
-            if art.kind.endswith("jpg") or art.kind.endswith("jpeg"):
-                artifacts["jpg"] = data
-            if art.kind.endswith("docx"):
-                artifacts["docx"] = data
-            if art.kind.endswith("xlsx"):
-                artifacts["xlsx"] = data
-            if art.kind.endswith("csv"):
-                artifacts["csv"] = data
+            submission_parts.append((fn_hint or art.kind, data))
 
         is_public_autograder = assignment.course_id is None
+        if not is_public_autograder:
+            for att in (
+                db.query(AssignmentAttachment)
+                .filter_by(assignment_id=assignment.id)
+                .order_by(AssignmentAttachment.created_at.desc())
+                .all()
+            ):
+                data = get_object_bytes(cfg, att.object_key)
+                ex = excerpt_attachment_bytes(att.filename, data)
+                if att.kind == "rubric":
+                    rubric_ex = (rubric_ex + "\n\n" + ex).strip() if rubric_ex else ex
+                elif att.kind == "answer_key":
+                    answer_ex = (answer_ex + "\n\n" + ex).strip() if answer_ex else ex
+
+        artifacts = build_submission_artifacts(submission_parts)
         if is_public_autograder:
             merged_rubric_parts = []
             grt = getattr(assignment, "grader_rubric_text", None)
@@ -285,13 +275,13 @@ def grade_submission(self, submission_id: int):
                 }
                 if entropy_meta is not None:
                     grading_report["entropy_meta"] = entropy_meta
-                s3_client(cfg).put_object(
-                    Bucket=cfg.S3_GRADING_REPORTS_BUCKET,
+                minio_client(cfg).put_object(
+                    Bucket=cfg.MINIO_GRADING_REPORTS_BUCKET,
                     Key=report_key,
                     Body=json.dumps(grading_report, indent=2).encode("utf-8"),
                     ContentType="application/json",
                 )
-                sub_ref.grading_report_s3_key = report_key
+                sub_ref.grading_report_object_key = report_key
                 db.commit()
         except Exception as e:
             _log.error(
@@ -311,47 +301,6 @@ def grade_submission(self, submission_id: int):
         raise
     finally:
         db.close()
-
-
-def _artifact_bucket_key(kind: str, filename: str) -> str | None:
-    k = (kind or "").lower().split(".")[-1]
-    fn = (filename or "").lower()
-    for ext in (
-        "pdf",
-        "txt",
-        "ipynb",
-        "py",
-        "mp4",
-        "mp3",
-        "wav",
-        "m4a",
-        "webm",
-        "zip",
-        "png",
-        "jpg",
-        "jpeg",
-        "docx",
-        "csv",
-        "xlsx",
-        "md",
-    ):
-        if k == ext or fn.endswith(f".{ext}"):
-            if ext == "jpeg":
-                return "jpg"
-            return ext
-    return None
-
-
-def _excerpt_file_bytes(filename: str, data: bytes) -> str:
-    if not data:
-        return ""
-    fn = (filename or "").lower()
-    if fn.endswith(".pdf") or (len(data) > 4 and data[:4] == b"%PDF"):
-        try:
-            return extract_text_from_pdf(data)
-        except Exception:
-            return ""
-    return data.decode("utf-8", errors="ignore")[:80000]
 
 
 @celery_app.task(name="grade_standalone_submission", bind=True, max_retries=2)
@@ -381,21 +330,20 @@ def grade_standalone_submission(self, submission_id: int):
         db.commit()
 
         arts = db.query(StandaloneArtifact).filter_by(submission_id=sub.id).all()
-        main: dict[str, bytes] = {}
+        submission_parts: list[tuple[str, bytes]] = []
         rubric_ex = ""
         answer_ex = ""
         for art in arts:
-            data = get_object_bytes(cfg, art.s3_key)
+            data = get_object_bytes(cfg, art.object_key)
             if art.kind in ("rubric", "answer_key"):
-                ex = _excerpt_file_bytes(art.filename, data)
+                ex = excerpt_attachment_bytes(art.filename, data)
                 if art.kind == "rubric":
                     rubric_ex = (rubric_ex + "\n\n" + ex).strip() if rubric_ex else ex
                 else:
                     answer_ex = (answer_ex + "\n\n" + ex).strip() if answer_ex else ex
                 continue
-            bkey = _artifact_bucket_key(art.kind, art.filename)
-            if bkey:
-                main[bkey] = data
+            submission_parts.append((art.filename or art.kind, data))
+        main = build_submission_artifacts(submission_parts)
 
         result = run_standalone_multimodal_pipeline(
             cfg,
@@ -483,13 +431,13 @@ def grade_standalone_submission(self, submission_id: int):
                 }
                 if entropy_meta is not None:
                     grading_report["entropy_meta"] = entropy_meta
-                s3_client(cfg).put_object(
-                    Bucket=cfg.S3_GRADING_REPORTS_BUCKET,
+                minio_client(cfg).put_object(
+                    Bucket=cfg.MINIO_GRADING_REPORTS_BUCKET,
                     Key=report_key,
                     Body=json.dumps(grading_report, indent=2).encode("utf-8"),
                     ContentType="application/json",
                 )
-                sub_ref.grading_report_s3_key = report_key
+                sub_ref.grading_report_object_key = report_key
                 db.commit()
         except Exception as e:
             _log.error(

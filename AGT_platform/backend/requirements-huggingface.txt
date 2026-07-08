@@ -1,9 +1,0 @@
-# Optional PyTorch / transformers stack (e.g. local experiments). Per-chunk multimodal grading
-# uses the OpenAI API only; there is no in-repo Hugging Face chat client wired to Celery.
-# Install in the same venv as the backend, e.g.:
-#   pip install -r requirements.txt -r requirements-huggingface.txt
-torch>=2.2.0
-transformers>=4.51.0
-accelerate>=0.30.0
-safetensors>=0.4.0
-huggingface_hub>=0.26.0

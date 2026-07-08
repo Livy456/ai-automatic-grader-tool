@@ -164,7 +164,7 @@ export default function StandaloneResult() {
                   variant="outlined"
                 />
               )}
-              {sub.grading_report_s3_key && (
+              {sub.grading_report_object_key && (
                 <Button
                   size="small"
                   variant="outlined"

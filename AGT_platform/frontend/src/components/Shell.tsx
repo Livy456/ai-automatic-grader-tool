@@ -1,13 +1,10 @@
-import { useEffect, useMemo, useState, type ReactNode } from "react";
+import { useState, type ReactNode } from "react";
 import {
   Outlet,
   useLocation,
-  useNavigate,
   NavLink,
 } from "react-router-dom";
-import { jwtDecode } from "jwt-decode";
 import {
-  Alert,
   AppBar,
   Avatar,
   Box,
@@ -19,7 +16,6 @@ import {
   ListItemButton,
   ListItemIcon,
   ListItemText,
-  Snackbar,
   Toolbar,
   Tooltip,
   Typography,
@@ -27,7 +23,6 @@ import {
   useTheme,
 } from "@mui/material";
 import MenuIcon from "@mui/icons-material/Menu";
-import LogoutOutlined from "@mui/icons-material/LogoutOutlined";
 import DashboardOutlined from "@mui/icons-material/DashboardOutlined";
 import GradeOutlined from "@mui/icons-material/GradeOutlined";
 import UploadFileOutlined from "@mui/icons-material/UploadFileOutlined";
@@ -35,32 +30,15 @@ import AssignmentTurnedInOutlined from "@mui/icons-material/AssignmentTurnedInOu
 import AssignmentOutlined from "@mui/icons-material/AssignmentOutlined";
 import AdminPanelSettingsOutlined from "@mui/icons-material/AdminPanelSettingsOutlined";
 import AutoFixHighOutlined from "@mui/icons-material/AutoFixHighOutlined";
-import { apiBase, refreshAccessToken } from "../api";
-import { getToken, clearToken } from "../auth";
 
-interface JwtPayload {
-  id: number;
-  email: string;
-  role: string;
-  name?: string;
-}
-
-function initialsFromPayload(p: JwtPayload): string {
-  if (p.name && p.name.trim()) {
-    const parts = p.name.trim().split(/\s+/).filter(Boolean);
-    const a = parts[0]?.[0] ?? "";
-    const b = parts[1]?.[0] ?? "";
-    return (a + b).toUpperCase() || "?";
-  }
-  const e = p.email || "?";
-  const local = e.split("@")[0] ?? e;
-  if (local.length >= 2) return local.slice(0, 2).toUpperCase();
-  return (e[0] ?? "?").toUpperCase();
-}
+const DISPLAY_USER = {
+  email: "guest@local",
+  role: "teacher",
+  initials: "AG",
+};
 
 function pageTitle(pathname: string): string {
   if (pathname === "/") return "Dashboard";
-  if (pathname === "/login") return "Sign in";
   if (pathname === "/grades") return "My Grades";
   if (pathname === "/assignments") return "Assignments";
   if (pathname === "/submissions") return "Submissions";
@@ -81,54 +59,40 @@ type NavItem = {
   label: string;
   to: string;
   icon: ReactNode;
-  roles: Array<"student" | "teacher" | "admin"> | "all";
 };
 
 const NAV_ITEMS: NavItem[] = [
-  { label: "Dashboard", to: "/", icon: <DashboardOutlined />, roles: "all" },
-  { label: "My Grades", to: "/grades", icon: <GradeOutlined />, roles: ["student"] },
+  { label: "Dashboard", to: "/submissions", icon: <DashboardOutlined /> },
+  { label: "My Grades", to: "/grades", icon: <GradeOutlined /> },
   {
     label: "Submit Assignment",
     to: "/assignments",
     icon: <UploadFileOutlined />,
-    roles: ["student"],
   },
   {
     label: "Submissions",
     to: "/submissions",
     icon: <AssignmentTurnedInOutlined />,
-    roles: ["teacher", "admin"],
   },
   {
     label: "Assignments",
     to: "/assignments",
     icon: <AssignmentOutlined />,
-    roles: ["teacher", "admin"],
   },
   {
     label: "Autograder",
     to: "/autograder",
     icon: <AutoFixHighOutlined />,
-    roles: "all",
   },
   {
     label: "Admin Panel",
     to: "/admin",
     icon: <AdminPanelSettingsOutlined />,
-    roles: ["admin"],
   },
 ];
 
-function filterNav(role: string): NavItem[] {
-  return NAV_ITEMS.filter((item) => {
-    if (item.roles === "all") return true;
-    return item.roles.includes(role as "student" | "teacher" | "admin");
-  });
-}
-
 export default function Shell() {
   const theme = useTheme();
-  const navigate = useNavigate();
   const location = useLocation();
   const isMdUp = useMediaQuery(theme.breakpoints.up("md"));
   const isLgUp = useMediaQuery(theme.breakpoints.up("lg"));
@@ -137,71 +101,8 @@ export default function Shell() {
   const narrowNav = isMdUp && !isLgUp;
   const drawerWidth = narrowNav ? 48 : 240;
 
-  const payload = useMemo(() => {
-    const t = getToken();
-    if (!t) return null;
-    try {
-      return jwtDecode<JwtPayload>(t);
-    } catch {
-      return null;
-    }
-  }, [location.pathname]);
-
-  const [sessionSnackOpen, setSessionSnackOpen] = useState(false);
-
-  useEffect(() => {
-    const onSessionExpired = () => setSessionSnackOpen(true);
-    window.addEventListener("session-expired", onSessionExpired);
-    return () => window.removeEventListener("session-expired", onSessionExpired);
-  }, []);
-
-  useEffect(() => {
-    const t = getToken();
-    if (!t) {
-      return;
-    }
-
-    let exp: number | undefined;
-    try {
-      const decoded = jwtDecode<{ exp?: number }>(t);
-      exp = decoded.exp;
-    } catch {
-      clearToken();
-      navigate("/login", { replace: true });
-      return;
-    }
-
-    if (exp == null) {
-      return;
-    }
-
-    const nowSec = Math.floor(Date.now() / 1000);
-    const secsLeft = exp - nowSec;
-
-    if (secsLeft <= 0) {
-      void refreshAccessToken().then((ok) => {
-        if (!ok) {
-          clearToken();
-          navigate("/login?reason=session_expired", { replace: true });
-        }
-      });
-      return;
-    }
-
-    const refreshMs = Math.max((secsLeft - 60) * 1000, 5_000);
-    const timer = setTimeout(() => {
-      void refreshAccessToken();
-    }, Math.min(refreshMs, 2_147_483_647));
-
-    return () => clearTimeout(timer);
-  }, [location.pathname, navigate]);
-
-  const role = payload?.role ?? "student";
-  const navItems = filterNav(role);
+  const navItems = NAV_ITEMS;
   const title = pageTitle(location.pathname);
-
-  const roleChipColor =
-    role === "admin" ? "secondary" : role === "teacher" ? "primary" : "default";
 
   const drawer = (
     <Box sx={{ height: "100%", display: "flex", flexDirection: "column" }}>
@@ -272,8 +173,8 @@ export default function Shell() {
       <Box sx={{ p: narrowNav ? 0.5 : 2, borderTop: 1, borderColor: "divider" }}>
         {!narrowNav && (
           <>
-            <Typography variant="caption" color="text.secondary" display="block" noWrap title={payload?.email}>
-              {payload?.email ?? ""}
+            <Typography variant="caption" color="text.secondary" display="block" noWrap>
+              {DISPLAY_USER.email}
             </Typography>
             <Typography variant="caption" color="text.disabled">
               v0.1
@@ -289,35 +190,8 @@ export default function Shell() {
     </Box>
   );
 
-  async function handleLogout() {
-    const t = getToken();
-    try {
-      await fetch(`${apiBase()}/api/auth/logout`, {
-        method: "POST",
-        credentials: "include",
-        headers: {
-          "Content-Type": "application/json",
-          ...(t ? { Authorization: `Bearer ${t}` } : {}),
-        },
-      });
-    } catch {
-      /* still clear client state */
-    }
-    clearToken();
-    navigate("/login", { replace: true });
-  }
-
   return (
     <Box sx={{ display: "flex", minHeight: "100vh", bgcolor: "background.default" }}>
-      <Snackbar
-        open={sessionSnackOpen}
-        anchorOrigin={{ vertical: "bottom", horizontal: "center" }}
-        sx={{ zIndex: (t) => t.zIndex.modal + 2 }}
-      >
-        <Alert severity="warning" variant="filled" sx={{ width: "100%" }} role="alert">
-          Your session has expired. Please log in again. Redirecting to login…
-        </Alert>
-      </Snackbar>
       <AppBar
         position="fixed"
         elevation={0}
@@ -371,28 +245,21 @@ export default function Shell() {
             {title}
           </Typography>
           <Box sx={{ display: "flex", alignItems: "center", gap: 1, ml: 1 }}>
-            <Tooltip title={payload?.email ?? "User"}>
+            <Tooltip title={DISPLAY_USER.email}>
               <Avatar
                 sx={{ width: 36, height: 36, bgcolor: "secondary.main", fontSize: "0.85rem" }}
-                aria-label={`User initials ${initialsFromPayload(payload ?? { id: 0, email: "", role: "student" })}`}
+                aria-label={`User initials ${DISPLAY_USER.initials}`}
               >
-                {payload ? initialsFromPayload(payload) : "?"}
+                {DISPLAY_USER.initials}
               </Avatar>
             </Tooltip>
             <Chip
               size="small"
-              label={role}
-              color={roleChipColor}
-              variant={role === "student" ? "outlined" : "filled"}
-              aria-label={`Role: ${role}`}
+              label={DISPLAY_USER.role}
+              color="primary"
+              variant="filled"
+              aria-label={`Role: ${DISPLAY_USER.role}`}
             />
-            <IconButton
-              color="inherit"
-              onClick={handleLogout}
-              aria-label="Log out"
-            >
-              <LogoutOutlined />
-            </IconButton>
           </Box>
         </Toolbar>
       </AppBar>

@@ -1,5 +1,5 @@
 """
-Submissions: production path is browser → S3 (presigned PUT) → finalize → Celery.
+Submissions: production path is browser → MinIO (presigned PUT) → finalize → Celery.
 
 Multipart upload to Flask is opt-in (ALLOW_FLASK_MULTIPART_UPLOAD=true) for local dev only.
 """
@@ -16,7 +16,7 @@ from app.audit import log_event
 from app.config import Config
 from app.extensions import SessionLocal
 from app.models import AIScore, Assignment, Enrollment, Submission, SubmissionArtifact
-from app.rbac import require_auth
+from app.access import require_auth
 from app.storage import object_exists, presigned_put_url, upload_from_werkzeug_file
 from app.tasks import grade_submission
 
@@ -48,7 +48,7 @@ def _is_authorized_submitter(db, user: dict, assignment_id: int) -> bool:
 def direct_upload_start():
     """
     Create submission + artifact rows and return presigned PUT URLs.
-    Browser uploads bytes directly to S3 (no large body through Flask).
+    Browser uploads bytes directly to MinIO (no large body through Flask).
     """
     user = request.user
     if user["role"] not in _SUBMITTER_ROLES:
@@ -75,7 +75,7 @@ def direct_upload_start():
         db.add(sub)
         db.flush()
 
-        prefix = cfg.UPLOADS_S3_PREFIX.rstrip("/")
+        prefix = cfg.UPLOADS_OBJECT_PREFIX.rstrip("/")
         uploads_out = []
         for spec in files:
             raw_name = (spec.get("filename") or "").strip()
@@ -86,7 +86,7 @@ def direct_upload_start():
             kind = filename.split(".")[-1].lower()
             key = f"{prefix}/{assignment_id}/submissions/{sub.id}/{uuid.uuid4().hex}_{filename}"
             art = SubmissionArtifact(
-                submission_id=sub.id, kind=kind, s3_key=key
+                submission_id=sub.id, kind=kind, object_key=key
             )
             db.add(art)
             db.flush()
@@ -94,7 +94,7 @@ def direct_upload_start():
             uploads_out.append(
                 {
                     "artifact_id": art.id,
-                    "s3_key": key,
+                    "object_key": key,
                     "upload_url": url,
                     "content_type": content_type,
                 }
@@ -127,7 +127,7 @@ def direct_upload_start():
 @bp.post("/api/submissions/<int:submission_id>/finalize")
 @require_auth
 def direct_upload_finalize(submission_id: int):
-    """Verify S3 objects exist, then enqueue grading at most once (row lock)."""
+    """Verify object-store files exist, then enqueue grading at most once (row lock)."""
     user = request.user
     cfg = Config()
     db = SessionLocal()
@@ -172,8 +172,8 @@ def direct_upload_finalize(submission_id: int):
             return jsonify({"error": f"invalid state: {sub.status}"}), 409
 
         for art in sub.artifacts:
-            if not object_exists(cfg, art.s3_key):
-                return jsonify({"error": f"missing object: {art.s3_key}"}), 400
+            if not object_exists(cfg, art.object_key):
+                return jsonify({"error": f"missing object: {art.object_key}"}), 400
 
         sub.status = "uploaded"
         sub.updated_at = datetime.utcnow()
@@ -214,14 +214,14 @@ def direct_upload_finalize(submission_id: int):
 @bp.post("/api/submissions")
 @require_auth
 def submit():
-    """Legacy multipart → Flask → S3. Disabled in production (use direct-upload flow)."""
+    """Legacy multipart → Flask → MinIO. Disabled in production (use direct-upload flow)."""
     cfg = Config()
     if not cfg.ALLOW_FLASK_MULTIPART_UPLOAD:
         return (
             jsonify(
                 {
                     "error": "multipart upload disabled",
-                    "hint": "Use POST /api/submissions/direct-upload/start then S3 PUT then finalize",
+                    "hint": "Use POST /api/submissions/direct-upload/start then object-store PUT then finalize",
                 }
             ),
             410,
@@ -248,11 +248,11 @@ def submit():
                 continue
             kind = filename.split(".")[-1].lower()
             key = (
-                f"{cfg.UPLOADS_S3_PREFIX.rstrip('/')}/{assignment_id}/submissions/{sub.id}/"
+                f"{cfg.UPLOADS_OBJECT_PREFIX.rstrip('/')}/{assignment_id}/submissions/{sub.id}/"
                 f"{uuid.uuid4().hex}_{filename}"
             )
             upload_from_werkzeug_file(cfg, f, key)
-            db.add(SubmissionArtifact(submission_id=sub.id, kind=kind, s3_key=key))
+            db.add(SubmissionArtifact(submission_id=sub.id, kind=kind, object_key=key))
 
         sub.grading_dispatch_at = datetime.utcnow()
         task = grade_submission.delay(sub.id)
