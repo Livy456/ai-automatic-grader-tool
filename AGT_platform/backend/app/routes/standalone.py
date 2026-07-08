@@ -5,8 +5,9 @@ Uses StandaloneSubmission + StandaloneArtifact + StandaloneAIScore and grade_sta
 """
 from __future__ import annotations
 
+import json
 import uuid
-from datetime import datetime, timedelta
+from datetime import datetime, timedelta, timezone
 
 from flask import Blueprint, jsonify, request
 from sqlalchemy.orm import selectinload
@@ -15,9 +16,9 @@ from werkzeug.utils import secure_filename
 from app.audit import log_event
 from app.config import Config
 from app.extensions import SessionLocal
-from app.models import StandaloneAIScore, StandaloneArtifact, StandaloneSubmission
+from app.models import StandaloneAIScore, StandaloneArtifact, StandaloneSubmission, User
 from app.access import get_user_from_token
-from app.storage import get_presigned_url, object_exists, presigned_put_url
+from app.storage import get_object_bytes, get_presigned_url, object_exists, presigned_put_url
 from app.tasks import grade_standalone_submission
 
 bp = Blueprint("standalone", __name__)
@@ -26,6 +27,7 @@ _MAX_FILES = 20
 _MAX_TITLE_LEN = 512
 _STANDALONE_RATE_WINDOW_HOURS = 1
 _STANDALONE_RATE_MAX = 10
+_GUEST_EMAIL = "guest@local.ai-grader"
 
 
 def _client_ip() -> str:
@@ -37,6 +39,31 @@ def _client_ip() -> str:
 
 def _optional_user() -> dict | None:
     return get_user_from_token()
+
+
+def _standalone_user() -> dict:
+    """
+    Standalone autograder supports both authenticated and anonymous flows.
+    When no auth token is present, use a persisted local guest account.
+    """
+    user = _optional_user()
+    if user:
+        return user
+    db = SessionLocal()
+    try:
+        guest = db.query(User).filter_by(email=_GUEST_EMAIL).one_or_none()
+        if guest is None:
+            guest = User(
+                email=_GUEST_EMAIL,
+                name="Guest User",
+                role="admin",
+            )
+            db.add(guest)
+            db.commit()
+            db.refresh(guest)
+        return {"id": int(guest.id), "email": guest.email, "role": guest.role}
+    finally:
+        db.close()
 
 
 def _can_view_standalone(sub: StandaloneSubmission, user: dict | None) -> bool:
@@ -53,7 +80,7 @@ def _can_mutate_standalone(sub: StandaloneSubmission, user: dict | None) -> bool
 
 def _kind_for_spec(spec: dict, default: str) -> str:
     raw = (spec.get("artifact_kind") or spec.get("kind") or default).strip().lower()
-    if raw in ("submission", "rubric", "answer_key"):
+    if raw in ("submission", "rubric", "answer_key", "blank_assignment"):
         return raw
     return default
 
@@ -64,6 +91,8 @@ def _storage_kind_for_file(spec: dict, filename: str) -> str:
         return "rubric"
     if role == "answer_key":
         return "answer_key"
+    if role == "blank_assignment":
+        return "blank_assignment"
     ext = (filename.rsplit(".", 1)[-1] if "." in filename else "").lower()
     return ext or "bin"
 
@@ -76,12 +105,92 @@ def _parse_enqueue_grading(body: dict) -> bool:
     return True
 
 
+def _required_context_missing(sub: StandaloneSubmission, artifacts: list[StandaloneArtifact]) -> list[str]:
+    kinds = {str(a.kind or "").strip().lower() for a in artifacts}
+    has_rubric_json = any(
+        str(a.kind or "").strip().lower() == "rubric"
+        and str(a.filename or "").strip().lower().endswith(".json")
+        for a in artifacts
+    )
+    has_answer_key = bool((sub.answer_key_text or "").strip()) or "answer_key" in kinds
+    # Force uploaded JSON rubric usage so standalone criteria come from uploaded rubric rows.
+    has_rubric = has_rubric_json
+    has_blank_assignment = "blank_assignment" in kinds
+    missing: list[str] = []
+    if not has_answer_key:
+        missing.append("answer_key")
+    if not has_rubric:
+        missing.append("rubric_json")
+    if not has_blank_assignment:
+        missing.append("blank_assignment")
+    return missing
+
+
+def _question_from_evidence(ev: object) -> str | None:
+    if not isinstance(ev, dict):
+        return None
+    trio = ev.get("trio")
+    if isinstance(trio, dict):
+        q = str(trio.get("question") or "").strip()
+        if q:
+            return q
+    q = str(ev.get("question") or "").strip()
+    return q or None
+
+
+def _student_evidence_from_payload(ev: object) -> str:
+    if not isinstance(ev, dict):
+        return ""
+    trio = ev.get("trio")
+    if isinstance(trio, dict):
+        sr = str(trio.get("student_response") or "").strip()
+        if sr:
+            return sr
+    txt = str(ev.get("text") or "").strip()
+    return txt
+
+
+def _score_to_100(raw: object) -> float | None:
+    try:
+        score = float(raw)
+    except (TypeError, ValueError):
+        return None
+    if 0.0 <= score <= 1.0:
+        score *= 100.0
+    if score < 0.0:
+        score = 0.0
+    if score > 100.0:
+        score = 100.0
+    return score
+
+
+def _safe_report_json(cfg: Config, object_key: str | None) -> dict:
+    if not object_key:
+        return {}
+    try:
+        raw = get_object_bytes(cfg, object_key)
+        if not raw:
+            return {}
+        parsed = json.loads(raw.decode("utf-8", errors="ignore"))
+        return parsed if isinstance(parsed, dict) else {}
+    except Exception:
+        return {}
+
+
+def _iso_utc(dt: datetime | None) -> str | None:
+    if dt is None:
+        return None
+    if dt.tzinfo is None:
+        dt = dt.replace(tzinfo=timezone.utc)
+    else:
+        dt = dt.astimezone(timezone.utc)
+    return dt.isoformat().replace("+00:00", "Z")
+
+
 @bp.post("/api/standalone/submissions/start")
 def standalone_start():
     """Create StandaloneSubmission + StandaloneArtifact rows; return presigned PUT URLs."""
-    user = _optional_user()
-    if not user:
-        return jsonify({"error": "authentication required"}), 401
+    user = _standalone_user()
 
     body = request.get_json(silent=True) or {}
     title = (body.get("title") or "").strip()
@@ -188,9 +297,7 @@ def standalone_start():
 
 @bp.post("/api/standalone/submissions/<int:submission_id>/finalize")
 def standalone_finalize(submission_id: int):
-    user = _optional_user()
-    if not user:
-        return jsonify({"error": "authentication required"}), 401
+    user = _standalone_user()
 
     body = request.get_json(silent=True) or {}
     enqueue_grading = _parse_enqueue_grading(body)
@@ -230,6 +337,22 @@ def standalone_finalize(submission_id: int):
 
         if sub.status not in ("uploading", "uploaded"):
             return jsonify({"error": f"invalid state: {sub.status}"}), 409
+
+        missing = _required_context_missing(sub, list(sub.artifacts))
+        if missing:
+            return (
+                jsonify(
+                    {
+                        "error": "missing required context",
+                        "detail": (
+                            "Standalone grading requires answer key, uploaded JSON rubric, and blank "
+                            "assignment template in Additional Context before finalize."
+                        ),
+                        "missing": missing,
+                    }
+                ),
+                400,
+            )
 
         for art in sub.artifacts:
             if not object_exists(cfg, art.object_key):
@@ -290,9 +413,7 @@ def standalone_finalize(submission_id: int):
 
 @bp.patch("/api/standalone/submissions/<int:submission_id>/context")
 def standalone_patch_context(submission_id: int):
-    user = _optional_user()
-    if not user:
-        return jsonify({"error": "authentication required"}), 401
+    user = _standalone_user()
 
     body = request.get_json(silent=True) or {}
     db = SessionLocal()
@@ -344,9 +465,7 @@ def standalone_patch_context(submission_id: int):
 
 @bp.post("/api/standalone/submissions/<int:submission_id>/context_files/presign")
 def standalone_presign_context_files(submission_id: int):
-    user = _optional_user()
-    if not user:
-        return jsonify({"error": "authentication required"}), 401
+    user = _standalone_user()
 
     body = request.get_json(silent=True) or {}
     files = body.get("files")
@@ -380,8 +499,17 @@ def standalone_presign_context_files(submission_id: int):
             if not filename:
                 continue
             role = _kind_for_spec(spec, "rubric")
-            if role not in ("rubric", "answer_key"):
-                return jsonify({"error": "context files must be rubric or answer_key"}), 400
+            if role not in ("rubric", "answer_key", "blank_assignment"):
+                return (
+                    jsonify(
+                        {
+                            "error": (
+                                "context files must be rubric, answer_key, or blank_assignment"
+                            )
+                        }
+                    ),
+                    400,
+                )
             content_type = (spec.get("content_type") or "application/octet-stream").strip()
             skind = _storage_kind_for_file(spec, filename)
             key = f"standalone/{sub.id}/{uuid.uuid4().hex}_{filename}"
@@ -427,9 +555,7 @@ def standalone_presign_context_files(submission_id: int):
 
 @bp.post("/api/standalone/submissions/<int:submission_id>/enqueue_grading")
 def standalone_enqueue_grading(submission_id: int):
-    user = _optional_user()
-    if not user:
-        return jsonify({"error": "authentication required"}), 401
+    user = _standalone_user()
 
     cfg = Config()
     db = SessionLocal()
@@ -458,6 +584,22 @@ def standalone_enqueue_grading(submission_id: int):
 
         if sub.status != "uploaded":
             return jsonify({"error": f"expected status uploaded, got {sub.status}"}), 409
+
+        missing = _required_context_missing(sub, list(sub.artifacts))
+        if missing:
+            return (
+                jsonify(
+                    {
+                        "error": "missing required context",
+                        "detail": (
+                            "Standalone grading requires answer key, uploaded JSON rubric, and blank "
+                            "assignment template in Additional Context before enqueue."
+                        ),
+                        "missing": missing,
+                    }
+                ),
+                400,
+            )
 
         for art in sub.artifacts:
             if not object_exists(cfg, art.object_key):
@@ -497,9 +639,7 @@ def standalone_enqueue_grading(submission_id: int):
 
 @bp.get("/api/standalone/submissions")
 def standalone_list():
-    user = _optional_user()
-    if not user:
-        return jsonify({"error": "authentication required"}), 401
+    user = _standalone_user()
 
     page = int(request.args.get("page") or 1)
     per_page = min(int(request.args.get("per_page") or 20), 100)
@@ -521,13 +661,14 @@ def standalone_list():
         )
         items = []
         for r in rows:
+            score = _score_to_100(r.final_score)
             items.append(
                 {
                     "id": r.id,
                     "title": r.title,
                     "status": r.status,
-                    "final_score": float(r.final_score) if r.final_score is not None else None,
-                    "created_at": r.created_at.isoformat() if r.created_at else None,
+                    "final_score": score,
+                    "created_at": _iso_utc(r.created_at),
                 }
             )
         return jsonify(
@@ -539,9 +680,7 @@ def standalone_list():
 
 @bp.get("/api/standalone/submissions/<int:submission_id>")
 def standalone_get(submission_id: int):
-    user = _optional_user()
-    if not user:
-        return jsonify({"error": "authentication required"}), 401
+    user = _standalone_user()
 
     db = SessionLocal()
     try:
@@ -551,27 +690,62 @@ def standalone_get(submission_id: int):
         if not _can_view_standalone(sub, user):
             return jsonify({"error": "forbidden"}), 403
 
+        cfg = Config()
+        report = _safe_report_json(cfg, sub.grading_report_object_key)
         scores = db.query(StandaloneAIScore).filter_by(submission_id=sub.id).all()
         log_event(user["id"], "VIEW_STANDALONE_AUTOGRADER", "StandaloneSubmission", sub.id, {})
+        final_score = _score_to_100(sub.final_score)
+        if final_score is None and report.get("final_score") is not None:
+            final_score = _score_to_100(report.get("final_score"))
+        question_grades = report.get("question_grades")
+        if not isinstance(question_grades, list):
+            question_grades = []
+        rubric_points_earned = 0.0
+        rubric_points_max = 0.0
+        for s in scores:
+            try:
+                rubric_points_earned += float(s.score or 0.0)
+            except (TypeError, ValueError):
+                pass
+            ev = s.evidence if isinstance(s.evidence, dict) else {}
+            mp_raw = ev.get("max_points")
+            try:
+                if mp_raw is not None:
+                    rubric_points_max += float(mp_raw)
+            except (TypeError, ValueError):
+                pass
+        if rubric_points_max <= 0:
+            for qg in question_grades:
+                if not isinstance(qg, dict):
+                    continue
+                ov = qg.get("overall") or {}
+                try:
+                    rubric_points_max += float(ov.get("max_points") or 0.0)
+                except (TypeError, ValueError):
+                    continue
         return jsonify(
             {
                 "id": sub.id,
                 "title": sub.title,
                 "status": sub.status,
-                "final_score": float(sub.final_score) if sub.final_score is not None else None,
-                "final_feedback": sub.final_feedback,
+                "final_score": final_score,
+                "max_points": round(rubric_points_max, 4) if rubric_points_max > 0 else report.get("max_points"),
+                "rubric_points_earned": round(rubric_points_earned, 4),
                 "grading_instructions": sub.grading_instructions,
-                "grading_dispatch_at": sub.grading_dispatch_at.isoformat()
-                if sub.grading_dispatch_at
-                else None,
-                "created_at": sub.created_at.isoformat() if sub.created_at else None,
+                "grading_dispatch_at": _iso_utc(sub.grading_dispatch_at),
+                "created_at": _iso_utc(sub.created_at),
                 "grading_report_object_key": sub.grading_report_object_key,
+                "question_grades": question_grades,
                 "ai_scores": [
                     {
                         "criterion": s.criterion,
-                        "score": float(s.score),
+                        "score": float(s.score) if s.score is not None else 0.0,
                         "confidence": float(s.confidence),
+                        "justification": s.rationale,
                         "rationale": s.rationale,
+                        "question": _question_from_evidence(s.evidence),
+                        "student_evidence": _student_evidence_from_payload(s.evidence),
+                        "evidence": s.evidence if isinstance(s.evidence, dict) else {},
                     }
                     for s in scores
                 ],
@@ -584,9 +758,7 @@ def standalone_get(submission_id: int):
 @bp.get("/api/standalone/submissions/<int:submission_id>/report")
 def standalone_get_report(submission_id: int):
     """Return a presigned GET URL for the grading report JSON in MinIO."""
-    user = _optional_user()
-    if not user:
-        return jsonify({"error": "authentication required"}), 401
+    user = _standalone_user()
 
     cfg = Config()
     db = SessionLocal()
@@ -614,9 +786,7 @@ def standalone_get_report(submission_id: int):
 
 @bp.delete("/api/standalone/submissions/<int:submission_id>")
 def standalone_delete(submission_id: int):
-    user = _optional_user()
-    if not user:
-        return jsonify({"error": "authentication required"}), 401
+    user = _standalone_user()
 
     db = SessionLocal()
     try:

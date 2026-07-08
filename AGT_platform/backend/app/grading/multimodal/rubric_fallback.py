@@ -1,3 +1,5 @@
+# DELETE THIS FILE LATER!!
+
 """Fallback rubric rows when no course JSON rubric is attached (local tests, prose-only generics)."""
 
 from __future__ import annotations

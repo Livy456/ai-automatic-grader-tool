@@ -60,6 +60,8 @@ def run_standalone_multimodal_pipeline(
     rubric_file_excerpt: str | None,
     answer_key_file_excerpt: str | None,
     grading_instructions: str | None = None,
+    modality_hints_extra: dict[str, Any] | None = None,
+    rubric_column_override: Any = None,
 ) -> dict[str, Any]:
     """Standalone autograder: default structured rubric; prose rubric/AK in the prompt."""
     from types import SimpleNamespace
@@ -108,9 +110,15 @@ def run_standalone_multimodal_pipeline(
         artifacts_bytes=artifacts_bytes,
         assignment_id="0",
         student_id=f"standalone_{submission_id}",
-        rubric_column=list(DEFAULT_STANDALONE_RUBRIC),
+        rubric_column=(
+            rubric_column_override
+            if rubric_column_override is not None
+            else list(DEFAULT_STANDALONE_RUBRIC)
+        ),
         rubric_text=merged_rubric,
         answer_key_text=merged_ak,
         assignment_stem=base_title,
+        require_answer_key=True,
+        modality_hints_extra=modality_hints_extra,
         validate_output=False,
     )

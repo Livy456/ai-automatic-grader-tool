@@ -1,6 +1,7 @@
 import json
 import logging
 from datetime import datetime
+from pathlib import Path
 from types import SimpleNamespace
 
 from celery import Celery
@@ -59,6 +60,35 @@ def _evidence_for_db(ev):
 
 def _rationale_for_db(c: dict) -> str:
     return (c.get("rationale") or c.get("justification") or "").strip() or ""
+
+
+def _student_evidence_from_criterion(c: dict) -> str:
+    ev = c.get("evidence")
+    if isinstance(ev, dict):
+        trio = ev.get("trio")
+        if isinstance(trio, dict):
+            s = str(trio.get("student_response") or "").strip()
+            if s:
+                return s
+        txt = str(ev.get("text") or "").strip()
+        return txt
+    if isinstance(ev, str):
+        return ev.strip()
+    return ""
+
+
+def _parse_uploaded_rubric_column(filename: str, data: bytes):
+    """Best-effort parse of uploaded rubric JSON into a structured rubric column."""
+    fn = (filename or "").strip().lower()
+    if not fn.endswith(".json"):
+        return None
+    try:
+        raw = json.loads(data.decode("utf-8", errors="ignore"))
+    except Exception:
+        return None
+    if isinstance(raw, (list, dict)):
+        return raw
+    return None
 
 
 def _ensure_db():
@@ -333,17 +363,41 @@ def grade_standalone_submission(self, submission_id: int):
         submission_parts: list[tuple[str, bytes]] = []
         rubric_ex = ""
         answer_ex = ""
+        blank_template_bytes: bytes | None = None
+        blank_template_filename: str = ""
+        blank_template_suffix: str = ""
+        rubric_column_override = None
         for art in arts:
             data = get_object_bytes(cfg, art.object_key)
             if art.kind in ("rubric", "answer_key"):
                 ex = excerpt_attachment_bytes(art.filename, data)
                 if art.kind == "rubric":
                     rubric_ex = (rubric_ex + "\n\n" + ex).strip() if rubric_ex else ex
+                    parsed = _parse_uploaded_rubric_column(str(art.filename or ""), data)
+                    if parsed is not None:
+                        rubric_column_override = parsed
                 else:
                     answer_ex = (answer_ex + "\n\n" + ex).strip() if answer_ex else ex
                 continue
+            if art.kind == "blank_assignment":
+                blank_template_bytes = bytes(data)
+                blank_template_filename = str(art.filename or "").strip()
+                blank_template_suffix = Path(blank_template_filename).suffix.lower()
+                continue
             submission_parts.append((art.filename or art.kind, data))
+        if rubric_column_override is None:
+            raise ValueError(
+                "Standalone grading requires an uploaded, parseable JSON rubric file."
+            )
         main = build_submission_artifacts(submission_parts)
+        modality_hints_extra: dict[str, object] = {}
+        if blank_template_bytes:
+            modality_hints_extra["blank_assignment_template_bytes"] = blank_template_bytes
+            modality_hints_extra["blank_assignment_template_suffix"] = blank_template_suffix
+            if blank_template_filename:
+                modality_hints_extra["blank_assignment_matched_file"] = blank_template_filename
+            if blank_template_suffix == ".ipynb":
+                modality_hints_extra["blank_assignment_ipynb_bytes"] = blank_template_bytes
 
         result = run_standalone_multimodal_pipeline(
             cfg,
@@ -355,6 +409,8 @@ def grade_standalone_submission(self, submission_id: int):
             rubric_ex or None,
             answer_ex or None,
             getattr(sub, "grading_instructions", None),
+            modality_hints_extra or None,
+            rubric_column_override,
         )
         _default_ml = f"openai:{(cfg.OPENAI_MODEL or 'gpt-4o-mini').strip()}"
         model_used = (result.pop("_model_used", None) or _default_ml)[:200]
@@ -365,6 +421,20 @@ def grade_standalone_submission(self, submission_id: int):
 
         criteria = result.get("criteria", [])
         overall = result.get("overall", {})
+        question_grades = result.get("question_grades", [])
+        total_rubric_points = 0.0
+        total_rubric_points_earned = 0.0
+        for c in criteria:
+            if not isinstance(c, dict):
+                continue
+            try:
+                total_rubric_points_earned += float(c.get("score", 0.0))
+            except (TypeError, ValueError):
+                pass
+            try:
+                total_rubric_points += float(c.get("max_points", 0.0))
+            except (TypeError, ValueError):
+                pass
         flags = set(result.get("flags", []))
         mm_review = str(result.get("_assignment_review_status", "") or "").lower()
         multimodal_needs_review = mm_review in ("caution", "flagged", "escalation")
@@ -413,7 +483,8 @@ def grade_standalone_submission(self, submission_id: int):
                     "final_score": float(sub_ref.final_score)
                     if sub_ref.final_score is not None
                     else None,
-                    "final_feedback": sub_ref.final_feedback,
+                    "max_points": round(total_rubric_points, 4),
+                    "rubric_points_earned": round(total_rubric_points_earned, 4),
                     "model_used": model_used,
                     "models_used": models_used,
                     "graded_at": sub_ref.updated_at.isoformat()
@@ -423,10 +494,49 @@ def grade_standalone_submission(self, submission_id: int):
                         {
                             "criterion": c.get("name", ""),
                             "score": c.get("score", 0),
+                            "max_points": c.get("max_points"),
+                            "rubric_points_earned": c.get("score", 0),
                             "confidence": c.get("confidence", 0.5),
+                            "justification": _rationale_for_db(c),
                             "rationale": _rationale_for_db(c),
+                            "student_evidence": _student_evidence_from_criterion(c),
+                            "evidence": _evidence_for_db(c.get("evidence")),
                         }
                         for c in criteria
+                    ],
+                    "question_grades": [
+                        {
+                            "chunk_id": qg.get("chunk_id"),
+                            "source_chunk_id": qg.get("_source_chunk_id"),
+                            "overall": {
+                                "score": (qg.get("overall") or {}).get("score"),
+                                "max_points": (qg.get("overall") or {}).get("max_points"),
+                                "rubric_points_earned": (qg.get("overall") or {}).get("rubric_points_earned"),
+                                "confidence": (qg.get("overall") or {}).get("confidence"),
+                            },
+                            "question_payload": {
+                                "chunk_id": qg.get("chunk_id"),
+                                "source_chunk_id": qg.get("_source_chunk_id"),
+                                "review_status": qg.get("review_status"),
+                                "review_reasons": qg.get("review_reasons") or [],
+                            },
+                            "criteria": [
+                                {
+                                    "criterion": qc.get("name", ""),
+                                    "score": qc.get("score", 0),
+                                    "max_points": qc.get("max_points"),
+                                    "rubric_points_earned": qc.get("score", 0),
+                                    "confidence": qc.get("confidence", 0.5),
+                                    "justification": str(qc.get("justification") or "").strip(),
+                                    "student_evidence": str(qc.get("evidence") or "").strip(),
+                                    "evidence": _evidence_for_db(qc.get("evidence")),
+                                }
+                                for qc in (qg.get("criteria") or [])
+                                if isinstance(qc, dict)
+                            ],
+                        }
+                        for qg in question_grades
+                        if isinstance(qg, dict)
                     ],
                 }
                 if entropy_meta is not None:

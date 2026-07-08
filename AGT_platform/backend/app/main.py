@@ -3,10 +3,6 @@ from flask_cors import CORS
 from sqlalchemy import text
 
 from .config import Config
-# from extensions import init_db, Base, engine
-
-# from app import extensions
-# from app.extensions import Base
 from app.extensions import init_db
 from app.models import Base
 
@@ -20,28 +16,15 @@ from .routes_assignments import bp as assignments_bp
 from .routes.assignment_materials import bp as assignment_materials_bp
 
 
-def _init_database_with_fallback(app: Flask):
-    """
-    Initialize SQLAlchemy using DATABASE_URL and probe connectivity.
-    If the configured database is unreachable (common in local dev when Postgres
-    is down), fall back to a local SQLite file so grading endpoints can still run.
-    """
+def _init_database_strict(app: Flask):
+    """Initialize SQLAlchemy and fail fast when DB is unreachable."""
     configured_url = app.config["DATABASE_URL"]
     engine = init_db(configured_url)
-    try:
-        with engine.connect() as conn:
-            conn.execute(text("SELECT 1"))
-        app.logger.info("Database connected: %s", configured_url)
-    except Exception as exc:
-        sqlite_url = "sqlite:///./backend_local_fallback.db"
-        app.logger.warning(
-            "Primary database unavailable (%s). Falling back to %s",
-            exc,
-            sqlite_url,
-        )
-        engine = init_db(sqlite_url)
+    with engine.connect() as conn:
+        conn.execute(text("SELECT 1"))
+    app.logger.info("Database connected: %s", configured_url)
 
-    # Ensure required tables exist for local/dev startup and fallback DBs.
+    # Ensure required tables exist only after successful connectivity probe.
     Base.metadata.create_all(bind=engine)
     return engine
 
@@ -88,15 +71,7 @@ def create_app():
         methods=["GET", "POST", "PUT", "PATCH", "DELETE", "OPTIONS"],
     )
 
-    # init_db(app.config["DATABASE_URL"])
-    # Base.metadata.create_all(bind=engine)
-    
-    # extensions.init_db(app.config["DATABASE_URL"])
-    # Base.metadata.create_all(bind=extensions.engine)
-
-    print("DATABASE_URL =", app.config.get("DATABASE_URL"))
-    print("DATABASE_URL_ACTUAL: ", app.config["DATABASE_URL"])
-    _init_database_with_fallback(app)
+    _init_database_strict(app)
 
     init_celery(app)
 

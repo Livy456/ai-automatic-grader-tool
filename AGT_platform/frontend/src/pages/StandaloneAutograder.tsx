@@ -1,5 +1,5 @@
 import { useCallback, useEffect, useState } from "react";
-import { useNavigate } from "react-router-dom";
+import { useLocation, useNavigate } from "react-router-dom";
 import {
   Alert,
   Box,
@@ -40,6 +40,12 @@ function formatBytes(n: number): string {
   return `${(n / (1024 * 1024)).toFixed(1)} MB`;
 }
 
+function parseServerDateAsLocal(ts: string): Date {
+  // Legacy backend rows may omit timezone; treat those as UTC to avoid local-shift errors.
+  const hasZone = /[zZ]|[+-]\d{2}:\d{2}$/.test(ts);
+  return new Date(hasZone ? ts : `${ts}Z`);
+}
+
 /** Assignment title for public autograder rows (no course enrollment). */
 function derivedStandaloneTitle(mainFiles: File[]): string {
   const name = mainFiles[0]?.name ?? "";
@@ -53,6 +59,7 @@ function buildStandaloneFileSpecsAndFiles(
   mainFiles: File[],
   keyFile: File | null,
   rubricFile: File | null,
+  blankTemplateFile: File | null,
   keyText: string,
   rubricText: string,
 ): { files: File[]; specs: StandaloneFileSpec[] } {
@@ -81,6 +88,14 @@ function buildStandaloneFileSpecsAndFiles(
       artifact_kind: "rubric",
     });
   }
+  if (blankTemplateFile) {
+    extra.push(blankTemplateFile);
+    specs.push({
+      filename: blankTemplateFile.name,
+      content_type: blankTemplateFile.type || "application/octet-stream",
+      artifact_kind: "blank_assignment",
+    });
+  }
   if (keyText.trim()) {
     extra.push(new File([keyText], "answer-key.txt", { type: "text/plain" }));
     specs.push({
@@ -102,11 +117,13 @@ function buildStandaloneFileSpecsAndFiles(
 
 export default function StandaloneAutograder() {
   const navigate = useNavigate();
-  const [tab, setTab] = useState(0);
+  const location = useLocation();
+  const [tab, setTab] = useState(location.pathname.endsWith("/results") ? 1 : 0);
   const [activeStep, setActiveStep] = useState(0);
   const [mainFiles, setMainFiles] = useState<File[]>([]);
   const [keyFile, setKeyFile] = useState<File | null>(null);
   const [rubricFile, setRubricFile] = useState<File | null>(null);
+  const [blankTemplateFile, setBlankTemplateFile] = useState<File | null>(null);
   const [keyText, setKeyText] = useState("");
   const [rubricText, setRubricText] = useState("");
   const [busy, setBusy] = useState(false);
@@ -123,6 +140,7 @@ export default function StandaloneAutograder() {
     const out: File[] = [];
     if (keyFile) out.push(keyFile);
     if (rubricFile) out.push(rubricFile);
+    if (blankTemplateFile) out.push(blankTemplateFile);
     if (keyText.trim()) {
       out.push(new File([keyText], "answer-key.txt", { type: "text/plain" }));
     }
@@ -130,7 +148,7 @@ export default function StandaloneAutograder() {
       out.push(new File([rubricText], "rubric.txt", { type: "text/plain" }));
     }
     return out;
-  }, [keyFile, rubricFile, keyText, rubricText]);
+  }, [keyFile, rubricFile, blankTemplateFile, keyText, rubricText]);
 
   const loadHistory = useCallback(async () => {
     setHistoryLoading(true);
@@ -149,6 +167,11 @@ export default function StandaloneAutograder() {
     if (tab === 1) void loadHistory();
   }, [tab, loadHistory]);
 
+  useEffect(() => {
+    const resultsView = location.pathname.endsWith("/results");
+    setTab(resultsView ? 1 : 0);
+  }, [location.pathname]);
+
   const onDropMain = (e: React.DragEvent) => {
     e.preventDefault();
     setDragOver(false);
@@ -158,6 +181,15 @@ export default function StandaloneAutograder() {
 
   const submit = async () => {
     if (mainFiles.length === 0) return;
+    const hasAnswerKey = Boolean(keyFile || keyText.trim());
+    const hasRubric = Boolean(rubricFile);
+    const hasBlankTemplate = Boolean(blankTemplateFile);
+    if (!hasAnswerKey || !hasRubric || !hasBlankTemplate) {
+      setErr(
+        "Additional Context is required: provide answer key, uploaded rubric JSON, and a blank assignment template before submitting.",
+      );
+      return;
+    }
     setErr(null);
     setBusy(true);
     setProgress(0);
@@ -165,6 +197,7 @@ export default function StandaloneAutograder() {
       mainFiles,
       keyFile,
       rubricFile,
+      blankTemplateFile,
       keyText,
       rubricText,
     );
@@ -184,6 +217,10 @@ export default function StandaloneAutograder() {
   };
 
   const canNextStep0 = mainFiles.length > 0;
+  const hasAnswerKey = Boolean(keyFile || keyText.trim());
+  const hasRubric = Boolean(rubricFile);
+  const hasBlankTemplate = Boolean(blankTemplateFile);
+  const canNextStep1 = hasAnswerKey && hasRubric && hasBlankTemplate;
   const summaryFiles = [...mainFiles, ...optionalBlobs()];
 
   return (
@@ -192,7 +229,15 @@ export default function StandaloneAutograder() {
         {assignmentLabel}
       </Typography>
 
-      <Tabs value={tab} onChange={(_, v) => setTab(v)} sx={{ mb: 2 }} aria-label="Autograder sections">
+      <Tabs
+        value={tab}
+        onChange={(_, v) => {
+          setTab(v);
+          navigate(v === 1 ? "/autograder/results" : "/autograder");
+        }}
+        sx={{ mb: 2 }}
+        aria-label="Autograder sections"
+      >
         <Tab label="New Submission" id="autograder-tab-0" aria-controls="autograder-panel-0" />
         <Tab label="My Submissions" id="autograder-tab-1" aria-controls="autograder-panel-1" />
       </Tabs>
@@ -233,7 +278,7 @@ export default function StandaloneAutograder() {
                       </TableCell>
                       <TableCell>
                         {row.created_at
-                          ? new Date(row.created_at).toLocaleString(undefined, {
+                          ? parseServerDateAsLocal(row.created_at).toLocaleString(undefined, {
                               dateStyle: "short",
                               timeStyle: "short",
                             })
@@ -362,7 +407,7 @@ export default function StandaloneAutograder() {
             <Card>
               <CardContent>
                 <Typography variant="subtitle1" gutterBottom>
-                  Answer Key / Sample Response (optional)
+                  Answer Key / Sample Response (required)
                 </Typography>
                 <Button variant="outlined" component="label" size="small" sx={{ mb: 1 }} aria-label="Upload answer key file">
                   Upload file
@@ -392,17 +437,17 @@ export default function StandaloneAutograder() {
                 />
 
                 <Typography variant="subtitle1" gutterBottom>
-                  Rubric (optional)
+                  Rubric JSON (required)
                 </Typography>
                 <Typography variant="caption" color="text.secondary" display="block" sx={{ mb: 1 }}>
-                  Optional context for the grader. Full LTI rubric sync is not wired here —{" "}
-                  {/* TODO: POST /api/course-assignments/:id/materials when student uploads are allowed */}
-                  files are bundled with your submission upload for now.
+                  Upload a structured `.json` rubric; this uploaded rubric file is used as the grading
+                  rubric.
                 </Typography>
                 <Button variant="outlined" component="label" size="small" sx={{ mb: 1 }} aria-label="Upload rubric file">
                   Upload file
                   <input
                     type="file"
+                    accept=".json,application/json"
                     hidden
                     onChange={(e) => setRubricFile(e.target.files?.[0] ?? null)}
                   />
@@ -425,11 +470,56 @@ export default function StandaloneAutograder() {
                   aria-label="Paste rubric text"
                 />
 
+                <Typography variant="subtitle1" gutterBottom sx={{ mt: 3 }}>
+                  Blank Assignment Template (required)
+                </Typography>
+                <Typography variant="caption" color="text.secondary" display="block" sx={{ mb: 1 }}>
+                  Upload the instructor blank copy used to segment question-by-question grading (for
+                  notebooks, upload the blank `.ipynb` when available).
+                </Typography>
+                <Button
+                  variant="outlined"
+                  component="label"
+                  size="small"
+                  sx={{ mb: 1 }}
+                  aria-label="Upload blank assignment template file"
+                >
+                  Upload blank template
+                  <input
+                    type="file"
+                    hidden
+                    onChange={(e) => setBlankTemplateFile(e.target.files?.[0] ?? null)}
+                  />
+                </Button>
+                {blankTemplateFile && (
+                  <Typography variant="caption" display="block" color="text.secondary" sx={{ mb: 1 }}>
+                    {blankTemplateFile.name}{" "}
+                    <Button
+                      size="small"
+                      onClick={() => setBlankTemplateFile(null)}
+                      aria-label="Remove blank template file"
+                    >
+                      Remove
+                    </Button>
+                  </Typography>
+                )}
+                {!canNextStep1 && (
+                  <Alert severity="warning" sx={{ mt: 2 }}>
+                    To continue, provide all required context: answer key, rubric JSON file, and blank
+                    template.
+                  </Alert>
+                )}
+
                 <Box sx={{ display: "flex", justifyContent: "space-between", mt: 2 }}>
                   <Button onClick={() => setActiveStep(0)} aria-label="Back to upload step">
                     Back
                   </Button>
-                  <Button variant="contained" onClick={() => setActiveStep(2)} aria-label="Go to review step">
+                  <Button
+                    variant="contained"
+                    onClick={() => setActiveStep(2)}
+                    aria-label="Go to review step"
+                    disabled={!canNextStep1}
+                  >
                     Next
                   </Button>
                 </Box>

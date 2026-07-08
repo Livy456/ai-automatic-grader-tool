@@ -29,6 +29,7 @@ const router = createBrowserRouter(
       <Route path="submissions" element={<SubmissionsList />} />
       <Route path="submissions/:id" element={<SubmissionReview />} />
       <Route path="autograder" element={<StandaloneAutograder />} />
+      <Route path="autograder/results" element={<StandaloneAutograder />} />
       <Route path="autograder/:id" element={<StandaloneResult />} />
       <Route path="*" element={<Navigate to="/submissions" replace />} />
     </Route>

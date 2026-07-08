@@ -23,11 +23,7 @@ import {
   useTheme,
 } from "@mui/material";
 import MenuIcon from "@mui/icons-material/Menu";
-import DashboardOutlined from "@mui/icons-material/DashboardOutlined";
-import GradeOutlined from "@mui/icons-material/GradeOutlined";
-import UploadFileOutlined from "@mui/icons-material/UploadFileOutlined";
 import AssignmentTurnedInOutlined from "@mui/icons-material/AssignmentTurnedInOutlined";
-import AssignmentOutlined from "@mui/icons-material/AssignmentOutlined";
 import AdminPanelSettingsOutlined from "@mui/icons-material/AdminPanelSettingsOutlined";
 import AutoFixHighOutlined from "@mui/icons-material/AutoFixHighOutlined";
 
@@ -43,6 +39,7 @@ function pageTitle(pathname: string): string {
   if (pathname === "/assignments") return "Assignments";
   if (pathname === "/submissions") return "Submissions";
   if (pathname === "/autograder") return "Autograder";
+  if (pathname === "/autograder/results") return "Autograder Results";
   if (pathname === "/admin") return "Admin Panel";
   if (pathname === "/teacher") return "Teacher";
   if (/^\/autograder\/\d+$/.test(pathname)) return "Autograder Result";
@@ -62,27 +59,15 @@ type NavItem = {
 };
 
 const NAV_ITEMS: NavItem[] = [
-  { label: "Dashboard", to: "/submissions", icon: <DashboardOutlined /> },
-  { label: "My Grades", to: "/grades", icon: <GradeOutlined /> },
-  {
-    label: "Submit Assignment",
-    to: "/assignments",
-    icon: <UploadFileOutlined />,
-  },
-  {
-    label: "Submissions",
-    to: "/submissions",
-    icon: <AssignmentTurnedInOutlined />,
-  },
-  {
-    label: "Assignments",
-    to: "/assignments",
-    icon: <AssignmentOutlined />,
-  },
   {
     label: "Autograder",
     to: "/autograder",
     icon: <AutoFixHighOutlined />,
+  },
+  {
+    label: "Autograder Results",
+    to: "/autograder/results",
+    icon: <AssignmentTurnedInOutlined />,
   },
   {
     label: "Admin Panel",

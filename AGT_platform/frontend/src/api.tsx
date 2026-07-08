@@ -316,16 +316,42 @@ export type StandaloneSubmissionDetail = {
   title: string;
   status: string;
   final_score: number | null;
-  final_feedback: string | null;
+  max_points?: number | null;
+  rubric_points_earned?: number | null;
   grading_instructions?: string | null;
   grading_dispatch_at: string | null;
   created_at?: string | null;
   grading_report_object_key?: string | null;
+  question_grades?: Array<{
+    chunk_id?: string;
+    source_chunk_id?: string;
+    overall?: {
+      score?: number | null;
+      max_points?: number | null;
+      rubric_points_earned?: number | null;
+      confidence?: number | null;
+    };
+    question_payload?: Record<string, unknown>;
+    criteria: Array<{
+      criterion: string;
+      score: number;
+      max_points?: number | null;
+      rubric_points_earned?: number | null;
+      confidence: number;
+      justification?: string;
+      student_evidence?: string;
+      evidence?: Record<string, unknown>;
+    }>;
+  }>;
   ai_scores: Array<{
     criterion: string;
     score: number;
     confidence: number;
+    justification?: string;
     rationale: string;
+    question?: string | null;
+    student_evidence?: string;
+    evidence?: Record<string, unknown>;
   }>;
 };
 
@@ -339,7 +365,7 @@ export type StandaloneListResponse = {
 export type StandaloneFileSpec = {
   filename: string;
   content_type: string;
-  artifact_kind?: "submission" | "rubric" | "answer_key";
+  artifact_kind?: "submission" | "rubric" | "answer_key" | "blank_assignment";
 };
 
 export async function startStandaloneSubmission(payload: {

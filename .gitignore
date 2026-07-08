@@ -105,5 +105,7 @@ README [OLD].md
 
 **/thesis_research_analysis/*
 
+*./AGT_platform/backend/app/access.py
+
 # Local venv
 .venv/

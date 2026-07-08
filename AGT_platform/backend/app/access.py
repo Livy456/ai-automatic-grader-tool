@@ -10,7 +10,6 @@ from .models import User
 
 _GUEST_EMAIL = "guest@local.ai-grader"
 
-
 def _ensure_guest_user() -> User:
     db = SessionLocal()
     try:
