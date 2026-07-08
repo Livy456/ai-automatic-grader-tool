@@ -3,6 +3,7 @@ import logging
 from datetime import datetime
 from pathlib import Path
 from types import SimpleNamespace
+from typing import Any
 
 from celery import Celery
 from sqlalchemy.orm import selectinload
@@ -89,6 +90,54 @@ def _parse_uploaded_rubric_column(filename: str, data: bytes):
     if isinstance(raw, (list, dict)):
         return raw
     return None
+
+
+def _question_text_from_chunking_row(row: dict[str, Any]) -> str:
+    ev = row.get("evidence")
+    if isinstance(ev, dict):
+        trio = ev.get("trio")
+        if isinstance(trio, dict):
+            q = str(trio.get("question") or "").strip()
+            if q:
+                return q
+        q = str(ev.get("question") or "").strip()
+        if q:
+            return q
+    qid = str(row.get("question_id") or "").strip()
+    return qid
+
+
+def _build_source_chunk_payload_map(result_dict: dict[str, Any]) -> dict[str, dict[str, str]]:
+    out: dict[str, dict[str, str]] = {}
+    mm_audit = result_dict.get("_multimodal_pipeline_audit")
+    if not isinstance(mm_audit, dict):
+        return out
+    pipeline_audit = mm_audit.get("pipeline_audit")
+    if not isinstance(pipeline_audit, dict):
+        return out
+    chunking_entries = pipeline_audit.get("chunking")
+    if not isinstance(chunking_entries, list):
+        return out
+    for entry in chunking_entries:
+        if not isinstance(entry, dict):
+            continue
+        chunks = entry.get("chunks")
+        if not isinstance(chunks, list):
+            continue
+        for row in chunks:
+            if not isinstance(row, dict):
+                continue
+            cid = str(row.get("chunk_id") or "").strip()
+            if not cid:
+                continue
+            q = _question_text_from_chunking_row(row)
+            extracted = str(row.get("extracted_text") or "").strip()
+            out[cid] = {
+                "question": q,
+                # Keep the underlying chunk text so UI can show the exact block the grader used.
+                "question_chunk_text": extracted,
+            }
+    return out
 
 
 def _ensure_db():
@@ -422,19 +471,52 @@ def grade_standalone_submission(self, submission_id: int):
         criteria = result.get("criteria", [])
         overall = result.get("overall", {})
         question_grades = result.get("question_grades", [])
+        source_chunk_payload = _build_source_chunk_payload_map(result)
         total_rubric_points = 0.0
         total_rubric_points_earned = 0.0
-        for c in criteria:
-            if not isinstance(c, dict):
-                continue
-            try:
-                total_rubric_points_earned += float(c.get("score", 0.0))
-            except (TypeError, ValueError):
-                pass
-            try:
-                total_rubric_points += float(c.get("max_points", 0.0))
-            except (TypeError, ValueError):
-                pass
+        try:
+            if overall.get("max_points") is not None:
+                total_rubric_points = float(overall.get("max_points") or 0.0)
+            if overall.get("rubric_points_earned") is not None:
+                total_rubric_points_earned = float(overall.get("rubric_points_earned") or 0.0)
+        except (TypeError, ValueError):
+            total_rubric_points = 0.0
+            total_rubric_points_earned = 0.0
+        if total_rubric_points <= 0.0 or total_rubric_points_earned <= 0.0:
+            qp_max = 0.0
+            qp_earned = 0.0
+            for qg in question_grades:
+                if not isinstance(qg, dict):
+                    continue
+                ov = qg.get("overall") or {}
+                try:
+                    qp_max += float(ov.get("max_points") or 0.0)
+                except (TypeError, ValueError):
+                    pass
+                try:
+                    qp_earned += float(ov.get("rubric_points_earned") or 0.0)
+                except (TypeError, ValueError):
+                    pass
+            if total_rubric_points <= 0.0:
+                total_rubric_points = qp_max
+            if total_rubric_points_earned <= 0.0:
+                total_rubric_points_earned = qp_earned
+        if total_rubric_points <= 0.0:
+            for c in criteria:
+                if not isinstance(c, dict):
+                    continue
+                try:
+                    total_rubric_points += float(c.get("max_points", 0.0))
+                except (TypeError, ValueError):
+                    continue
+        if total_rubric_points_earned <= 0.0:
+            for c in criteria:
+                if not isinstance(c, dict):
+                    continue
+                try:
+                    total_rubric_points_earned += float(c.get("score", 0.0))
+                except (TypeError, ValueError):
+                    continue
         flags = set(result.get("flags", []))
         mm_review = str(result.get("_assignment_review_status", "") or "").lower()
         multimodal_needs_review = mm_review in ("caution", "flagged", "escalation")
@@ -515,10 +597,18 @@ def grade_standalone_submission(self, submission_id: int):
                                 "confidence": (qg.get("overall") or {}).get("confidence"),
                             },
                             "question_payload": {
-                                "chunk_id": qg.get("chunk_id"),
-                                "source_chunk_id": qg.get("_source_chunk_id"),
-                                "review_status": qg.get("review_status"),
-                                "review_reasons": qg.get("review_reasons") or [],
+                                "question": (
+                                    source_chunk_payload.get(
+                                        str(qg.get("_source_chunk_id") or "").strip(), {}
+                                    ).get("question")
+                                    or str(qg.get("chunk_id") or "").strip()
+                                ),
+                                "question_chunk_text": (
+                                    source_chunk_payload.get(
+                                        str(qg.get("_source_chunk_id") or "").strip(), {}
+                                    ).get("question_chunk_text")
+                                    or ""
+                                ),
                             },
                             "criteria": [
                                 {

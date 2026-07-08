@@ -45,6 +45,7 @@ def require_auth(fn):
 
 
 def require_role(*_roles):
+    
     def deco(fn):
         @wraps(fn)
         def wrapper(*args, **kwargs):

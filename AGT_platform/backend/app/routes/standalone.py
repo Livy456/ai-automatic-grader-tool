@@ -700,37 +700,60 @@ def standalone_get(submission_id: int):
         question_grades = report.get("question_grades")
         if not isinstance(question_grades, list):
             question_grades = []
-        rubric_points_earned = 0.0
-        rubric_points_max = 0.0
-        for s in scores:
+        q_earned = 0.0
+        q_max = 0.0
+        for qg in question_grades:
+            if not isinstance(qg, dict):
+                continue
+            ov = qg.get("overall") or {}
             try:
-                rubric_points_earned += float(s.score or 0.0)
+                q_earned += float(ov.get("rubric_points_earned") or 0.0)
             except (TypeError, ValueError):
                 pass
-            ev = s.evidence if isinstance(s.evidence, dict) else {}
-            mp_raw = ev.get("max_points")
             try:
-                if mp_raw is not None:
-                    rubric_points_max += float(mp_raw)
+                q_max += float(ov.get("max_points") or 0.0)
             except (TypeError, ValueError):
                 pass
-        if rubric_points_max <= 0:
+        rubric_points_earned = q_earned if q_earned > 0.0 else None
+        rubric_points_max = q_max if q_max > 0.0 else None
+        if rubric_points_earned is None or rubric_points_max is None:
+            # Fallback to report-level aggregates when per-question totals are unavailable.
+            try:
+                if report.get("rubric_points_earned") is not None and rubric_points_earned is None:
+                    rubric_points_earned = float(report.get("rubric_points_earned"))
+                if report.get("max_points") is not None and rubric_points_max is None:
+                    rubric_points_max = float(report.get("max_points"))
+            except (TypeError, ValueError):
+                pass
+        if (rubric_points_earned or 0.0) <= 0.0:
+            d_earned = 0.0
+            for s in scores:
+                try:
+                    d_earned += float(s.score or 0.0)
+                except (TypeError, ValueError):
+                    pass
+            rubric_points_earned = d_earned
+        if (rubric_points_max or 0.0) <= 0.0:
+            d_max = 0.0
             for qg in question_grades:
                 if not isinstance(qg, dict):
                     continue
-                ov = qg.get("overall") or {}
-                try:
-                    rubric_points_max += float(ov.get("max_points") or 0.0)
-                except (TypeError, ValueError):
-                    continue
+                for qc in (qg.get("criteria") or []):
+                    if not isinstance(qc, dict):
+                        continue
+                    try:
+                        d_max += float(qc.get("max_points") or 0.0)
+                    except (TypeError, ValueError):
+                        pass
+            rubric_points_max = d_max
         return jsonify(
             {
                 "id": sub.id,
                 "title": sub.title,
                 "status": sub.status,
                 "final_score": final_score,
-                "max_points": round(rubric_points_max, 4) if rubric_points_max > 0 else report.get("max_points"),
-                "rubric_points_earned": round(rubric_points_earned, 4),
+                "max_points": round(float(rubric_points_max), 4) if rubric_points_max is not None else None,
+                "rubric_points_earned": round(float(rubric_points_earned), 4) if rubric_points_earned is not None else None,
                 "grading_instructions": sub.grading_instructions,
                 "grading_dispatch_at": _iso_utc(sub.grading_dispatch_at),
                 "created_at": _iso_utc(sub.created_at),

@@ -67,19 +67,6 @@ function studentEvidenceSnippet(row: StandaloneSubmissionDetail["ai_scores"][num
   return "Missing direct student evidence in grader output.";
 }
 
-function inferQuestionLabel(q: {
-  chunk_id?: string;
-  source_chunk_id?: string;
-  question_payload?: Record<string, unknown>;
-}, idx: number): string {
-  const payloadQuestion = String((q.question_payload?.question as string) || "").trim();
-  if (payloadQuestion) return payloadQuestion;
-  const src = String(q.source_chunk_id || q.chunk_id || "");
-  const match = src.match(/q(\d+)/i);
-  if (match) return `Question ${match[1]}`;
-  return `Question ${idx + 1}`;
-}
-
 export default function StandaloneResult() {
   const { id } = useParams();
   const navigate = useNavigate();
@@ -181,6 +168,17 @@ export default function StandaloneResult() {
         },
       ];
   const currentQuestion = effectiveQuestionGrades[Math.min(activeQuestionTab, effectiveQuestionGrades.length - 1)];
+  const rubricTotals = effectiveQuestionGrades.reduce(
+    (acc, q) => {
+      const ov = q.overall || {};
+      const earned = Number(ov.rubric_points_earned ?? 0);
+      const max = Number(ov.max_points ?? 0);
+      if (Number.isFinite(earned)) acc.earned += earned;
+      if (Number.isFinite(max)) acc.max += max;
+      return acc;
+    },
+    { earned: 0, max: 0 },
+  );
 
   return (
     <Box>
@@ -221,10 +219,10 @@ export default function StandaloneResult() {
                 color={gradeBarColor(Number(sub.final_score))}
                 sx={{ fontSize: "1.1rem", fontWeight: 700, height: 40 }}
               />
-              {sub.rubric_points_earned != null && sub.max_points != null && (
+              {(rubricTotals.max > 0 || (sub.rubric_points_earned != null && sub.max_points != null)) && (
                 <Chip
                   size="small"
-                  label={`Rubric points ${Number(sub.rubric_points_earned).toFixed(1)} / ${Number(sub.max_points).toFixed(1)}`}
+                  label={`Rubric points ${(rubricTotals.earned > 0 ? rubricTotals.earned : Number(sub.rubric_points_earned || 0)).toFixed(1)} / ${(rubricTotals.max > 0 ? rubricTotals.max : Number(sub.max_points || 0)).toFixed(1)}`}
                   variant="outlined"
                 />
               )}
@@ -270,17 +268,19 @@ export default function StandaloneResult() {
             aria-label="Parsed question tabs"
           >
             {effectiveQuestionGrades.map((q, idx) => (
-              <Tab key={`${q.chunk_id || "q"}-${idx}`} label={inferQuestionLabel(q, idx)} />
+              <Tab key={`${q.chunk_id || "q"}-${idx}`} label={`Question ${idx + 1}`} />
             ))}
           </Tabs>
 
           <Card sx={{ mb: 2 }}>
             <CardContent>
               <Typography variant="overline" color="text.secondary">
-                Question Payload
+                Question
               </Typography>
               <Typography variant="body2" sx={{ mt: 1, whiteSpace: "pre-wrap" }}>
-                {JSON.stringify(currentQuestion.question_payload || {}, null, 2)}
+                {String((currentQuestion.question_payload?.question_chunk_text as string) || "").trim() ||
+                  String((currentQuestion.question_payload?.question as string) || "").trim() ||
+                  "Question text not available for this parsed chunk."}
               </Typography>
             </CardContent>
           </Card>
