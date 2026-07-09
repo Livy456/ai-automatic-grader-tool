@@ -93,8 +93,29 @@ def _parse_uploaded_rubric_column(filename: str, data: bytes):
 
 
 def _question_text_from_chunking_row(row: dict[str, Any]) -> str:
+    q = str(row.get("question_text") or "").strip()
+    if q:
+        return q
+    unit = row.get("unit")
+    if isinstance(unit, dict):
+        q = str(unit.get("question_text") or "").strip()
+        if q:
+            return q
+    trio = row.get("trio")
+    if isinstance(trio, dict):
+        q = str(trio.get("question") or "").strip()
+        if q:
+            return q
     ev = row.get("evidence")
     if isinstance(ev, dict):
+        q = str(ev.get("question_text") or "").strip()
+        if q:
+            return q
+        ev_unit = ev.get("unit")
+        if isinstance(ev_unit, dict):
+            q = str(ev_unit.get("question_text") or "").strip()
+            if q:
+                return q
         trio = ev.get("trio")
         if isinstance(trio, dict):
             q = str(trio.get("question") or "").strip()
@@ -105,6 +126,40 @@ def _question_text_from_chunking_row(row: dict[str, Any]) -> str:
             return q
     qid = str(row.get("question_id") or "").strip()
     return qid
+
+
+def _load_chunk_rows_from_export_path(path_value: object) -> list[dict[str, Any]]:
+    path_text = str(path_value or "").strip()
+    if not path_text:
+        return []
+    try:
+        payload = json.loads(Path(path_text).read_text(encoding="utf-8"))
+    except Exception:
+        return []
+    if not isinstance(payload, dict):
+        return []
+    chunks = payload.get("chunks")
+    if not isinstance(chunks, list):
+        return []
+    return [row for row in chunks if isinstance(row, dict)]
+
+
+def _upsert_source_chunk_payload(
+    out: dict[str, dict[str, str]],
+    row: dict[str, Any],
+) -> None:
+    cid = str(row.get("chunk_id") or "").strip()
+    if not cid:
+        return
+    question = _question_text_from_chunking_row(row)
+    extracted = str(row.get("extracted_text") or "").strip()
+    existing = out.get(cid, {})
+    out[cid] = {
+        "question": question or str(existing.get("question") or "").strip(),
+        # Keep the underlying chunk text so UI can show the exact block the grader used.
+        "question_chunk_text": extracted
+        or str(existing.get("question_chunk_text") or "").strip(),
+    }
 
 
 def _build_source_chunk_payload_map(result_dict: dict[str, Any]) -> dict[str, dict[str, str]]:
@@ -127,16 +182,33 @@ def _build_source_chunk_payload_map(result_dict: dict[str, Any]) -> dict[str, di
         for row in chunks:
             if not isinstance(row, dict):
                 continue
-            cid = str(row.get("chunk_id") or "").strip()
-            if not cid:
-                continue
-            q = _question_text_from_chunking_row(row)
-            extracted = str(row.get("extracted_text") or "").strip()
-            out[cid] = {
-                "question": q,
-                # Keep the underlying chunk text so UI can show the exact block the grader used.
-                "question_chunk_text": extracted,
-            }
+            _upsert_source_chunk_payload(out, row)
+
+    workflow_rows: list[dict[str, Any]] = []
+    for candidate in (
+        result_dict.get("_agentic_workflow"),
+        mm_audit.get("agentic_workflow"),
+    ):
+        if isinstance(candidate, list):
+            workflow_rows.extend(
+                [row for row in candidate if isinstance(row, dict)]
+            )
+
+    export_paths: list[str] = []
+    for row in workflow_rows:
+        phase = str(row.get("phase") or "").strip()
+        if phase not in (
+            "persist_assignment_chunking_json",
+            "persist_trio_chunks_json",
+        ):
+            continue
+        p = str(row.get("path") or "").strip()
+        if p and p not in export_paths:
+            export_paths.append(p)
+
+    for export_path in export_paths:
+        for row in _load_chunk_rows_from_export_path(export_path):
+            _upsert_source_chunk_payload(out, row)
     return out
 
 
@@ -517,6 +589,17 @@ def grade_standalone_submission(self, submission_id: int):
                     total_rubric_points_earned += float(c.get("score", 0.0))
                 except (TypeError, ValueError):
                     continue
+        score_fraction = 0.0
+        if total_rubric_points > 0.0:
+            score_fraction = total_rubric_points_earned / total_rubric_points
+        else:
+            try:
+                score_fraction = float(overall.get("score") or 0.0)
+            except (TypeError, ValueError):
+                score_fraction = 0.0
+            if score_fraction > 1.0:
+                score_fraction /= 100.0
+        score_fraction = max(0.0, min(1.0, score_fraction))
         flags = set(result.get("flags", []))
         mm_review = str(result.get("_assignment_review_status", "") or "").lower()
         multimodal_needs_review = mm_review in ("caution", "flagged", "escalation")
@@ -536,7 +619,7 @@ def grade_standalone_submission(self, submission_id: int):
             )
 
         sub = db.query(StandaloneSubmission).get(submission_id)
-        sub.final_score = overall.get("score", 0)
+        sub.final_score = score_fraction
         sub.final_feedback = overall.get("summary", "")
         low_conf = any(float(c.get("confidence", 0)) < 0.70 for c in criteria)
         ent_conf = overall.get("confidence_from_entropy")

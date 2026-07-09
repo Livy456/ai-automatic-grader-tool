@@ -177,6 +177,67 @@ def _safe_report_json(cfg: Config, object_key: str | None) -> dict:
         return {}
 
 
+def _rubric_totals_from_report(report: dict) -> tuple[float | None, float | None]:
+    if not isinstance(report, dict):
+        return (None, None)
+    question_grades = report.get("question_grades")
+    if not isinstance(question_grades, list):
+        question_grades = []
+
+    q_earned = 0.0
+    q_max = 0.0
+    for qg in question_grades:
+        if not isinstance(qg, dict):
+            continue
+        ov = qg.get("overall") or {}
+        try:
+            q_earned += float(ov.get("rubric_points_earned") or 0.0)
+        except (TypeError, ValueError):
+            pass
+        try:
+            q_max += float(ov.get("max_points") or 0.0)
+        except (TypeError, ValueError):
+            pass
+    rubric_points_earned = q_earned if q_earned > 0.0 else None
+    rubric_points_max = q_max if q_max > 0.0 else None
+
+    if rubric_points_earned is None or rubric_points_max is None:
+        try:
+            if report.get("rubric_points_earned") is not None and rubric_points_earned is None:
+                rubric_points_earned = float(report.get("rubric_points_earned"))
+            if report.get("max_points") is not None and rubric_points_max is None:
+                rubric_points_max = float(report.get("max_points"))
+        except (TypeError, ValueError):
+            pass
+
+    if (rubric_points_max or 0.0) <= 0.0:
+        d_max = 0.0
+        for qg in question_grades:
+            if not isinstance(qg, dict):
+                continue
+            for qc in (qg.get("criteria") or []):
+                if not isinstance(qc, dict):
+                    continue
+                try:
+                    d_max += float(qc.get("max_points") or 0.0)
+                except (TypeError, ValueError):
+                    pass
+        rubric_points_max = d_max if d_max > 0.0 else rubric_points_max
+
+    return (rubric_points_earned, rubric_points_max)
+
+
+def _score_pct_from_rubric_totals(
+    rubric_points_earned: float | None, rubric_points_max: float | None
+) -> float | None:
+    if rubric_points_earned is None or (rubric_points_max or 0.0) <= 0.0:
+        return None
+    return max(
+        0.0,
+        min(100.0, (float(rubric_points_earned) / float(rubric_points_max)) * 100.0),
+    )
+
+
 def _iso_utc(dt: datetime | None) -> str | None:
     if dt is None:
         return None
@@ -640,6 +701,7 @@ def standalone_enqueue_grading(submission_id: int):
 @bp.get("/api/standalone/submissions")
 def standalone_list():
     user = _standalone_user()
+    cfg = Config()
 
     page = int(request.args.get("page") or 1)
     per_page = min(int(request.args.get("per_page") or 20), 100)
@@ -662,6 +724,13 @@ def standalone_list():
         items = []
         for r in rows:
             score = _score_to_100(r.final_score)
+            report = _safe_report_json(cfg, r.grading_report_object_key)
+            rpt_earned, rpt_max = _rubric_totals_from_report(report)
+            rubric_based_score = _score_pct_from_rubric_totals(rpt_earned, rpt_max)
+            if rubric_based_score is not None:
+                score = rubric_based_score
+            elif score is None and report.get("final_score") is not None:
+                score = _score_to_100(report.get("final_score"))
             items.append(
                 {
                     "id": r.id,
@@ -700,31 +769,7 @@ def standalone_get(submission_id: int):
         question_grades = report.get("question_grades")
         if not isinstance(question_grades, list):
             question_grades = []
-        q_earned = 0.0
-        q_max = 0.0
-        for qg in question_grades:
-            if not isinstance(qg, dict):
-                continue
-            ov = qg.get("overall") or {}
-            try:
-                q_earned += float(ov.get("rubric_points_earned") or 0.0)
-            except (TypeError, ValueError):
-                pass
-            try:
-                q_max += float(ov.get("max_points") or 0.0)
-            except (TypeError, ValueError):
-                pass
-        rubric_points_earned = q_earned if q_earned > 0.0 else None
-        rubric_points_max = q_max if q_max > 0.0 else None
-        if rubric_points_earned is None or rubric_points_max is None:
-            # Fallback to report-level aggregates when per-question totals are unavailable.
-            try:
-                if report.get("rubric_points_earned") is not None and rubric_points_earned is None:
-                    rubric_points_earned = float(report.get("rubric_points_earned"))
-                if report.get("max_points") is not None and rubric_points_max is None:
-                    rubric_points_max = float(report.get("max_points"))
-            except (TypeError, ValueError):
-                pass
+        rubric_points_earned, rubric_points_max = _rubric_totals_from_report(report)
         if (rubric_points_earned or 0.0) <= 0.0:
             d_earned = 0.0
             for s in scores:
@@ -746,6 +791,9 @@ def standalone_get(submission_id: int):
                     except (TypeError, ValueError):
                         pass
             rubric_points_max = d_max
+        rubric_based_score = _score_pct_from_rubric_totals(rubric_points_earned, rubric_points_max)
+        if rubric_based_score is not None:
+            final_score = rubric_based_score
         return jsonify(
             {
                 "id": sub.id,
