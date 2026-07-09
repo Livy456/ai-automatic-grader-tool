@@ -278,9 +278,22 @@ export default function StandaloneResult() {
                 Question
               </Typography>
               <Typography variant="body2" sx={{ mt: 1, whiteSpace: "pre-wrap" }}>
-                {String((currentQuestion.question_payload?.question_chunk_text as string) || "").trim() ||
-                  String((currentQuestion.question_payload?.question as string) || "").trim() ||
+                {String((currentQuestion.question_payload?.question as string) || "").trim() ||
+                  String((currentQuestion.question_payload?.question_chunk_text as string) || "").trim() ||
                   "Question text not available for this parsed chunk."}
+              </Typography>
+            </CardContent>
+          </Card>
+
+          <Card sx={{ mb: 2 }}>
+            <CardContent>
+              <Typography variant="overline" color="text.secondary">
+                Student Response
+              </Typography>
+              <Typography variant="body2" sx={{ mt: 1, whiteSpace: "pre-wrap" }}>
+                {String((currentQuestion.question_payload?.response_text as string) || "").trim() ||
+                  String((currentQuestion.question_payload?.student_response as string) || "").trim() ||
+                  "Student response not available for this parsed chunk."}
               </Typography>
             </CardContent>
           </Card>

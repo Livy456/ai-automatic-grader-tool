@@ -128,6 +128,50 @@ def _question_text_from_chunking_row(row: dict[str, Any]) -> str:
     return qid
 
 
+def _student_response_from_chunking_row(row: dict[str, Any]) -> str:
+    ev = row.get("evidence")
+    if isinstance(ev, dict):
+        ev_trio = ev.get("trio")
+        if isinstance(ev_trio, dict):
+            s = str(ev_trio.get("student_response") or "").strip()
+            if s:
+                return s
+    s = str(row.get("response_text") or "").strip()
+    if s:
+        return s
+    unit = row.get("unit")
+    if isinstance(unit, dict):
+        s = str(unit.get("response_text") or "").strip()
+        if s:
+            return s
+        s = str(unit.get("student_response") or "").strip()
+        if s:
+            return s
+    trio = row.get("trio")
+    if isinstance(trio, dict):
+        s = str(trio.get("student_response") or "").strip()
+        if s:
+            return s
+    if isinstance(ev, dict):
+        s = str(ev.get("response_text") or "").strip()
+        if s:
+            return s
+        ev_unit = ev.get("unit")
+        if isinstance(ev_unit, dict):
+            s = str(ev_unit.get("response_text") or "").strip()
+            if s:
+                return s
+            s = str(ev_unit.get("student_response") or "").strip()
+            if s:
+                return s
+        ev_trio = ev.get("trio")
+        if isinstance(ev_trio, dict):
+            s = str(ev_trio.get("student_response") or "").strip()
+            if s:
+                return s
+    return ""
+
+
 def _load_chunk_rows_from_export_path(path_value: object) -> list[dict[str, Any]]:
     path_text = str(path_value or "").strip()
     if not path_text:
@@ -153,12 +197,17 @@ def _upsert_source_chunk_payload(
         return
     question = _question_text_from_chunking_row(row)
     extracted = str(row.get("extracted_text") or "").strip()
+    student_response = _student_response_from_chunking_row(row)
     existing = out.get(cid, {})
     out[cid] = {
         "question": question or str(existing.get("question") or "").strip(),
         # Keep the underlying chunk text so UI can show the exact block the grader used.
         "question_chunk_text": extracted
         or str(existing.get("question_chunk_text") or "").strip(),
+        "response_text": student_response
+        or str(existing.get("response_text") or "").strip(),
+        "student_response": student_response
+        or str(existing.get("student_response") or "").strip(),
     }
 
 
@@ -690,6 +739,18 @@ def grade_standalone_submission(self, submission_id: int):
                                     source_chunk_payload.get(
                                         str(qg.get("_source_chunk_id") or "").strip(), {}
                                     ).get("question_chunk_text")
+                                    or ""
+                                ),
+                                "student_response": (
+                                    source_chunk_payload.get(
+                                        str(qg.get("_source_chunk_id") or "").strip(), {}
+                                    ).get("student_response")
+                                    or ""
+                                ),
+                                "response_text": (
+                                    source_chunk_payload.get(
+                                        str(qg.get("_source_chunk_id") or "").strip(), {}
+                                    ).get("response_text")
                                     or ""
                                 ),
                             },
