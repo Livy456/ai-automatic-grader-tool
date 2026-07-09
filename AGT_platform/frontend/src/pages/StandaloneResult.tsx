@@ -28,6 +28,7 @@ import {
 import StatusChip from "../components/StatusChip";
 
 const POLL_STATUSES = new Set(["uploading", "uploaded", "queued", "grading"]);
+type StandaloneQuestionGrade = NonNullable<StandaloneSubmissionDetail["question_grades"]>[number];
 
 function gradeBarColor(score: number): "success" | "warning" | "error" {
   if (score >= 90) return "success";
@@ -39,6 +40,13 @@ function confidenceColor(conf: number): "success" | "warning" | "error" {
   if (conf >= 0.85) return "success";
   if (conf >= 0.7) return "warning";
   return "error";
+}
+
+function normalizeConfidence01(raw: unknown): number | null {
+  const n = Number(raw);
+  if (!Number.isFinite(n)) return null;
+  const normalized = n > 1 ? n / 100 : n;
+  return Math.max(0, Math.min(1, normalized));
 }
 
 function criterionChipColor(fraction: number): "success" | "warning" | "error" {
@@ -137,36 +145,52 @@ export default function StandaloneResult() {
 
   const scores = sub.ai_scores ?? [];
   const polling = POLL_STATUSES.has(sub.status);
-  const avgConfidence =
-    scores.length > 0 ? scores.reduce((sum, s) => sum + s.confidence, 0) / scores.length : 0;
-  const questionGrades = (sub.question_grades ?? []).filter((q) => Array.isArray(q.criteria));
-  const effectiveQuestionGrades = questionGrades.length
+  const baseConfidenceValues = scores
+    .map((s) => normalizeConfidence01(s.confidence))
+    .filter((c): c is number => c !== null);
+  const baseAvgConfidence =
+    baseConfidenceValues.length > 0
+      ? baseConfidenceValues.reduce((sum, c) => sum + c, 0) / baseConfidenceValues.length
+      : 0;
+  const questionGrades: StandaloneQuestionGrade[] = (sub.question_grades ?? []).filter(
+    (q): q is StandaloneQuestionGrade => Array.isArray(q.criteria),
+  );
+  const fallbackQuestionGrade: StandaloneQuestionGrade = {
+    chunk_id: "fallback_chunk",
+    source_chunk_id: "fallback_chunk",
+    overall: {
+      score: sub.final_score ?? null,
+      max_points: sub.max_points ?? null,
+      rubric_points_earned: sub.rubric_points_earned ?? null,
+      confidence: baseAvgConfidence,
+    },
+    question_payload: {
+      note: "Question payload unavailable; displaying assignment-level fallback.",
+    },
+    criteria: scores.map((s) => ({
+      criterion: s.criterion,
+      score: s.score,
+      max_points: null,
+      rubric_points_earned: null,
+      confidence: s.confidence,
+      justification: s.justification || s.rationale,
+      student_evidence: s.student_evidence || studentEvidenceSnippet(s),
+      evidence: s.evidence,
+    })),
+  };
+  const effectiveQuestionGrades: StandaloneQuestionGrade[] = questionGrades.length
     ? questionGrades
-    : [
-        {
-          chunk_id: "fallback_chunk",
-          source_chunk_id: "fallback_chunk",
-          overall: {
-            score: sub.final_score ?? null,
-            max_points: sub.max_points ?? null,
-            rubric_points_earned: sub.rubric_points_earned ?? null,
-            confidence: avgConfidence,
-          },
-          question_payload: {
-            note: "Question payload unavailable; displaying assignment-level fallback.",
-          },
-          criteria: scores.map((s) => ({
-            criterion: s.criterion,
-            score: s.score,
-            max_points: null,
-            rubric_points_earned: null,
-            confidence: s.confidence,
-            justification: s.justification || s.rationale,
-            student_evidence: s.student_evidence || studentEvidenceSnippet(s),
-            evidence: s.evidence,
-          })),
-        },
-      ];
+    : [fallbackQuestionGrade];
+  const confidenceValues = effectiveQuestionGrades
+    .flatMap((q) => (q.criteria || []).map((c) => normalizeConfidence01(c.confidence)))
+    .filter((c): c is number => c !== null);
+  const fallbackConfidenceValues = baseConfidenceValues;
+  const effectiveConfidenceValues =
+    confidenceValues.length > 0 ? confidenceValues : fallbackConfidenceValues;
+  const avgConfidence =
+    effectiveConfidenceValues.length > 0
+      ? effectiveConfidenceValues.reduce((sum, c) => sum + c, 0) / effectiveConfidenceValues.length
+      : 0;
   const currentQuestion = effectiveQuestionGrades[Math.min(activeQuestionTab, effectiveQuestionGrades.length - 1)];
   const rubricTotals = effectiveQuestionGrades.reduce(
     (acc, q) => {
@@ -226,10 +250,10 @@ export default function StandaloneResult() {
                   variant="outlined"
                 />
               )}
-              {scores.length > 0 && (
+              {effectiveConfidenceValues.length > 0 && (
                 <Chip
                   size="small"
-                  label={`Avg confidence ${(avgConfidence * 100).toFixed(0)}%`}
+                  label={`Avg confidence ${(avgConfidence * 100).toFixed(1)}%`}
                   color={confidenceColor(avgConfidence)}
                   variant="outlined"
                 />
@@ -338,12 +362,17 @@ export default function StandaloneResult() {
                         "Missing direct student evidence."}
                     </TableCell>
                     <TableCell align="right">
+                      {(() => {
+                        const rowConfidence = normalizeConfidence01(row.confidence) ?? 0;
+                        return (
                       <Chip
                         size="small"
-                        label={`${(Number(row.confidence || 0) * 100).toFixed(0)}%`}
-                        color={confidenceColor(Number(row.confidence || 0))}
+                        label={`${(rowConfidence * 100).toFixed(1)}%`}
+                        color={confidenceColor(rowConfidence)}
                         variant="outlined"
                       />
+                        );
+                      })()}
                     </TableCell>
                   </TableRow>
                 );

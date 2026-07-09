@@ -45,10 +45,3 @@ Or: `npm run dev:local`
 lsof -nP -iTCP:5174 -sTCP:LISTEN
 kill <PID>
 ```
-
----
-
-### Docker frontend on 5173
-
-Compose still maps **`5173:5173`** for the **frontend** container. You do **not** need to stop it to run **`npm run dev`** on the host; they use different ports.
-
