@@ -5,7 +5,7 @@ from flask import Blueprint, jsonify, request
 from app.audit import log_event
 from app.extensions import SessionLocal
 from app.models import Assignment, Course, Enrollment, User
-from app.rbac import require_auth, require_role
+from app.access import require_auth, require_role
 
 bp = Blueprint("courses", __name__)
 

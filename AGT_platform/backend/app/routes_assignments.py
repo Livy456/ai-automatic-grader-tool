@@ -1,8 +1,10 @@
 from __future__ import annotations
 
+import logging
 import os
 import uuid
 from datetime import datetime
+from types import SimpleNamespace
 from typing import Optional, Dict, Any, Tuple
 
 from flask import Blueprint, jsonify, request
@@ -12,8 +14,15 @@ from sqlalchemy.orm import Session
 
 from .config import Config
 from .extensions import SessionLocal
+from .grading.llm_router import build_multimodal_grading_clients
+from .grading.multimodal.pipeline_runner import (
+    build_submission_artifacts,
+    run_multimodal_grading,
+)
 from .models import AssignmentUpload
-from .storage import upload_from_werkzeug_file
+from .storage import get_object_bytes, upload_from_werkzeug_file
+
+_log = logging.getLogger(__name__)
 
 
 bp = Blueprint("assignments", __name__, url_prefix="/api")
@@ -75,10 +84,10 @@ def _allowed_file(filename: str) -> bool:
     return ext in allowed
 
 
-def _save_upload_to_s3(file_storage) -> Tuple[str, str]:
+def _save_upload_to_object_store(file_storage) -> Tuple[str, str]:
     """
-    Stream file to S3 (AWS or MinIO). Returns (assignment_upload_uuid, s3_object_key).
-    storage_uri in DB holds the object key (not s3://).
+    Stream file to MinIO object storage. Returns (assignment_upload_uuid, object_key).
+    storage_uri in DB holds the object key.
     """
     filename = secure_filename(file_storage.filename or "upload.bin")
     if not _allowed_file(filename):
@@ -130,7 +139,7 @@ def create_assignment():
     """
     POST /api/assignments
     - Accepts multipart/form-data with "file"
-    - Stores file in S3 (see storage.py / S3_BUCKET_SETUP.md)
+    - Stores file in MinIO object storage
     - Inserts Assignment row into Postgres
     """
     if "file" not in request.files:
@@ -141,7 +150,7 @@ def create_assignment():
         return jsonify({"error": "Empty file upload"}), 400
 
     try:
-        assignment_id, storage_uri = _save_upload_to_s3(f)
+        assignment_id, storage_uri = _save_upload_to_object_store(f)
     except ValueError as e:
         return jsonify({"error": str(e)}), 400
 
@@ -182,7 +191,10 @@ def get_assignment(assignment_id: str):
 @bp.post("/assignments/<assignment_id>/grade")
 def grade_assignment(assignment_id: str):
     """
-    POST /api/assignments/<id>/grade -> start AI job (sync for now)
+    POST /api/assignments/<id>/grade -> run the multimodal grading pipeline (sync).
+
+    Uses the same :func:`run_multimodal_grading` path as local integration tests and
+    Celery course/standalone grading tasks.
     """
     db = _db()
     try:
@@ -191,25 +203,66 @@ def grade_assignment(assignment_id: str):
             return jsonify({"error": "Assignment not found"}), 404
 
         if a.status in ("grading", "graded"):
-            # idempotent: don't re-run unless you explicitly add a "regrade" endpoint
             return jsonify({"ok": True, "status": a.status})
 
-        # mark grading
+        cfg = Config()
+        if not build_multimodal_grading_clients(cfg):
+            return jsonify(
+                {
+                    "error": "Multimodal grading unavailable",
+                    "detail": "Set OPENAI_API_KEY and OPENAI_MULTIMODAL_GRADING_MODEL.",
+                }
+            ), 503
+
         a.status = "grading"
         a.updated_at = _now()
         db.commit()
 
-        # Upload-only flow: no autograde here (course submissions use Celery + multimodal pipeline).
-        a.suggested_grade = None
-        a.feedback = (
-            "No automatic grade for this upload endpoint. "
-            "Use course assignment submissions for AI grading."
-        )
-        a.status = "graded"
+        try:
+            raw = get_object_bytes(cfg, a.storage_uri)
+            stem = os.path.splitext(a.filename or "upload")[0]
+            artifacts = build_submission_artifacts([(a.filename or "upload", raw)])
+            if not artifacts:
+                raise ValueError(
+                    f"Unsupported file type for multimodal grading: {a.filename!r}"
+                )
+
+            assignment = SimpleNamespace(
+                modality=None,
+                rubric=None,
+                title=stem,
+                description=f"Assignment upload: {a.filename}",
+            )
+            result = run_multimodal_grading(
+                cfg,
+                assignment=assignment,
+                artifacts_bytes=artifacts,
+                assignment_id=str(a.id),
+                student_id="assignment_upload",
+                rubric_column=None,
+                assignment_stem=stem,
+                validate_output=True,
+            )
+            overall = result.get("overall") or {}
+            score = overall.get("score")
+            a.suggested_grade = float(score) if score is not None else None
+            a.feedback = str(overall.get("summary") or "").strip() or None
+            a.status = "graded"
+        except Exception as exc:
+            _log.exception("Multimodal grading failed for assignment upload %s", assignment_id)
+            a.status = "error"
+            a.feedback = f"Grading failed: {type(exc).__name__}: {exc}"
 
         a.updated_at = _now()
         db.commit()
 
-        return jsonify({"ok": True})
+        return jsonify(
+            {
+                "ok": a.status == "graded",
+                "status": a.status,
+                "suggested_grade": a.suggested_grade,
+                "feedback": a.feedback,
+            }
+        )
     finally:
         db.close()

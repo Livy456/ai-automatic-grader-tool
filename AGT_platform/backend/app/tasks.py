@@ -1,7 +1,9 @@
 import json
 import logging
 from datetime import datetime
+from pathlib import Path
 from types import SimpleNamespace
+from typing import Any
 
 from celery import Celery
 from sqlalchemy.orm import selectinload
@@ -12,16 +14,20 @@ from .grading.multimodal.course_multimodal_runner import (
     run_db_submission_multimodal_pipeline,
     run_standalone_multimodal_pipeline,
 )
-from .grading.tools import extract_text_from_pdf
+from .grading.multimodal.pipeline_runner import (
+    build_submission_artifacts,
+    excerpt_attachment_bytes,
+)
 from .models import (
     AIScore,
     Assignment,
+    AssignmentAttachment,
     StandaloneAIScore,
     StandaloneArtifact,
     StandaloneSubmission,
     Submission,
 )
-from .storage import get_object_bytes, s3_client
+from .storage import get_object_bytes, minio_client
 
 celery_app = Celery(__name__)
 
@@ -55,6 +61,204 @@ def _evidence_for_db(ev):
 
 def _rationale_for_db(c: dict) -> str:
     return (c.get("rationale") or c.get("justification") or "").strip() or ""
+
+
+def _student_evidence_from_criterion(c: dict) -> str:
+    ev = c.get("evidence")
+    if isinstance(ev, dict):
+        trio = ev.get("trio")
+        if isinstance(trio, dict):
+            s = str(trio.get("student_response") or "").strip()
+            if s:
+                return s
+        txt = str(ev.get("text") or "").strip()
+        return txt
+    if isinstance(ev, str):
+        return ev.strip()
+    return ""
+
+
+def _parse_uploaded_rubric_column(filename: str, data: bytes):
+    """Best-effort parse of uploaded rubric JSON into a structured rubric column."""
+    fn = (filename or "").strip().lower()
+    if not fn.endswith(".json"):
+        return None
+    try:
+        raw = json.loads(data.decode("utf-8", errors="ignore"))
+    except Exception:
+        return None
+    if isinstance(raw, (list, dict)):
+        return raw
+    return None
+
+
+def _question_text_from_chunking_row(row: dict[str, Any]) -> str:
+    q = str(row.get("question_text") or "").strip()
+    if q:
+        return q
+    unit = row.get("unit")
+    if isinstance(unit, dict):
+        q = str(unit.get("question_text") or "").strip()
+        if q:
+            return q
+    trio = row.get("trio")
+    if isinstance(trio, dict):
+        q = str(trio.get("question") or "").strip()
+        if q:
+            return q
+    ev = row.get("evidence")
+    if isinstance(ev, dict):
+        q = str(ev.get("question_text") or "").strip()
+        if q:
+            return q
+        ev_unit = ev.get("unit")
+        if isinstance(ev_unit, dict):
+            q = str(ev_unit.get("question_text") or "").strip()
+            if q:
+                return q
+        trio = ev.get("trio")
+        if isinstance(trio, dict):
+            q = str(trio.get("question") or "").strip()
+            if q:
+                return q
+        q = str(ev.get("question") or "").strip()
+        if q:
+            return q
+    qid = str(row.get("question_id") or "").strip()
+    return qid
+
+
+def _student_response_from_chunking_row(row: dict[str, Any]) -> str:
+    ev = row.get("evidence")
+    if isinstance(ev, dict):
+        ev_trio = ev.get("trio")
+        if isinstance(ev_trio, dict):
+            s = str(ev_trio.get("student_response") or "").strip()
+            if s:
+                return s
+    s = str(row.get("response_text") or "").strip()
+    if s:
+        return s
+    unit = row.get("unit")
+    if isinstance(unit, dict):
+        s = str(unit.get("response_text") or "").strip()
+        if s:
+            return s
+        s = str(unit.get("student_response") or "").strip()
+        if s:
+            return s
+    trio = row.get("trio")
+    if isinstance(trio, dict):
+        s = str(trio.get("student_response") or "").strip()
+        if s:
+            return s
+    if isinstance(ev, dict):
+        s = str(ev.get("response_text") or "").strip()
+        if s:
+            return s
+        ev_unit = ev.get("unit")
+        if isinstance(ev_unit, dict):
+            s = str(ev_unit.get("response_text") or "").strip()
+            if s:
+                return s
+            s = str(ev_unit.get("student_response") or "").strip()
+            if s:
+                return s
+        ev_trio = ev.get("trio")
+        if isinstance(ev_trio, dict):
+            s = str(ev_trio.get("student_response") or "").strip()
+            if s:
+                return s
+    return ""
+
+
+def _load_chunk_rows_from_export_path(path_value: object) -> list[dict[str, Any]]:
+    path_text = str(path_value or "").strip()
+    if not path_text:
+        return []
+    try:
+        payload = json.loads(Path(path_text).read_text(encoding="utf-8"))
+    except Exception:
+        return []
+    if not isinstance(payload, dict):
+        return []
+    chunks = payload.get("chunks")
+    if not isinstance(chunks, list):
+        return []
+    return [row for row in chunks if isinstance(row, dict)]
+
+
+def _upsert_source_chunk_payload(
+    out: dict[str, dict[str, str]],
+    row: dict[str, Any],
+) -> None:
+    cid = str(row.get("chunk_id") or "").strip()
+    if not cid:
+        return
+    question = _question_text_from_chunking_row(row)
+    extracted = str(row.get("extracted_text") or "").strip()
+    student_response = _student_response_from_chunking_row(row)
+    existing = out.get(cid, {})
+    out[cid] = {
+        "question": question or str(existing.get("question") or "").strip(),
+        # Keep the underlying chunk text so UI can show the exact block the grader used.
+        "question_chunk_text": extracted
+        or str(existing.get("question_chunk_text") or "").strip(),
+        "response_text": student_response
+        or str(existing.get("response_text") or "").strip(),
+        "student_response": student_response
+        or str(existing.get("student_response") or "").strip(),
+    }
+
+
+def _build_source_chunk_payload_map(result_dict: dict[str, Any]) -> dict[str, dict[str, str]]:
+    out: dict[str, dict[str, str]] = {}
+    mm_audit = result_dict.get("_multimodal_pipeline_audit")
+    if not isinstance(mm_audit, dict):
+        return out
+    pipeline_audit = mm_audit.get("pipeline_audit")
+    if not isinstance(pipeline_audit, dict):
+        return out
+    chunking_entries = pipeline_audit.get("chunking")
+    if not isinstance(chunking_entries, list):
+        return out
+    for entry in chunking_entries:
+        if not isinstance(entry, dict):
+            continue
+        chunks = entry.get("chunks")
+        if not isinstance(chunks, list):
+            continue
+        for row in chunks:
+            if not isinstance(row, dict):
+                continue
+            _upsert_source_chunk_payload(out, row)
+
+    workflow_rows: list[dict[str, Any]] = []
+    for candidate in (
+        result_dict.get("_agentic_workflow"),
+        mm_audit.get("agentic_workflow"),
+    ):
+        if isinstance(candidate, list):
+            workflow_rows.extend(
+                [row for row in candidate if isinstance(row, dict)]
+            )
+
+    export_paths: list[str] = []
+    for row in workflow_rows:
+        phase = str(row.get("phase") or "").strip()
+        if phase not in (
+            "persist_assignment_chunking_json",
+            "persist_trio_chunks_json",
+        ):
+            continue
+        p = str(row.get("path") or "").strip()
+        if p and p not in export_paths:
+            export_paths.append(p)
+
+    for export_path in export_paths:
+        for row in _load_chunk_rows_from_export_path(export_path):
+            _upsert_source_chunk_payload(out, row)
+    return out
 
 
 def _ensure_db():
@@ -103,57 +307,43 @@ def grade_submission(self, submission_id: int):
             db.commit()
             return
 
-        def _filename_hint_from_s3_key(key: str) -> str:
+        def _filename_hint_from_object_key(key: str) -> str:
             part = (key or "").rsplit("/", 1)[-1]
             if "_" in part:
                 return part.split("_", 1)[-1]
             return part
 
-        artifacts: dict = {}
+        submission_parts: list[tuple[str, bytes]] = []
         rubric_ex = ""
         answer_ex = ""
         for art in sub.artifacts:
-            data = get_object_bytes(cfg, art.s3_key)
-            fn_hint = _filename_hint_from_s3_key(art.s3_key)
+            data = get_object_bytes(cfg, art.object_key)
+            fn_hint = _filename_hint_from_object_key(art.object_key)
             if art.kind in ("rubric", "answer_key"):
-                ex = _excerpt_file_bytes(fn_hint, data)
+                ex = excerpt_attachment_bytes(fn_hint, data)
                 if art.kind == "rubric":
                     rubric_ex = (rubric_ex + "\n\n" + ex).strip() if rubric_ex else ex
                 else:
                     answer_ex = (answer_ex + "\n\n" + ex).strip() if answer_ex else ex
                 continue
-            if art.kind.endswith("pdf"):
-                artifacts["pdf"] = data
-            if art.kind.endswith("txt"):
-                artifacts["txt"] = data
-            if art.kind.endswith("ipynb"):
-                artifacts["ipynb"] = data
-            if art.kind.endswith("py"):
-                artifacts["py"] = data
-            if art.kind.endswith("mp4"):
-                artifacts["mp4"] = data
-            if art.kind.endswith("mp3"):
-                artifacts["mp3"] = data
-            if art.kind.endswith("wav"):
-                artifacts["wav"] = data
-            if art.kind.endswith("m4a"):
-                artifacts["m4a"] = data
-            if art.kind.endswith("webm"):
-                artifacts["webm"] = data
-            if art.kind.endswith("zip"):
-                artifacts["zip"] = data
-            if art.kind.endswith("png"):
-                artifacts["png"] = data
-            if art.kind.endswith("jpg") or art.kind.endswith("jpeg"):
-                artifacts["jpg"] = data
-            if art.kind.endswith("docx"):
-                artifacts["docx"] = data
-            if art.kind.endswith("xlsx"):
-                artifacts["xlsx"] = data
-            if art.kind.endswith("csv"):
-                artifacts["csv"] = data
+            submission_parts.append((fn_hint or art.kind, data))
 
         is_public_autograder = assignment.course_id is None
+        if not is_public_autograder:
+            for att in (
+                db.query(AssignmentAttachment)
+                .filter_by(assignment_id=assignment.id)
+                .order_by(AssignmentAttachment.created_at.desc())
+                .all()
+            ):
+                data = get_object_bytes(cfg, att.object_key)
+                ex = excerpt_attachment_bytes(att.filename, data)
+                if att.kind == "rubric":
+                    rubric_ex = (rubric_ex + "\n\n" + ex).strip() if rubric_ex else ex
+                elif att.kind == "answer_key":
+                    answer_ex = (answer_ex + "\n\n" + ex).strip() if answer_ex else ex
+
+        artifacts = build_submission_artifacts(submission_parts)
         if is_public_autograder:
             merged_rubric_parts = []
             grt = getattr(assignment, "grader_rubric_text", None)
@@ -285,13 +475,13 @@ def grade_submission(self, submission_id: int):
                 }
                 if entropy_meta is not None:
                     grading_report["entropy_meta"] = entropy_meta
-                s3_client(cfg).put_object(
-                    Bucket=cfg.S3_GRADING_REPORTS_BUCKET,
+                minio_client(cfg).put_object(
+                    Bucket=cfg.MINIO_GRADING_REPORTS_BUCKET,
                     Key=report_key,
                     Body=json.dumps(grading_report, indent=2).encode("utf-8"),
                     ContentType="application/json",
                 )
-                sub_ref.grading_report_s3_key = report_key
+                sub_ref.grading_report_object_key = report_key
                 db.commit()
         except Exception as e:
             _log.error(
@@ -311,47 +501,6 @@ def grade_submission(self, submission_id: int):
         raise
     finally:
         db.close()
-
-
-def _artifact_bucket_key(kind: str, filename: str) -> str | None:
-    k = (kind or "").lower().split(".")[-1]
-    fn = (filename or "").lower()
-    for ext in (
-        "pdf",
-        "txt",
-        "ipynb",
-        "py",
-        "mp4",
-        "mp3",
-        "wav",
-        "m4a",
-        "webm",
-        "zip",
-        "png",
-        "jpg",
-        "jpeg",
-        "docx",
-        "csv",
-        "xlsx",
-        "md",
-    ):
-        if k == ext or fn.endswith(f".{ext}"):
-            if ext == "jpeg":
-                return "jpg"
-            return ext
-    return None
-
-
-def _excerpt_file_bytes(filename: str, data: bytes) -> str:
-    if not data:
-        return ""
-    fn = (filename or "").lower()
-    if fn.endswith(".pdf") or (len(data) > 4 and data[:4] == b"%PDF"):
-        try:
-            return extract_text_from_pdf(data)
-        except Exception:
-            return ""
-    return data.decode("utf-8", errors="ignore")[:80000]
 
 
 @celery_app.task(name="grade_standalone_submission", bind=True, max_retries=2)
@@ -381,21 +530,44 @@ def grade_standalone_submission(self, submission_id: int):
         db.commit()
 
         arts = db.query(StandaloneArtifact).filter_by(submission_id=sub.id).all()
-        main: dict[str, bytes] = {}
+        submission_parts: list[tuple[str, bytes]] = []
         rubric_ex = ""
         answer_ex = ""
+        blank_template_bytes: bytes | None = None
+        blank_template_filename: str = ""
+        blank_template_suffix: str = ""
+        rubric_column_override = None
         for art in arts:
-            data = get_object_bytes(cfg, art.s3_key)
+            data = get_object_bytes(cfg, art.object_key)
             if art.kind in ("rubric", "answer_key"):
-                ex = _excerpt_file_bytes(art.filename, data)
+                ex = excerpt_attachment_bytes(art.filename, data)
                 if art.kind == "rubric":
                     rubric_ex = (rubric_ex + "\n\n" + ex).strip() if rubric_ex else ex
+                    parsed = _parse_uploaded_rubric_column(str(art.filename or ""), data)
+                    if parsed is not None:
+                        rubric_column_override = parsed
                 else:
                     answer_ex = (answer_ex + "\n\n" + ex).strip() if answer_ex else ex
                 continue
-            bkey = _artifact_bucket_key(art.kind, art.filename)
-            if bkey:
-                main[bkey] = data
+            if art.kind == "blank_assignment":
+                blank_template_bytes = bytes(data)
+                blank_template_filename = str(art.filename or "").strip()
+                blank_template_suffix = Path(blank_template_filename).suffix.lower()
+                continue
+            submission_parts.append((art.filename or art.kind, data))
+        if rubric_column_override is None:
+            raise ValueError(
+                "Standalone grading requires an uploaded, parseable JSON rubric file."
+            )
+        main = build_submission_artifacts(submission_parts)
+        modality_hints_extra: dict[str, object] = {}
+        if blank_template_bytes:
+            modality_hints_extra["blank_assignment_template_bytes"] = blank_template_bytes
+            modality_hints_extra["blank_assignment_template_suffix"] = blank_template_suffix
+            if blank_template_filename:
+                modality_hints_extra["blank_assignment_matched_file"] = blank_template_filename
+            if blank_template_suffix == ".ipynb":
+                modality_hints_extra["blank_assignment_ipynb_bytes"] = blank_template_bytes
 
         result = run_standalone_multimodal_pipeline(
             cfg,
@@ -407,6 +579,8 @@ def grade_standalone_submission(self, submission_id: int):
             rubric_ex or None,
             answer_ex or None,
             getattr(sub, "grading_instructions", None),
+            modality_hints_extra or None,
+            rubric_column_override,
         )
         _default_ml = f"openai:{(cfg.OPENAI_MODEL or 'gpt-4o-mini').strip()}"
         model_used = (result.pop("_model_used", None) or _default_ml)[:200]
@@ -417,6 +591,64 @@ def grade_standalone_submission(self, submission_id: int):
 
         criteria = result.get("criteria", [])
         overall = result.get("overall", {})
+        question_grades = result.get("question_grades", [])
+        source_chunk_payload = _build_source_chunk_payload_map(result)
+        total_rubric_points = 0.0
+        total_rubric_points_earned = 0.0
+        try:
+            if overall.get("max_points") is not None:
+                total_rubric_points = float(overall.get("max_points") or 0.0)
+            if overall.get("rubric_points_earned") is not None:
+                total_rubric_points_earned = float(overall.get("rubric_points_earned") or 0.0)
+        except (TypeError, ValueError):
+            total_rubric_points = 0.0
+            total_rubric_points_earned = 0.0
+        if total_rubric_points <= 0.0 or total_rubric_points_earned <= 0.0:
+            qp_max = 0.0
+            qp_earned = 0.0
+            for qg in question_grades:
+                if not isinstance(qg, dict):
+                    continue
+                ov = qg.get("overall") or {}
+                try:
+                    qp_max += float(ov.get("max_points") or 0.0)
+                except (TypeError, ValueError):
+                    pass
+                try:
+                    qp_earned += float(ov.get("rubric_points_earned") or 0.0)
+                except (TypeError, ValueError):
+                    pass
+            if total_rubric_points <= 0.0:
+                total_rubric_points = qp_max
+            if total_rubric_points_earned <= 0.0:
+                total_rubric_points_earned = qp_earned
+        if total_rubric_points <= 0.0:
+            for c in criteria:
+                if not isinstance(c, dict):
+                    continue
+                try:
+                    total_rubric_points += float(c.get("max_points", 0.0))
+                except (TypeError, ValueError):
+                    continue
+        if total_rubric_points_earned <= 0.0:
+            for c in criteria:
+                if not isinstance(c, dict):
+                    continue
+                try:
+                    total_rubric_points_earned += float(c.get("score", 0.0))
+                except (TypeError, ValueError):
+                    continue
+        score_fraction = 0.0
+        if total_rubric_points > 0.0:
+            score_fraction = total_rubric_points_earned / total_rubric_points
+        else:
+            try:
+                score_fraction = float(overall.get("score") or 0.0)
+            except (TypeError, ValueError):
+                score_fraction = 0.0
+            if score_fraction > 1.0:
+                score_fraction /= 100.0
+        score_fraction = max(0.0, min(1.0, score_fraction))
         flags = set(result.get("flags", []))
         mm_review = str(result.get("_assignment_review_status", "") or "").lower()
         multimodal_needs_review = mm_review in ("caution", "flagged", "escalation")
@@ -436,7 +668,7 @@ def grade_standalone_submission(self, submission_id: int):
             )
 
         sub = db.query(StandaloneSubmission).get(submission_id)
-        sub.final_score = overall.get("score", 0)
+        sub.final_score = score_fraction
         sub.final_feedback = overall.get("summary", "")
         low_conf = any(float(c.get("confidence", 0)) < 0.70 for c in criteria)
         ent_conf = overall.get("confidence_from_entropy")
@@ -465,7 +697,8 @@ def grade_standalone_submission(self, submission_id: int):
                     "final_score": float(sub_ref.final_score)
                     if sub_ref.final_score is not None
                     else None,
-                    "final_feedback": sub_ref.final_feedback,
+                    "max_points": round(total_rubric_points, 4),
+                    "rubric_points_earned": round(total_rubric_points_earned, 4),
                     "model_used": model_used,
                     "models_used": models_used,
                     "graded_at": sub_ref.updated_at.isoformat()
@@ -475,21 +708,80 @@ def grade_standalone_submission(self, submission_id: int):
                         {
                             "criterion": c.get("name", ""),
                             "score": c.get("score", 0),
+                            "max_points": c.get("max_points"),
+                            "rubric_points_earned": c.get("score", 0),
                             "confidence": c.get("confidence", 0.5),
+                            "justification": _rationale_for_db(c),
                             "rationale": _rationale_for_db(c),
+                            "student_evidence": _student_evidence_from_criterion(c),
+                            "evidence": _evidence_for_db(c.get("evidence")),
                         }
                         for c in criteria
+                    ],
+                    "question_grades": [
+                        {
+                            "chunk_id": qg.get("chunk_id"),
+                            "source_chunk_id": qg.get("_source_chunk_id"),
+                            "overall": {
+                                "score": (qg.get("overall") or {}).get("score"),
+                                "max_points": (qg.get("overall") or {}).get("max_points"),
+                                "rubric_points_earned": (qg.get("overall") or {}).get("rubric_points_earned"),
+                                "confidence": (qg.get("overall") or {}).get("confidence"),
+                            },
+                            "question_payload": {
+                                "question": (
+                                    source_chunk_payload.get(
+                                        str(qg.get("_source_chunk_id") or "").strip(), {}
+                                    ).get("question")
+                                    or str(qg.get("chunk_id") or "").strip()
+                                ),
+                                "question_chunk_text": (
+                                    source_chunk_payload.get(
+                                        str(qg.get("_source_chunk_id") or "").strip(), {}
+                                    ).get("question_chunk_text")
+                                    or ""
+                                ),
+                                "student_response": (
+                                    source_chunk_payload.get(
+                                        str(qg.get("_source_chunk_id") or "").strip(), {}
+                                    ).get("student_response")
+                                    or ""
+                                ),
+                                "response_text": (
+                                    source_chunk_payload.get(
+                                        str(qg.get("_source_chunk_id") or "").strip(), {}
+                                    ).get("response_text")
+                                    or ""
+                                ),
+                            },
+                            "criteria": [
+                                {
+                                    "criterion": qc.get("name", ""),
+                                    "score": qc.get("score", 0),
+                                    "max_points": qc.get("max_points"),
+                                    "rubric_points_earned": qc.get("score", 0),
+                                    "confidence": qc.get("confidence", 0.5),
+                                    "justification": str(qc.get("justification") or "").strip(),
+                                    "student_evidence": str(qc.get("evidence") or "").strip(),
+                                    "evidence": _evidence_for_db(qc.get("evidence")),
+                                }
+                                for qc in (qg.get("criteria") or [])
+                                if isinstance(qc, dict)
+                            ],
+                        }
+                        for qg in question_grades
+                        if isinstance(qg, dict)
                     ],
                 }
                 if entropy_meta is not None:
                     grading_report["entropy_meta"] = entropy_meta
-                s3_client(cfg).put_object(
-                    Bucket=cfg.S3_GRADING_REPORTS_BUCKET,
+                minio_client(cfg).put_object(
+                    Bucket=cfg.MINIO_GRADING_REPORTS_BUCKET,
                     Key=report_key,
                     Body=json.dumps(grading_report, indent=2).encode("utf-8"),
                     ContentType="application/json",
                 )
-                sub_ref.grading_report_s3_key = report_key
+                sub_ref.grading_report_object_key = report_key
                 db.commit()
         except Exception as e:
             _log.error(

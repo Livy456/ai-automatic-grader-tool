@@ -85,15 +85,15 @@ AGT_platform/frontend/dist/
 env.production.gpu
 
 # student assignments and rubric for grading
-# **/assignments_to_grade/*
-# **/rubric/*
+**/assignments_to_grade/*
+**/rubric/*
 **/grading_output/*
 **/RAG_embedding/*
 **/multi-modal_assignments_to_grade/*
 **/multi-modal_RAG_embeding/*
-# **/answer_key/*
+**/answer_key/*
 **/grading_output copy/*
-# **/blank_assignments/*
+**/blank_assignments/*
 **/grading_output_training/*
 **/assignment_chunking/*
 **/AGT_platform/backend/uploads/*
@@ -105,5 +105,9 @@ README [OLD].md
 
 **/thesis_research_analysis/*
 
+*./AGT_platform/backend/app/access.py
+
 # Local venv
 .venv/
+
+notes 

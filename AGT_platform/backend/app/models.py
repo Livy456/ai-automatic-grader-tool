@@ -54,7 +54,7 @@ class AssignmentAttachment(Base):
     id = Column(Integer, primary_key=True)
     assignment_id = Column(Integer, ForeignKey("assignments.id"), nullable=False)
     kind = Column(String(32), nullable=False)  # rubric | answer_key
-    s3_key = Column(String(1024), nullable=False)
+    object_key = Column("s3_key", String(1024), nullable=False)
     filename = Column(String(512), nullable=False)
     uploaded_by_id = Column(Integer, ForeignKey("users.id"), nullable=True)
     created_at = Column(DateTime, default=datetime.utcnow)
@@ -125,7 +125,7 @@ class Submission(Base):
     """
     Lifecycle (status):
       uploading → uploaded → queued → grading → graded | needs_review | error
-    Direct S3 flow: create as uploading; after browser PUTs to S3, finalize sets uploaded,
+    Direct object-store flow: create as uploading; after browser PUTs to MinIO, finalize sets uploaded,
     then atomically queued + single Celery enqueue (grading_dispatch_at set once).
     """
 
@@ -147,7 +147,7 @@ class Submission(Base):
     # Best-effort client IP for anonymous autograder rate limiting / mutation checks.
     submitter_ip = Column(String(64), nullable=True)
 
-    grading_report_s3_key = Column(String(1024), nullable=True)
+    grading_report_object_key = Column("grading_report_s3_key", String(1024), nullable=True)
 
     assignment = relationship("Assignment")
     student = relationship("User")
@@ -158,7 +158,7 @@ class SubmissionArtifact(Base):
     id = Column(Integer, primary_key=True)
     submission_id = Column(Integer, ForeignKey("submissions.id"), nullable=False)
     kind = Column(String, nullable=False)  # pdf|txt|ipynb|zip|mp4|png|jpg
-    s3_key = Column(String, nullable=False)
+    object_key = Column("s3_key", String, nullable=False)
     sha256 = Column(String, nullable=True)
     created_at = Column(DateTime, default=datetime.utcnow)
 
@@ -213,7 +213,7 @@ class StandaloneSubmission(Base):
     # Optional free-text prompt (focus, learning goals) combined with rubric / sample in the grader.
     grading_instructions = Column(Text, nullable=True)
 
-    grading_report_s3_key = Column(String(1024), nullable=True)
+    grading_report_object_key = Column("grading_report_s3_key", String(1024), nullable=True)
 
     user = relationship("User")
     artifacts = relationship(
@@ -230,7 +230,7 @@ class StandaloneArtifact(Base):
     id = Column(Integer, primary_key=True)
     submission_id = Column(Integer, ForeignKey("standalone_submissions.id"), nullable=False)
     kind = Column(String(32), nullable=False)
-    s3_key = Column(String(1024), nullable=False)
+    object_key = Column("s3_key", String(1024), nullable=False)
     filename = Column(String(512), nullable=False)
     sha256 = Column(String(128), nullable=True)
     created_at = Column(DateTime, default=datetime.utcnow)

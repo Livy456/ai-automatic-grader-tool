@@ -74,33 +74,46 @@ class Config:
     # deployment_tier: web | gpu — informational; used in logs and optional guards
     DEPLOYMENT_TIER = _env_str("DEPLOYMENT_TIER").strip().lower() or "web"
 
-    # S3-compatible storage (AWS S3 or MinIO). Empty S3_ENDPOINT = native AWS.
-    S3_ENDPOINT = _env_str("S3_ENDPOINT").strip().rstrip("/")
-    S3_ACCESS_KEY = _env_str("S3_ACCESS_KEY")
-    S3_SECRET_KEY = _env_str("S3_SECRET_KEY")
-    S3_BUCKET = _env_str("S3_BUCKET")
-    S3_REGION = _env_str("S3_REGION").strip() or "us-east-1"
-    S3_SECURE = _env_bool("S3_SECURE")
-    S3_ADDRESSING_STYLE = _env_str("S3_ADDRESSING_STYLE").strip()
-    AWS_REGION = _env_str("AWS_REGION").strip() or S3_REGION
+    # MinIO object storage.
+    MINIO_ENDPOINT = (
+        _env_str("MINIO_ENDPOINT").strip().rstrip("/")
+        or "http://127.0.0.1:9000"
+    )
+    MINIO_ACCESS_KEY = (
+        _env_str("MINIO_ACCESS_KEY").strip() or "minio"
+    )
+    MINIO_SECRET_KEY = (
+        _env_str("MINIO_SECRET_KEY").strip() or "minio123456"
+    )
+    MINIO_BUCKET = _env_str("MINIO_BUCKET").strip() or "ai-grader"
+    MINIO_REGION = _env_str("MINIO_REGION").strip() or "us-east-1"
+    MINIO_SECURE = (
+        _env_str("MINIO_SECURE").strip().lower() == "true"
+        if _env_str("MINIO_SECURE").strip()
+        else False
+    )
+    MINIO_ADDRESSING_STYLE = (
+        _env_str("MINIO_ADDRESSING_STYLE").strip() or "path"
+    )
+    OBJECT_STORAGE_REGION = _env_str("OBJECT_STORAGE_REGION").strip() or MINIO_REGION
 
-    # Host/port the *browser* uses for presigned PUT/GET URLs. Must match what appears in the URL
-    # string (SigV4 signs the Host header). Leave empty to use S3_ENDPOINT; for AWS both are empty
-    # and URLs are correct. For Docker Compose, S3_ENDPOINT is often http://minio:9000 (unreachable
-    # from the host browser) — set S3_PRESIGN_ENDPOINT=http://127.0.0.1:9000 or use the default
-    # below when S3_ENDPOINT is the standard internal MinIO URL.
-    _presign_ep = _env_str("S3_PRESIGN_ENDPOINT").strip().rstrip("/")
-    if not _presign_ep and S3_ENDPOINT == "http://minio:9000":
+    # Host/port the browser uses for presigned PUT/GET URLs.
+    _presign_ep = _env_str("MINIO_PRESIGN_ENDPOINT").strip().rstrip("/")
+    if not _presign_ep and MINIO_ENDPOINT == "http://minio:9000":
         _presign_ep = "http://127.0.0.1:9000"
-    S3_PRESIGN_ENDPOINT = _presign_ep
+    MINIO_PRESIGN_ENDPOINT = _presign_ep
 
     # Post-grading JSON reports (optional separate bucket; defaults to uploads bucket).
-    S3_GRADING_REPORTS_BUCKET = (
-        _env_str("S3_GRADING_REPORTS_BUCKET").strip() or _env_str("S3_BUCKET").strip()
+    MINIO_GRADING_REPORTS_BUCKET = (
+        _env_str("MINIO_GRADING_REPORTS_BUCKET").strip()
+        or MINIO_BUCKET
     )
 
     # Prefix for student submission objects (unique keys still include ids/uuids).
-    UPLOADS_S3_PREFIX = _env_str("UPLOADS_S3_PREFIX").strip() or "assignments/by-id"
+    UPLOADS_OBJECT_PREFIX = (
+        _env_str("UPLOADS_OBJECT_PREFIX").strip()
+        or "assignments/by-id"
+    )
 
     MAX_UPLOAD_MB = _env_int("MAX_UPLOAD_MB", default=1024)
     MAX_UPLOAD_BYTES = MAX_UPLOAD_MB * 1024 * 1024
@@ -109,17 +122,22 @@ class Config:
     WEB_MAX_BODY_MB = _env_int("WEB_MAX_BODY_MB", default=4)
     WEB_MAX_BODY_BYTES = WEB_MAX_BODY_MB * 1024 * 1024
 
-    S3_INLINE_UPLOAD_MAX_BYTES = _env_int(
-        "S3_INLINE_UPLOAD_MAX_BYTES", default=32 * 1024 * 1024
+    MINIO_INLINE_UPLOAD_MAX_BYTES = _env_int(
+        "MINIO_INLINE_UPLOAD_MAX_BYTES",
+        default=32 * 1024 * 1024,
     )
-    S3_UPLOAD_SPOOL_MAX_MEMORY_BYTES = _env_int(
-        "S3_UPLOAD_SPOOL_MAX_MEMORY_BYTES", default=16 * 1024 * 1024
+    MINIO_UPLOAD_SPOOL_MAX_MEMORY_BYTES = _env_int(
+        "MINIO_UPLOAD_SPOOL_MAX_MEMORY_BYTES",
+        default=16 * 1024 * 1024,
     )
 
-    # Presigned PUT lifetime (browser → S3 direct upload).
-    S3_PRESIGN_PUT_EXPIRES = _env_int("S3_PRESIGN_PUT_EXPIRES", default=3600)
+    # Presigned PUT lifetime (browser → MinIO direct upload).
+    MINIO_PRESIGN_PUT_EXPIRES = _env_int(
+        "MINIO_PRESIGN_PUT_EXPIRES",
+        default=3600,
+    )
 
-    # Production: false — browser uses presigned S3 only. Dev docker: set true to use multipart to Flask.
+    # Production: false — browser uses presigned object storage only. Dev docker: set true to use multipart to Flask.
     ALLOW_FLASK_MULTIPART_UPLOAD = _env_bool("ALLOW_FLASK_MULTIPART_UPLOAD")
 
     OIDC_CLIENT_ID = _env_str("OIDC_CLIENT_ID")

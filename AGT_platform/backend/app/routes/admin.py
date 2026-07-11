@@ -7,7 +7,7 @@ from sqlalchemy.exc import IntegrityError
 from app.audit import log_event
 from app.extensions import SessionLocal
 from app.models import Assignment, AuditLog, Course, Enrollment, IssuedJwt, User
-from app.rbac import require_role
+from app.access import require_role
 
 bp = Blueprint("admin", __name__)
 

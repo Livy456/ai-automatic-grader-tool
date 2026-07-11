@@ -144,6 +144,16 @@ def default_answer_key_dir() -> Path:
     return Path(__file__).resolve().parents[5] / "answer_key"
 
 
+def default_rubric_dir() -> Path:
+    """``…/ai-automatic-grader-tool/rubric`` (repo root), or ``MULTIMODAL_RUBRIC_DIR``."""
+    import os
+
+    raw = os.getenv("MULTIMODAL_RUBRIC_DIR", "").strip()
+    if raw:
+        return Path(raw).expanduser()
+    return Path(__file__).resolve().parents[5] / "rubric"
+
+
 def default_rag_embedding_dir() -> Path:
     """``…/ai-automatic-grader-tool/RAG_embedding`` (repo root)."""
     return Path(__file__).resolve().parents[5] / "RAG_embedding"
@@ -295,7 +305,7 @@ def _try_persist_assignment_chunking_json(
 
 @dataclass
 class PipelineArtifactStore:
-    """Per-stage audit log (in-memory; persist to DB/S3 in production)."""
+    """Per-stage audit log (in-memory; persist to DB/object-storage in production)."""
 
     stages: dict[str, list[dict[str, Any]]] = field(default_factory=dict)
 
@@ -354,7 +364,10 @@ class MultimodalGradingPipeline:
         raw_akd = str(hints.get("answer_key_dir") or "").strip()
         ak_dir = Path(raw_akd).expanduser() if raw_akd else default_answer_key_dir()
         if not answer_key_plain:
-            ak_text, ak_name = resolve_answer_key_plaintext(envelope.assignment_id, ak_dir)
+            ak_lookup = str(
+                hints.get("answer_key_lookup_stem") or envelope.assignment_id or ""
+            ).strip()
+            ak_text, ak_name = resolve_answer_key_plaintext(ak_lookup, ak_dir)
             if ak_text.strip():
                 answer_key_plain = ak_text.strip()
                 hints["answer_key_plaintext"] = ak_text
@@ -370,8 +383,11 @@ class MultimodalGradingPipeline:
         raw_blank_dir = str(hints.get("blank_assignments_dir") or "").strip()
         blank_dir = Path(raw_blank_dir).expanduser() if raw_blank_dir else default_blank_assignments_dir()
         if not hints.get("blank_assignment_template_bytes"):
+            blank_lookup = str(
+                hints.get("blank_assignment_lookup_stem") or envelope.assignment_id or ""
+            ).strip()
             tpl_b, tpl_name, tpl_suf = resolve_blank_assignment_template(
-                envelope.assignment_id, blank_dir
+                blank_lookup, blank_dir
             )
             if tpl_b.strip():
                 hints["blank_assignment_template_bytes"] = tpl_b

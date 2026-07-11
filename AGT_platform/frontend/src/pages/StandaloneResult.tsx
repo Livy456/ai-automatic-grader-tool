@@ -9,11 +9,13 @@ import {
   Chip,
   CircularProgress,
   LinearProgress,
+  Tab,
   Table,
   TableBody,
   TableCell,
   TableHead,
   TableRow,
+  Tabs,
   Typography,
 } from "@mui/material";
 import ArrowBackOutlined from "@mui/icons-material/ArrowBackOutlined";
@@ -26,6 +28,7 @@ import {
 import StatusChip from "../components/StatusChip";
 
 const POLL_STATUSES = new Set(["uploading", "uploaded", "queued", "grading"]);
+type StandaloneQuestionGrade = NonNullable<StandaloneSubmissionDetail["question_grades"]>[number];
 
 function gradeBarColor(score: number): "success" | "warning" | "error" {
   if (score >= 90) return "success";
@@ -39,10 +42,37 @@ function confidenceColor(conf: number): "success" | "warning" | "error" {
   return "error";
 }
 
+function normalizeConfidence01(raw: unknown): number | null {
+  const n = Number(raw);
+  if (!Number.isFinite(n)) return null;
+  const normalized = n > 1 ? n / 100 : n;
+  return Math.max(0, Math.min(1, normalized));
+}
+
 function criterionChipColor(fraction: number): "success" | "warning" | "error" {
-  if (fraction >= 0.8) return "success";
-  if (fraction >= 0.6) return "warning";
+  if (fraction >= 80) return "success";
+  if (fraction >= 60) return "warning";
   return "error";
+}
+
+function summarizeEvidence(ev: unknown): string {
+  if (!ev || typeof ev !== "object") return "";
+  const obj = ev as Record<string, unknown>;
+  const trio = (obj.trio ?? {}) as Record<string, unknown>;
+  const bits: string[] = [];
+  const student = String(trio.student_response ?? "").trim();
+  const key = String(trio.answer_key_segment ?? "").trim();
+  const source = String((obj.chunker as string) || "").trim();
+  if (student) bits.push(`Student: ${student.slice(0, 220)}`);
+  if (key) bits.push(`Key: ${key.slice(0, 220)}`);
+  if (source) bits.push(`Chunker: ${source}`);
+  return bits.join("\n");
+}
+
+function studentEvidenceSnippet(row: StandaloneSubmissionDetail["ai_scores"][number]): string {
+  const direct = String(row.student_evidence || "").trim();
+  if (direct) return direct.slice(0, 450);
+  return "Missing direct student evidence in grader output.";
 }
 
 export default function StandaloneResult() {
@@ -51,6 +81,7 @@ export default function StandaloneResult() {
   const [sub, setSub] = useState<StandaloneSubmissionDetail | null>(null);
   const [loadError, setLoadError] = useState(false);
   const [reportBusy, setReportBusy] = useState(false);
+  const [activeQuestionTab, setActiveQuestionTab] = useState(0);
 
   useEffect(() => {
     let cancelled = false;
@@ -114,8 +145,64 @@ export default function StandaloneResult() {
 
   const scores = sub.ai_scores ?? [];
   const polling = POLL_STATUSES.has(sub.status);
+  const baseConfidenceValues = scores
+    .map((s) => normalizeConfidence01(s.confidence))
+    .filter((c): c is number => c !== null);
+  const baseAvgConfidence =
+    baseConfidenceValues.length > 0
+      ? baseConfidenceValues.reduce((sum, c) => sum + c, 0) / baseConfidenceValues.length
+      : 0;
+  const questionGrades: StandaloneQuestionGrade[] = (sub.question_grades ?? []).filter(
+    (q): q is StandaloneQuestionGrade => Array.isArray(q.criteria),
+  );
+  const fallbackQuestionGrade: StandaloneQuestionGrade = {
+    chunk_id: "fallback_chunk",
+    source_chunk_id: "fallback_chunk",
+    overall: {
+      score: sub.final_score ?? null,
+      max_points: sub.max_points ?? null,
+      rubric_points_earned: sub.rubric_points_earned ?? null,
+      confidence: baseAvgConfidence,
+    },
+    question_payload: {
+      note: "Question payload unavailable; displaying assignment-level fallback.",
+    },
+    criteria: scores.map((s) => ({
+      criterion: s.criterion,
+      score: s.score,
+      max_points: null,
+      rubric_points_earned: null,
+      confidence: s.confidence,
+      justification: s.justification || s.rationale,
+      student_evidence: s.student_evidence || studentEvidenceSnippet(s),
+      evidence: s.evidence,
+    })),
+  };
+  const effectiveQuestionGrades: StandaloneQuestionGrade[] = questionGrades.length
+    ? questionGrades
+    : [fallbackQuestionGrade];
+  const confidenceValues = effectiveQuestionGrades
+    .flatMap((q) => (q.criteria || []).map((c) => normalizeConfidence01(c.confidence)))
+    .filter((c): c is number => c !== null);
+  const fallbackConfidenceValues = baseConfidenceValues;
+  const effectiveConfidenceValues =
+    confidenceValues.length > 0 ? confidenceValues : fallbackConfidenceValues;
   const avgConfidence =
-    scores.length > 0 ? scores.reduce((sum, s) => sum + s.confidence, 0) / scores.length : 0;
+    effectiveConfidenceValues.length > 0
+      ? effectiveConfidenceValues.reduce((sum, c) => sum + c, 0) / effectiveConfidenceValues.length
+      : 0;
+  const currentQuestion = effectiveQuestionGrades[Math.min(activeQuestionTab, effectiveQuestionGrades.length - 1)];
+  const rubricTotals = effectiveQuestionGrades.reduce(
+    (acc, q) => {
+      const ov = q.overall || {};
+      const earned = Number(ov.rubric_points_earned ?? 0);
+      const max = Number(ov.max_points ?? 0);
+      if (Number.isFinite(earned)) acc.earned += earned;
+      if (Number.isFinite(max)) acc.max += max;
+      return acc;
+    },
+    { earned: 0, max: 0 },
+  );
 
   return (
     <Box>
@@ -156,15 +243,22 @@ export default function StandaloneResult() {
                 color={gradeBarColor(Number(sub.final_score))}
                 sx={{ fontSize: "1.1rem", fontWeight: 700, height: 40 }}
               />
-              {scores.length > 0 && (
+              {(rubricTotals.max > 0 || (sub.rubric_points_earned != null && sub.max_points != null)) && (
                 <Chip
                   size="small"
-                  label={`Avg confidence ${(avgConfidence * 100).toFixed(0)}%`}
+                  label={`Rubric points ${(rubricTotals.earned > 0 ? rubricTotals.earned : Number(sub.rubric_points_earned || 0)).toFixed(1)} / ${(rubricTotals.max > 0 ? rubricTotals.max : Number(sub.max_points || 0)).toFixed(1)}`}
+                  variant="outlined"
+                />
+              )}
+              {effectiveConfidenceValues.length > 0 && (
+                <Chip
+                  size="small"
+                  label={`Avg confidence ${(avgConfidence * 100).toFixed(1)}%`}
                   color={confidenceColor(avgConfidence)}
                   variant="outlined"
                 />
               )}
-              {sub.grading_report_s3_key && (
+              {sub.grading_report_object_key && (
                 <Button
                   size="small"
                   variant="outlined"
@@ -176,61 +270,116 @@ export default function StandaloneResult() {
                 </Button>
               )}
             </Box>
-            {sub.final_feedback && (
-              <Typography variant="body1" sx={{ mt: 2, whiteSpace: "pre-wrap" }}>
-                {sub.final_feedback}
-              </Typography>
-            )}
           </CardContent>
         </Card>
       )}
 
       <Typography variant="h3" sx={{ mb: 1 }}>
-        Criteria
+        Parsed Questions
       </Typography>
-      {scores.length === 0 ? (
+      {effectiveQuestionGrades.length === 0 ? (
         <Typography color="text.secondary">
-          {polling ? "Grading in progress…" : "No criterion scores yet."}
+          {polling ? "Grading in progress…" : "No parsed questions yet."}
         </Typography>
       ) : (
-        <Table size="small">
-          <TableHead>
-            <TableRow>
-              <TableCell>Criterion</TableCell>
-              <TableCell align="right">Score</TableCell>
-              <TableCell align="right">Confidence</TableCell>
-              <TableCell>Rationale</TableCell>
-            </TableRow>
-          </TableHead>
-          <TableBody>
-            {scores.map((row) => {
-              const maxPts = 25;
-              const frac = maxPts > 0 ? row.score / maxPts : 0;
-              return (
-                <TableRow key={row.criterion}>
-                  <TableCell>{row.criterion}</TableCell>
-                  <TableCell align="right">
-                    <Chip
-                      size="small"
-                      label={row.score.toFixed(1)}
-                      color={criterionChipColor(frac)}
-                      variant="outlined"
-                    />
-                  </TableCell>
-                  <TableCell align="right">
-                    <Chip
-                      size="small"
-                      label={`${(row.confidence * 100).toFixed(0)}%`}
-                      color={confidenceColor(row.confidence)}
-                      variant="outlined"
-                    />
-                  </TableCell>
-                  <TableCell sx={{ maxWidth: 480, whiteSpace: "pre-wrap" }}>{row.rationale}</TableCell>
-                </TableRow>
-              );
-            })}
-          </TableBody>
-        </Table>
+        <>
+          <Tabs
+            value={Math.min(activeQuestionTab, effectiveQuestionGrades.length - 1)}
+            onChange={(_, v) => setActiveQuestionTab(v)}
+            variant="scrollable"
+            scrollButtons="auto"
+            sx={{ mb: 2 }}
+            aria-label="Parsed question tabs"
+          >
+            {effectiveQuestionGrades.map((q, idx) => (
+              <Tab key={`${q.chunk_id || "q"}-${idx}`} label={`Question ${idx + 1}`} />
+            ))}
+          </Tabs>
+
+          <Card sx={{ mb: 2 }}>
+            <CardContent>
+              <Typography variant="overline" color="text.secondary">
+                Question
+              </Typography>
+              <Typography variant="body2" sx={{ mt: 1, whiteSpace: "pre-wrap" }}>
+                {String((currentQuestion.question_payload?.question as string) || "").trim() ||
+                  String((currentQuestion.question_payload?.question_chunk_text as string) || "").trim() ||
+                  "Question text not available for this parsed chunk."}
+              </Typography>
+            </CardContent>
+          </Card>
+
+          <Card sx={{ mb: 2 }}>
+            <CardContent>
+              <Typography variant="overline" color="text.secondary">
+                Student Response
+              </Typography>
+              <Typography variant="body2" sx={{ mt: 1, whiteSpace: "pre-wrap" }}>
+                {String((currentQuestion.question_payload?.response_text as string) || "").trim() ||
+                  String((currentQuestion.question_payload?.student_response as string) || "").trim() ||
+                  "Student response not available for this parsed chunk."}
+              </Typography>
+            </CardContent>
+          </Card>
+
+          <Table size="small">
+            <TableHead>
+              <TableRow>
+                <TableCell>Criterion</TableCell>
+                <TableCell>Score</TableCell>
+                <TableCell>Justification</TableCell>
+                <TableCell>Student Evidence</TableCell>
+                <TableCell align="right">AI Confidence</TableCell>
+              </TableRow>
+            </TableHead>
+            <TableBody>
+              {(currentQuestion.criteria || []).map((row) => {
+                const earned =
+                  typeof row.rubric_points_earned === "number"
+                    ? row.rubric_points_earned
+                    : Number(row.score || 0);
+                const total =
+                  typeof row.max_points === "number" && Number.isFinite(row.max_points)
+                    ? row.max_points
+                    : 0;
+                return (
+                  <TableRow key={`${currentQuestion.chunk_id || "q"}-${row.criterion}`}>
+                    <TableCell>{row.criterion}</TableCell>
+                    <TableCell>
+                      <Chip
+                        size="small"
+                        label={`${earned.toFixed(1)} / ${total.toFixed(1)}`}
+                        color={criterionChipColor(total > 0 ? (earned / total) * 100 : 0)}
+                        variant="outlined"
+                      />
+                    </TableCell>
+                    <TableCell sx={{ maxWidth: 460, whiteSpace: "pre-wrap" }}>
+                      {row.justification || "—"}
+                    </TableCell>
+                    <TableCell sx={{ maxWidth: 460, whiteSpace: "pre-wrap" }}>
+                      {String(row.student_evidence || "").trim() ||
+                        summarizeEvidence(row.evidence) ||
+                        "Missing direct student evidence."}
+                    </TableCell>
+                    <TableCell align="right">
+                      {(() => {
+                        const rowConfidence = normalizeConfidence01(row.confidence) ?? 0;
+                        return (
+                      <Chip
+                        size="small"
+                        label={`${(rowConfidence * 100).toFixed(1)}%`}
+                        color={confidenceColor(rowConfidence)}
+                        variant="outlined"
+                      />
+                        );
+                      })()}
+                    </TableCell>
+                  </TableRow>
+                );
+              })}
+            </TableBody>
+          </Table>
+        </>
       )}
     </Box>
   );
