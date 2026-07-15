@@ -1,3 +1,5 @@
+# DELETE THIS FILE LATER!!
+
 """
 Match a tabular / text dataset in ``assignments_to_grade/`` to a notebook submission.
 

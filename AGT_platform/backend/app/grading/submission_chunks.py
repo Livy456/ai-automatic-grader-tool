@@ -32,7 +32,11 @@ Chunking strategy (high level)
      are extra boundaries (regex ``_JOURNAL_INSTRUCTOR_PROMPT``).
 
    For each boundary line we emit ``role: \"question\"``; material until the next boundary
-   becomes ``role: \"response\"`` (or ``code``) with the same ``trio_id``.
+   becomes ``role: \"response\"`` (or ``code``) with the same ``trio_id``. A question is
+   still emitted even when there is **no** content before the next boundary (e.g. an
+   unfilled instructor template with back-to-back prompts, or a student who left a
+   question blank) — it just gets no ``response``/``code`` row here (backfilled empty by
+   :func:`_ensure_trio_answer_reference_rows`).
 
 4. **Leading body before the first header** — ``role: \"response\"`` (or ``code``) with
    ``trio_id: null``.
@@ -103,9 +107,13 @@ _CHUNK_HEADER = re.compile(
 )
 
 # Journal / free-response PDFs: full-sentence instructor prompts often end with "?"
-# without "Question 1" labels (after verticalized text has been reflowed).
+# without "Question 1" labels (after verticalized text has been reflowed). Students
+# sometimes add their own light numbering (e.g. "1/ Which data ...?") in front of the
+# instructor's sentence, so an optional leading item number is skipped before the
+# keyword lookahead.
 _JOURNAL_INSTRUCTOR_PROMPT = re.compile(
     r"(?m)^"
+    r"(?:[ \t]*\d+[\.\)/][ \t]*)?"
     r"(?=(?:What|Which|Did|How|Why|Explain|List|Describe|Are|Is|If|Would|Could|"
     r"Should|Have|Was|Were|For|In|Can|May|Must|Shall|Who|When|Where)\b)"
     r"(?!I\b|We\b|My\b|It\b|The\b|Yes\b|No\b|This\b|That\b|Here\b|There\b)"
@@ -479,18 +487,22 @@ def _chunks_from_prose_section(
         chunks.extend(packed)
         return chunks, idx, trio_id
 
+    # Note: ``blob`` here is the content *between the previous boundary and this one*,
+    # i.e. the answer belonging to ``current_q`` (or leading preamble when ``current_q``
+    # is still None). We must still record ``current_q`` even when ``blob`` is empty
+    # (e.g. two questions back-to-back with no answer in between, as in an unfilled
+    # instructor template) — otherwise that question line is silently dropped.
     segments: list[tuple[str | None, str]] = []
     pos = 0
     current_q: str | None = None
     for m in boundaries:
-        if m.start() > pos:
-            blob = body[pos : m.start()].strip()
-            if blob:
-                segments.append((current_q, blob))
+        blob = body[pos : m.start()].strip()
+        if blob or current_q is not None:
+            segments.append((current_q, blob))
         current_q = m.group().strip()
         pos = m.end()
     tail = body[pos:].strip()
-    if tail:
+    if tail or current_q is not None:
         segments.append((current_q, tail))
 
     for q_line, ans_text in segments:
