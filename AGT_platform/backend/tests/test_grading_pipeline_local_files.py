@@ -68,26 +68,26 @@ from pathlib import Path
 from types import SimpleNamespace
 
 from app.config import Config
-from app.grading.grading_units import build_grading_units_from_chunks
-from app.grading.modality_resolution import resolve_modality_profile
+from app.grading.parsing.grading_units import build_grading_units_from_chunks
+from app.grading.parsing.modality_resolution import resolve_modality_profile
 from app.grading.multimodal import (
     create_multimodal_pipeline_from_app_config,
     multimodal_assignment_to_grading_dict,
 )
-from app.grading.multimodal.generic_rubric_loader import (
+from app.grading.rubric_routing.generic_rubric_loader import (
     flat_rubric_rows_from_by_type,
     four_generic_rubric_files_present,
     load_four_generic_rubric_rows_by_type,
     merge_four_generics_to_sections_document,
 )
-from app.grading.multimodal.ingestion import ingest_raw_submission
-from app.grading.multimodal.schemas import RubricType
-from app.grading.answer_key_resolve import resolve_answer_key_plaintext
-from app.grading.output_schema import validate_grading_output
-from app.grading.multimodal.rubric_fallback import DEFAULT_STANDALONE_RUBRIC
+from app.grading.parsing.ingestion import ingest_raw_submission
+from app.grading.schemas import RubricType
+from app.grading.parsing.answer_key_resolve import resolve_answer_key_plaintext
+from app.grading.grading_output.output_schema import validate_grading_output
+from app.grading.rubric_routing.rubric_fallback import DEFAULT_STANDALONE_RUBRIC
 from app.grading.rag_embeddings import compute_submission_embedding, save_rag_embedding_bundle
-from app.grading.submission_chunks import build_submission_chunks, write_chunks_json
-from app.grading.submission_text import submission_text_from_artifacts
+from app.grading.parsing.submission_chunks import build_submission_chunks, write_chunks_json
+from app.grading.parsing.submission_text import submission_text_from_artifacts
 
 # Repo root: .../ai-automatic-grader-tool (contains AGT_platform/, assignments_to_grade/, ...)
 REPO_ROOT = Path(__file__).resolve().parents[3]

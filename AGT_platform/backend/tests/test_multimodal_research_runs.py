@@ -75,22 +75,22 @@ from types import SimpleNamespace
 
 from app.config import Config
 from app.grading.llm_router import build_multimodal_grading_clients
-from app.grading.modality_resolution import resolve_modality_profile
+from app.grading.parsing.modality_resolution import resolve_modality_profile
 from app.grading.multimodal import (
     create_multimodal_pipeline_from_app_config,
     multimodal_assignment_to_grading_dict,
 )
-from app.grading.multimodal.generic_rubric_loader import (
+from app.grading.rubric_routing.generic_rubric_loader import (
     flat_rubric_rows_from_by_type,
     four_generic_rubric_files_present,
     load_four_generic_rubric_rows_by_type,
     merge_four_generics_to_sections_document,
 )
-from app.grading.multimodal.ingestion import ingest_raw_submission
-from app.grading.multimodal.schemas import RubricType
-from app.grading.answer_key_resolve import resolve_answer_key_plaintext
-from app.grading.output_schema import validate_grading_output
-from app.grading.submission_text import submission_text_from_artifacts
+from app.grading.parsing.ingestion import ingest_raw_submission
+from app.grading.schemas import RubricType
+from app.grading.parsing.answer_key_resolve import resolve_answer_key_plaintext
+from app.grading.grading_output.output_schema import validate_grading_output
+from app.grading.parsing.submission_text import submission_text_from_artifacts
 
 
 def _grading_pipeline_local_fixtures():

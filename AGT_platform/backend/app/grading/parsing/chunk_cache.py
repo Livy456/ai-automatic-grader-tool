@@ -13,7 +13,7 @@ import logging
 from pathlib import Path
 from typing import Any
 
-from .schemas import GradingChunk, Modality, RubricType, TaskType
+from app.grading.schemas import GradingChunk, Modality, RubricType, TaskType
 
 _log = logging.getLogger(__name__)
 

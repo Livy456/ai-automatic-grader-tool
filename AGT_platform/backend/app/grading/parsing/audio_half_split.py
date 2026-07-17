@@ -9,7 +9,7 @@ When ``MULTIMODAL_AUDIO_HALF_SPLIT`` is ``on`` or ``auto`` (and prerequisites ma
 pipeline:
 
 1. Splits the audio bytes at the **midpoint duration** using ``ffmpeg`` / ``ffprobe``.
-2. Transcribes each half with :func:`app.grading.tools.transcribe_submission_media_bytes`.
+2. Transcribes each half with :func:`app.grading.parsing.tools.transcribe_submission_media_bytes`.
 3. Embeds each half's transcript (same stack as :func:`app.grading.rag_embeddings.compute_submission_embedding`).
 4. Replaces ``envelope.extracted_plaintext`` with a two-part transcript and stores
    ``modality_hints["audio_half_split"]`` so :func:`openai_trio_rag_frontload.run_openai_trio_rag_frontload`
@@ -29,7 +29,7 @@ from pathlib import Path
 
 from app.config import Config
 from app.grading.rag_embeddings import _openai_embed_snippet, compute_submission_embedding
-from app.grading.tools import transcribe_submission_media_bytes
+from app.grading.parsing.tools import transcribe_submission_media_bytes
 
 from .ingestion import IngestionEnvelope
 

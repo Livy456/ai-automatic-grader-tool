@@ -24,7 +24,7 @@ chunking: ``MULTIMODAL_RAG_PREWINDOW_EMBED=on`` (see :func:`precompute_document_
    (:mod:`template_aligned_notebook_chunks`); otherwise
    :func:`notebook_chunker.build_notebook_qa_chunks` (cell-order Q/A).
 2. Otherwise **PDF plaintext** is reflowed via
-   :func:`app.grading.submission_chunks.reflow_pdf_sections_in_plaintext` before any LLM
+   :func:`app.grading.parsing.submission_chunks.reflow_pdf_sections_in_plaintext` before any LLM
    segmentation so verticalized extractors do not confuse the model.
 3. If ``MULTIMODAL_ASSIGNMENT_PARSING`` or ``MULTIMODAL_LLM_QA_SEGMENT`` is on, an **LLM**
    returns JSON Q/A units. **Claude** runs when
@@ -32,7 +32,7 @@ chunking: ``MULTIMODAL_RAG_PREWINDOW_EMBED=on`` (see :func:`precompute_document_
    (default ``auto``); otherwise **OpenAI** is used for this step if ``OPENAI_API_KEY`` is set.
    On failure,
    :func:`chunker.default_chunker_build_units` runs structured chunking
-   (:func:`app.grading.submission_chunks.build_submission_chunks`, which reflows each PDF
+   (:func:`app.grading.parsing.submission_chunks.build_submission_chunks`, which reflows each PDF
    section again and applies journal-style prompt boundaries when hints match).
 4. If ``OPENAI_API_KEY`` is set and OpenAI trio frontload is enabled (default **auto**;
    disable with ``MULTIMODAL_OPENAI_TRIO_RAG_FRONTLOAD=off``),
@@ -56,7 +56,7 @@ import os
 from typing import Any, Callable
 
 from app.config import Config
-from app.grading.artifact_plaintext import artifacts_to_concatenated_plain
+from app.grading.parsing.artifact_plaintext import artifacts_to_concatenated_plain
 from app.grading.llm_router import (
     OpenAIJsonClient,
     anthropic_multimodal_structure_client,
@@ -67,13 +67,13 @@ from app.grading.rag_embeddings import (
     compute_submission_embeddings_batch,
 )
 
-from app.grading.submission_chunks import reflow_pdf_sections_in_plaintext
+from app.grading.parsing.submission_chunks import reflow_pdf_sections_in_plaintext
+from app.grading.parsing.chunker import default_chunker_build_units, modality_from_hints, task_type_from_hints
+from app.grading.parsing.ingestion import IngestionEnvelope
+from app.grading.parsing.notebook_chunker import build_notebook_qa_chunks
+from app.grading.parsing.template_aligned_notebook_chunks import try_build_blank_template_aligned_chunks
 
-from .chunker import default_chunker_build_units, modality_from_hints, task_type_from_hints
-from .ingestion import IngestionEnvelope
-from .notebook_chunker import build_notebook_qa_chunks
-from .schemas import GradingChunk, Modality, TaskType
-from .template_aligned_notebook_chunks import try_build_blank_template_aligned_chunks
+from app.grading.schemas import GradingChunk, Modality, TaskType
 
 _log = logging.getLogger(__name__)
 
@@ -827,7 +827,7 @@ def build_multimodal_grading_chunks(
             pass
 
     if cfg is not None:
-        from .claude_structured_assignment_chunker import (
+        from app.grading.parsing.claude_structured_assignment_chunker import (
             claude_structured_chunking_forced_on,
             claude_structured_chunking_should_attempt,
             try_build_claude_structured_assignment_chunks,
@@ -844,7 +844,7 @@ def build_multimodal_grading_chunks(
                 return hc, "structured_heuristic_after_claude_fail"
 
     if cfg is not None:
-        from .llm_triplet_three_source import (
+        from app.grading.parsing.llm_triplet_three_source import (
             multimodal_llm_triplet_three_source_enabled,
             try_build_llm_triplet_three_source_chunks,
         )

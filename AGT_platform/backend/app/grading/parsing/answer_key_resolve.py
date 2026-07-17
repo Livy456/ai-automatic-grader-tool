@@ -14,7 +14,7 @@ import re
 from pathlib import Path
 from typing import Final
 
-from app.grading.submission_text import submission_text_from_artifacts
+from app.grading.parsing.submission_text import submission_text_from_artifacts
 
 _SUFFIXES: Final[tuple[str, ...]] = (".txt", ".md", ".json", ".ipynb")
 _MIN_RATIO: Final[float] = 0.38

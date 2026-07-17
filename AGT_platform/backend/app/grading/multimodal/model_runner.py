@@ -16,7 +16,7 @@ from typing import Any, Callable, Protocol
 from app.config import Config
 from app.grading.llm_router import ChatClient, build_multimodal_grading_clients
 
-from .schemas import GradingChunk, SampledChunkGrade
+from app.grading.schemas import GradingChunk, SampledChunkGrade
 
 _log = logging.getLogger(__name__)
 

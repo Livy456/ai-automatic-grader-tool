@@ -3,7 +3,7 @@ Command-line assignment parsing inspector.
 
 Ingests the **real** blank instructor template (``blank_assignments/``) and the matching
 **student-submitted** version (``assignments_to_grade/``) for one assignment, runs them
-through the actual chunking pipeline (:func:`app.grading.submission_chunks.build_submission_chunks`),
+through the actual chunking pipeline (:func:`app.grading.parsing.submission_chunks.build_submission_chunks`),
 and prints/writes the parsed **question <-> student-response** pairing.
 
 No mock data — every artifact is read from the real fixture files that live at the
@@ -50,10 +50,10 @@ from pathlib import Path
 from types import SimpleNamespace
 from typing import Any
 
-from app.grading.answer_key_resolve import resolve_blank_assignment_template
-from app.grading.modality_resolution import resolve_modality_profile
-from app.grading.submission_chunks import build_submission_chunks
-from app.grading.submission_text import submission_text_from_artifacts
+from app.grading.parsing.answer_key_resolve import resolve_blank_assignment_template
+from app.grading.parsing.modality_resolution import resolve_modality_profile
+from app.grading.parsing.submission_chunks import build_submission_chunks
+from app.grading.parsing.submission_text import submission_text_from_artifacts
 
 # Repo root: .../ai-automatic-grader-tool (contains AGT_platform/, assignments_to_grade/, ...)
 REPO_ROOT = Path(__file__).resolve().parents[3]
@@ -96,7 +96,7 @@ def resolve_student_submission_files(
     """
     Return every file under ``assignments_dir`` that belongs to the best-matching student
     submission for ``assignment_name`` (fuzzy match, same style as
-    :func:`app.grading.answer_key_resolve.resolve_blank_assignment_template`).
+    :func:`app.grading.parsing.answer_key_resolve.resolve_blank_assignment_template`).
 
     Multiple files can share one submission stem (e.g. a notebook plus a PDF export), so
     every file whose normalized stem matches the best-scoring stem is returned together.

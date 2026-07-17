@@ -5,7 +5,7 @@ plan** (``custom_rubric/`` JSON: one generic type + per-question criteria, reuse
 rubric routing → LLM grading → entropy → aggregation → output.
 
 Callers supply ``rubric_rows_by_type`` (e.g. from ``rubric/default.json`` or
-:func:`app.grading.multimodal.generic_rubric_loader.load_four_generic_rubric_rows_by_type`)
+:func:`app.grading.rubric_routing.generic_rubric_loader.load_four_generic_rubric_rows_by_type`)
 so routing plus custom rubric can choose among scaffolded, free response, EDA, and oral templates.
 
 Chunking uses :func:`app.grading.multimodal.rag_embeddings.build_multimodal_grading_chunks`
@@ -31,12 +31,12 @@ before chunking so plain units can reuse one document-span vector when safe (aud
 ``multimodal_rag_prewindow_plain_audit`` on ``modality_hints``).
 
 **Answer key:** if ``modality_hints["answer_key_plaintext"]`` is empty, the pipeline calls
-:func:`app.grading.answer_key_resolve.resolve_answer_key_plaintext` against
+:func:`app.grading.parsing.answer_key_resolve.resolve_answer_key_plaintext` against
 ``modality_hints["answer_key_dir"]`` or the repository ``answer_key/`` folder.
 
 **Blank template (optional):** the pipeline resolves a matching instructor **template file**
 (``.ipynb``, ``.pdf``, ``.docx``, ``.py``, ``.txt``, ``.md``, ``.csv``, ``.xlsx``) via
-:func:`app.grading.answer_key_resolve.resolve_blank_assignment_template` under
+:func:`app.grading.parsing.answer_key_resolve.resolve_blank_assignment_template` under
 ``modality_hints["blank_assignments_dir"]`` or ``blank_assignments/``, storing bytes in
 ``modality_hints["blank_assignment_template_bytes"]`` and the suffix in
 ``blank_assignment_template_suffix``. When the template is ``.ipynb``, the same bytes are also
@@ -49,7 +49,7 @@ OpenAI trio+RAG frontload is skipped when blank-template chunking is active **or
 :mod:`llm_triplet_three_source` can own trios (single structured LLM call over blank + student + key).
 
 **Chunk cache:** set ``modality_hints["multimodal_chunk_cache_path"]`` to a JSON file produced
-by :func:`app.grading.multimodal.chunk_cache.save_grading_chunks_cache` to skip rebuilding
+by :func:`app.grading.parsing.chunk_cache.save_grading_chunks_cache` to skip rebuilding
 chunks and (when embeddings are present in the file) skip per-unit embedding calls.
 
 **Trio export:** after chunking, the pipeline writes ``{assignment_id}_trio_chunks.json`` under
@@ -65,7 +65,7 @@ The legacy ``assignment_chunking_output_dir`` hint still overrides the directory
 
 **Placeholder strip:** after chunking (and optional trio LLM), boilerplate lines such as
 ``# write code for problem 1.1 here`` / ``# your code here`` are removed from chunk text and
-trio fields (see :func:`app.grading.multimodal.notebook_chunker.sanitize_grading_chunks_placeholders`)
+trio fields (see :func:`app.grading.parsing.notebook_chunker.sanitize_grading_chunks_placeholders`)
 before answer-key alignment and grading.
 
 **Agentic trace:** ordered phases are stored on the result as
@@ -83,43 +83,45 @@ import logging
 import os
 import re
 from collections import Counter
+from concurrent.futures import ThreadPoolExecutor
 from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Any, Callable
 
 from app.config import Config
-from app.grading.answer_key_resolve import resolve_answer_key_plaintext
-from app.grading.answer_key_resolve import resolve_blank_assignment_template
+from app.grading.parsing.answer_key_resolve import resolve_answer_key_plaintext
+from app.grading.parsing.answer_key_resolve import resolve_blank_assignment_template
 from app.grading.llm_router import multimodal_structure_llm_trace_label
-from app.grading.dataset_resolve import attach_dataset_context_for_notebook
+from app.grading.parsing.dataset_resolve import attach_dataset_context_for_notebook
 
-from .aggregator import aggregate_assignment, aggregate_chunk_samples
-from .chunk_cache import (
+from app.grading.parsing.chunk_cache import (
     chunks_have_unit_embeddings,
     load_grading_chunks_cache,
     save_grading_chunks_cache,
 )
-from .custom_rubric_export import apply_custom_rubric_plan_to_chunks
-from .ingestion import IngestionEnvelope, ingest_raw_submission
+from app.grading.rubric_routing.custom_rubric_export import apply_custom_rubric_plan_to_chunks
+from app.grading.parsing.ingestion import IngestionEnvelope, ingest_raw_submission
+from app.grading.grading_output.parser import parse_chunk_grade_json
+from app.grading.rubric_routing.rubric_router import route_rubric
+from app.grading.confidence_calculation.semantic_confidence import (
+    cluster_assignment,
+    summarize_chunk_confidence_from_counts,
+)
+from app.grading.parsing.notebook_chunker import sanitize_grading_chunks_placeholders
+from app.grading.parsing.llm_triplet_three_source import multimodal_llm_triplet_three_source_enabled
+from app.grading.parsing.template_aligned_notebook_chunks import blank_template_chunking_requested
+
+from .aggregator import aggregate_assignment, aggregate_chunk_samples
 from .model_runner import ChunkModelRunner, MultiModelChunkRunner
-from .parser import parse_chunk_grade_json
 from .prompts_chunk import (
     build_chunk_grading_prompt,
     chunk_multimodal_grading_system_prompt,
 )
 from .review_router import evaluate_chunk_review
-from .rubric_router import route_rubric
-from .semantic_confidence import (
-    cluster_assignment,
-    summarize_chunk_confidence_from_counts,
-)
-from .notebook_chunker import sanitize_grading_chunks_placeholders
 from .openai_trio_rag_frontload import (
     multimodal_openai_trio_rag_frontload_enabled,
     run_openai_trio_rag_frontload,
 )
-from .llm_triplet_three_source import multimodal_llm_triplet_three_source_enabled
-from .template_aligned_notebook_chunks import blank_template_chunking_requested
 from .rag_embeddings import (
     build_multimodal_grading_chunks,
     enrich_chunks_with_rag_embeddings,
@@ -127,7 +129,7 @@ from .rag_embeddings import (
     multimodal_rag_embed_units_enabled,
     refine_chunks_trio_with_structure_llm,
 )
-from .schemas import (
+from app.grading.schemas import (
     AssignmentGradeResult,
     ChunkGradeOutcome,
     GradingChunk,
@@ -338,6 +340,144 @@ class MultimodalGradingPipeline:
             return self.runner.app_config
         return None
 
+    def _grade_chunk_llm(
+        self,
+        chunk: GradingChunk,
+        *,
+        answer_key_for_prompt: str,
+        dataset_plain: str,
+    ) -> tuple[ChunkGradeOutcome, dict[str, Any]]:
+        """
+        Build the grading prompt, run k model samples, parse + cluster, aggregate, and
+        evaluate review status for one chunk. Assumes ``route_rubric`` has already run for
+        ``chunk``. Only reads shared, read-only pipeline state (``self.config``,
+        ``self.runner``) and returns everything the caller needs rather than mutating shared
+        audit/result lists directly, so this is safe to call concurrently for many chunks from
+        :meth:`run`'s thread pool.
+
+        Returns ``(outcome, grading_audit_fields)``.
+        """
+        user_prompt = build_chunk_grading_prompt(
+            chunk,
+            task_description=self.task_description,
+            answer_key_text=answer_key_for_prompt,
+            dataset_context_text=dataset_plain,
+        )
+        raw_samples = self.runner.run_chunk_samples(
+            chunk,
+            system_prompt=chunk_multimodal_grading_system_prompt(chunk),
+            user_prompt=user_prompt,
+        )
+
+        parsed_samples: list[SampledChunkGrade] = []
+        cluster_counts: Counter[str] = Counter()
+
+        rubric_mx: dict[str, float] = {}
+        for rr in chunk.rubric_rows or []:
+            rn = str(rr.get("name") or "").strip()
+            if rn:
+                try:
+                    rubric_mx[rn] = float(rr.get("max_points") or rr.get("max_score") or 0)
+                except (TypeError, ValueError):
+                    pass
+
+        strong = bool(self.config.confidence_clustering_strong_pattern)
+        for s in raw_samples:
+            parsed, warns = parse_chunk_grade_json(
+                s.raw_text,
+                rubric_max_points=rubric_mx,
+                rubric_rows=list(chunk.rubric_rows or []),
+                invalid_raw_score_policy=str(
+                    getattr(self.config, "raw_score_invalid_policy", "regenerate")
+                    or "regenerate"
+                ),
+            )
+            parse_ok = parsed is not None
+            pw = list(warns)
+            ck: str | None = cluster_assignment(parsed, strong_pattern=strong)
+            if ck is not None:
+                cluster_counts[ck] += 1
+            parsed_samples.append(
+                SampledChunkGrade(
+                    model_id=s.model_id,
+                    sample_index=s.sample_index,
+                    raw_text=s.raw_text,
+                    parsed=parsed,
+                    parse_ok=parse_ok,
+                    parse_warnings=pw,
+                    cluster_key=ck,
+                )
+            )
+
+        co = summarize_chunk_confidence_from_counts(dict(cluster_counts))
+        rubric_fb = [
+            str(rr.get("name") or "").strip()
+            for rr in (chunk.rubric_rows or [])
+            if str(rr.get("name") or "").strip()
+        ]
+        outcome = aggregate_chunk_samples(
+            chunk.chunk_id,
+            parsed_samples,
+            cluster_counts=dict(cluster_counts),
+            cfg=self.config,
+            rubric_fallback_names=rubric_fb or None,
+        )
+        sample_details = [
+            {
+                "model_id": s.model_id,
+                "sample_index": s.sample_index,
+                "parse_ok": s.parse_ok,
+                "normalized_score": s.parsed.normalized_score if s.parsed else None,
+                "cluster_key": s.cluster_key,
+            }
+            for s in parsed_samples
+        ]
+        outcome.stage_artifacts = {
+            "system_prompt": chunk_multimodal_grading_system_prompt(chunk),
+            "user_prompt": user_prompt,
+            "raw_sample_count": len(raw_samples),
+            "confidence_trace": {
+                "clustering_strong_pattern": strong,
+                "cluster_counts": dict(cluster_counts),
+                "p_hat": co["p_hat"],
+                "semantic_entropy_nats": co["semantic_entropy_nats"],
+                "entropy_max_reference_nats": co["entropy_max_reference_nats"],
+                "ai_confidence": co["ai_confidence"],
+                "n_observed_clusters": co["n_observed_clusters"],
+                "n_valid_samples": co["n_valid_samples"],
+                "samples": sample_details,
+            },
+        }
+        outcome = evaluate_chunk_review(outcome, parsed_samples, self.config)
+        trace = outcome.stage_artifacts.get("confidence_trace")
+        if isinstance(trace, dict):
+            trace["review_status"] = outcome.review_status.value
+            trace["review_reasons"] = list(outcome.review_reasons)
+        model_ids = sorted({s.model_id for s in raw_samples})
+        meta_spm: int | None = None
+        if isinstance(self.runner, MultiModelChunkRunner):
+            meta_spm = int(
+                getattr(
+                    self.runner.app_config,
+                    "MULTIMODAL_SAMPLES_PER_MODEL",
+                    5,
+                )
+            )
+        outcome.stage_artifacts["model_ids"] = model_ids
+        outcome.stage_artifacts["samples_per_model"] = meta_spm
+
+        grading_audit = {
+            "chunk_id": chunk.chunk_id,
+            "semantic_entropy": co["semantic_entropy_nats"],
+            "ai_confidence": co["ai_confidence"],
+            "entropy_max_reference_nats": co["entropy_max_reference_nats"],
+            "cluster_counts": dict(cluster_counts),
+            "review": outcome.review_status.value,
+            "model_ids": model_ids,
+            "total_samples": len(raw_samples),
+        }
+        return outcome, grading_audit
+
     def run(
         self,
         envelope: IngestionEnvelope,
@@ -470,7 +610,7 @@ class MultimodalGradingPipeline:
                     cache_read,
                 )
             if app_cfg is not None:
-                from .audio_half_split import maybe_prepare_audio_half_split
+                from app.grading.parsing.audio_half_split import maybe_prepare_audio_half_split
 
                 maybe_prepare_audio_half_split(envelope, app_cfg)
             raw_tpl = hints.get("blank_assignment_template_bytes")
@@ -572,7 +712,7 @@ class MultimodalGradingPipeline:
             )
 
         if app_cfg is not None and answer_key_plain:
-            from .answer_key_chunk_enrich import (
+            from app.grading.parsing.answer_key_chunk_enrich import (
                 embed_full_answer_key_for_audit,
                 enrich_chunks_with_per_question_answer_key,
             )
@@ -659,7 +799,9 @@ class MultimodalGradingPipeline:
             n_chunks=len(chunks),
         )
 
-        chunk_outcomes: list[ChunkGradeOutcome] = []
+        # Rubric routing is cheap/local (no LLM calls) and mutates each chunk in place, so it
+        # stays a plain sequential pass — this also keeps "rubric_routing" audit entries in a
+        # deterministic, chunk order.
         for chunk in chunks:
             route_rubric(
                 chunk,
@@ -677,131 +819,46 @@ class MultimodalGradingPipeline:
                 },
             )
 
-            user_prompt = build_chunk_grading_prompt(
-                chunk,
-                task_description=self.task_description,
-                answer_key_text=answer_key_for_prompt,
-                dataset_context_text=dataset_plain,
-            )
-            raw_samples = self.runner.run_chunk_samples(
-                chunk,
-                system_prompt=chunk_multimodal_grading_system_prompt(chunk),
-                user_prompt=user_prompt,
-            )
-
-            parsed_samples: list[SampledChunkGrade] = []
-            cluster_counts: Counter[str] = Counter()
-
-            rubric_mx: dict[str, float] = {}
-            for rr in chunk.rubric_rows or []:
-                rn = str(rr.get("name") or "").strip()
-                if rn:
-                    try:
-                        rubric_mx[rn] = float(rr.get("max_points") or rr.get("max_score") or 0)
-                    except (TypeError, ValueError):
-                        pass
-
-            strong = bool(self.config.confidence_clustering_strong_pattern)
-            for s in raw_samples:
-                parsed, warns = parse_chunk_grade_json(
-                    s.raw_text,
-                    rubric_max_points=rubric_mx,
-                    rubric_rows=list(chunk.rubric_rows or []),
-                    invalid_raw_score_policy=str(
-                        getattr(self.config, "raw_score_invalid_policy", "regenerate")
-                        or "regenerate"
-                    ),
+        # The LLM-bound grading step (one or more blocking chat calls per chunk) dominates
+        # end-to-end grading latency, so chunks are graded concurrently via a bounded thread
+        # pool (I/O-bound work; threads are released while waiting on the network) instead of
+        # one-chunk-at-a-time. ``ThreadPoolExecutor.map`` preserves input order in its results,
+        # so audit entries / chunk_outcomes below stay in the same deterministic chunk order
+        # as the sequential path (concurrency=1).
+        concurrency = max(
+            1,
+            min(
+                int(getattr(embed_cfg, "MULTIMODAL_CHUNK_GRADING_CONCURRENCY", 6) or 6),
+                len(chunks),
+            ),
+        )
+        if concurrency <= 1:
+            graded = [
+                self._grade_chunk_llm(
+                    chunk,
+                    answer_key_for_prompt=answer_key_for_prompt,
+                    dataset_plain=dataset_plain,
                 )
-                parse_ok = parsed is not None
-                pw = list(warns)
-                ck: str | None = cluster_assignment(
-                    parsed, strong_pattern=strong
-                )
-                if ck is not None:
-                    cluster_counts[ck] += 1
-                parsed_samples.append(
-                    SampledChunkGrade(
-                        model_id=s.model_id,
-                        sample_index=s.sample_index,
-                        raw_text=s.raw_text,
-                        parsed=parsed,
-                        parse_ok=parse_ok,
-                        parse_warnings=pw,
-                        cluster_key=ck,
+                for chunk in chunks
+            ]
+        else:
+            with ThreadPoolExecutor(
+                max_workers=concurrency, thread_name_prefix="multimodal-chunk-grade"
+            ) as pool:
+                graded = list(
+                    pool.map(
+                        lambda c: self._grade_chunk_llm(
+                            c,
+                            answer_key_for_prompt=answer_key_for_prompt,
+                            dataset_plain=dataset_plain,
+                        ),
+                        chunks,
                     )
                 )
 
-            co = summarize_chunk_confidence_from_counts(dict(cluster_counts))
-            rubric_fb = [
-                str(rr.get("name") or "").strip()
-                for rr in (chunk.rubric_rows or [])
-                if str(rr.get("name") or "").strip()
-            ]
-            outcome = aggregate_chunk_samples(
-                chunk.chunk_id,
-                parsed_samples,
-                cluster_counts=dict(cluster_counts),
-                cfg=self.config,
-                rubric_fallback_names=rubric_fb or None,
-            )
-            sample_details = [
-                {
-                    "model_id": s.model_id,
-                    "sample_index": s.sample_index,
-                    "parse_ok": s.parse_ok,
-                    "normalized_score": s.parsed.normalized_score
-                    if s.parsed
-                    else None,
-                    "cluster_key": s.cluster_key,
-                }
-                for s in parsed_samples
-            ]
-            outcome.stage_artifacts = {
-                "system_prompt": chunk_multimodal_grading_system_prompt(chunk),
-                "user_prompt": user_prompt,
-                "raw_sample_count": len(raw_samples),
-                "confidence_trace": {
-                    "clustering_strong_pattern": strong,
-                    "cluster_counts": dict(cluster_counts),
-                    "p_hat": co["p_hat"],
-                    "semantic_entropy_nats": co["semantic_entropy_nats"],
-                    "entropy_max_reference_nats": co["entropy_max_reference_nats"],
-                    "ai_confidence": co["ai_confidence"],
-                    "n_observed_clusters": co["n_observed_clusters"],
-                    "n_valid_samples": co["n_valid_samples"],
-                    "samples": sample_details,
-                },
-            }
-            outcome = evaluate_chunk_review(outcome, parsed_samples, self.config)
-            trace = outcome.stage_artifacts.get("confidence_trace")
-            if isinstance(trace, dict):
-                trace["review_status"] = outcome.review_status.value
-                trace["review_reasons"] = list(outcome.review_reasons)
-            model_ids = sorted({s.model_id for s in raw_samples})
-            meta_spm: int | None = None
-            if isinstance(self.runner, MultiModelChunkRunner):
-                meta_spm = int(
-                    getattr(
-                        self.runner.app_config,
-                        "MULTIMODAL_SAMPLES_PER_MODEL",
-                        5,
-                    )
-                )
-            outcome.stage_artifacts["model_ids"] = model_ids
-            outcome.stage_artifacts["samples_per_model"] = meta_spm
-            art.append(
-                "grading",
-                {
-                    "chunk_id": chunk.chunk_id,
-                    "semantic_entropy": co["semantic_entropy_nats"],
-                    "ai_confidence": co["ai_confidence"],
-                    "entropy_max_reference_nats": co["entropy_max_reference_nats"],
-                    "cluster_counts": dict(cluster_counts),
-                    "review": outcome.review_status.value,
-                    "model_ids": model_ids,
-                    "total_samples": len(raw_samples),
-                },
-            )
+        chunk_outcomes: list[ChunkGradeOutcome] = []
+        for outcome, grading_audit in graded:
+            art.append("grading", grading_audit)
             chunk_outcomes.append(outcome)
 
         assign = aggregate_assignment(

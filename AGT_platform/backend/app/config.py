@@ -247,6 +247,15 @@ class Config:
         1,
         min(_env_int("MULTIMODAL_SAMPLES_PER_MODEL", default=5), 16),
     )
+    # How many chunks to grade concurrently (thread pool; each chunk still does its own
+    # sequential client/sample calls). Chunk grading is the dominant source of grading
+    # latency (one blocking LLM call per chunk per sample), so this is the main lever for
+    # reducing end-to-end grading time. 1 = old sequential behavior. Keep below your OpenAI
+    # rate-limit / concurrent-request budget.
+    MULTIMODAL_CHUNK_GRADING_CONCURRENCY = max(
+        1,
+        min(_env_int("MULTIMODAL_CHUNK_GRADING_CONCURRENCY", default=6), 32),
+    )
     # Optional absolute path for assignment-wide multimodal ``custom_rubric/*.json`` caches.
     # Empty → ``MULTIMODAL_CUSTOM_RUBRIC_OUTPUT_DIR`` env → repo ``custom_rubric/``.
     MULTIMODAL_CUSTOM_RUBRIC_OUTPUT_DIR = _env_str(

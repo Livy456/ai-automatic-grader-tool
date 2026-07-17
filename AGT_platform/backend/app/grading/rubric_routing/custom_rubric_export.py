@@ -1,3 +1,4 @@
+# DELETE THIS FILE LATER!!
 """
 Assignment-wide generic rubric selection, per-question criterion views, and ``custom_rubric/`` JSON.
 
@@ -22,9 +23,9 @@ from app.config import Config
 from app.grading.rag_embeddings import compute_submission_embedding
 
 from . import rubric_llm_chain as _rubric_llm_chain
-from .ingestion import IngestionEnvelope
 from .rubric_router import _MEDIUM_EDA_SIGNAL, _STRONG_EDA_SIGNAL
-from .schemas import GradingChunk, Modality, RubricType, TaskType
+from app.grading.schemas import GradingChunk, Modality, RubricType, TaskType
+from app.grading.parsing.ingestion import IngestionEnvelope
 
 _log = logging.getLogger(__name__)
 

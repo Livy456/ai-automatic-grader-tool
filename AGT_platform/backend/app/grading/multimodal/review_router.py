@@ -4,7 +4,7 @@ Human-review routing from AI confidence (normalized semantic entropy), parses, a
 
 from __future__ import annotations
 
-from .schemas import ChunkGradeOutcome, MultimodalGradingConfig, ReviewStatus, SampledChunkGrade
+from app.grading.schemas import ChunkGradeOutcome, MultimodalGradingConfig, ReviewStatus, SampledChunkGrade
 
 
 def evaluate_chunk_review(

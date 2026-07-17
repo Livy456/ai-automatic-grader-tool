@@ -5,14 +5,14 @@ Chunking strategy (high level)
 -------------------------------
 
 1. **Artifact sections** — If the text was produced by
-   :func:`app.grading.submission_text.submission_text_from_artifacts`, it may contain
+   :func:`app.grading.parsing.submission_text.submission_text_from_artifacts`, it may contain
    banner lines such as ``=== NOTEBOOK CODE (ipynb) ===``. We split on those first so
    notebook *code* can be labeled ``role: \"code\"`` and prose/markdown as ``response``
    unless a line looks like source (see heuristics below).
 
 2. **PDF vertical reflow (new chunking method)** — For ``=== PDF TEXT ===`` bodies,
-   :func:`app.grading.tools.normalize_verticalized_pdf_text` runs **again** here so
-   chunking stays correct even if plaintext bypassed :func:`~app.grading.tools.extract_text_from_pdf`.
+   :func:`app.grading.parsing.tools.normalize_verticalized_pdf_text` runs **again** here so
+   chunking stays correct even if plaintext bypassed :func:`~app.grading.parsing.tools.extract_text_from_pdf`.
    **Word (``=== DOCX ===``)** sections skip PDF reflow (paragraph structure is already normal);
    with a journal / free-response ``modality_subtype``, the same **journal ?-line** rules as PDF
    apply (see :func:`_prose_boundary_matches`).
@@ -57,7 +57,7 @@ from collections import defaultdict
 from pathlib import Path
 from typing import Any, Sequence
 
-from app.grading.tools import normalize_verticalized_pdf_text
+from app.grading.parsing.tools import normalize_verticalized_pdf_text
 
 _log = logging.getLogger(__name__)
 
@@ -74,7 +74,7 @@ _PDF_TEXT_SECTION = re.compile(
 
 def reflow_pdf_sections_in_plaintext(text: str) -> str:
     """
-    Apply :func:`app.grading.tools.normalize_verticalized_pdf_text` to every
+    Apply :func:`app.grading.parsing.tools.normalize_verticalized_pdf_text` to every
     ``=== PDF TEXT ===`` region. Used by the multimodal grading pipeline so PDF
     submissions are reflowed before LLM QA segmentation and before structured
     chunking (which also reflows per section as a second pass).

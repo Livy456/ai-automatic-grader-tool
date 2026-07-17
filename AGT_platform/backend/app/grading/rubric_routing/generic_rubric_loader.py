@@ -3,8 +3,8 @@ Load the four assignment-level generic rubrics from ``rubric/`` as separate file
 
 Filenames match the course templates (``[Generic] …``). Callers pass the resulting
 ``dict[RubricType, list[dict]]`` into :class:`MultimodalGradingPipeline` so
-:func:`~app.grading.multimodal.rubric_router.route_rubric` and
-:func:`~app.grading.multimodal.custom_rubric_export.apply_custom_rubric_plan_to_chunks`
+:func:`~app.grading.rubric_routing.rubric_router.route_rubric` and
+:func:`~app.grading.rubric_routing.custom_rubric_export.apply_custom_rubric_plan_to_chunks`
 can pick one template for the assignment and filter criteria per chunk.
 """
 from __future__ import annotations
@@ -14,7 +14,7 @@ import logging
 from pathlib import Path
 from typing import Any
 
-from .schemas import RubricType
+from app.grading.schemas import RubricType
 
 _log = logging.getLogger(__name__)
 

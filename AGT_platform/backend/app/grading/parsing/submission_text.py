@@ -7,7 +7,7 @@ Supports the same artifact keys as the grading pipeline (``ipynb``, ``pdf``, ``t
 
 from __future__ import annotations
 
-from app.grading.artifact_plaintext import artifacts_to_concatenated_plain
+from app.grading.parsing.artifact_plaintext import artifacts_to_concatenated_plain
 
 
 def submission_text_from_artifacts(artifacts: dict[str, bytes]) -> str:

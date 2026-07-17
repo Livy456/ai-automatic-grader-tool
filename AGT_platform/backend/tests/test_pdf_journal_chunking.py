@@ -4,8 +4,8 @@ from __future__ import annotations
 
 import unittest
 
-from app.grading.submission_chunks import build_submission_chunks
-from app.grading.tools import normalize_verticalized_pdf_text
+from app.grading.parsing.submission_chunks import build_submission_chunks
+from app.grading.parsing.tools import normalize_verticalized_pdf_text
 
 
 def _verticalize(sentence: str) -> str:

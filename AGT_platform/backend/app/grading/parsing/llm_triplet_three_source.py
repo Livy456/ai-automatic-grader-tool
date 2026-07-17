@@ -7,8 +7,8 @@ Opt-in **LLM triplet chunking** using three full sources in one structured call:
    ``py``, ``txt``, ``md``, ``csv``, ``xlsx``, ``mp4`` / audio with stub transcript, etc.).
 3. **Answer key / reference** (resolved ``answer_key_plaintext``).
 
-Plaintext conversion uses :mod:`app.grading.artifact_plaintext` so behavior stays consistent with
-:func:`app.grading.submission_text.submission_text_from_artifacts`.
+Plaintext conversion uses :mod:`app.grading.parsing.artifact_plaintext` so behavior stays consistent with
+:func:`app.grading.parsing.submission_text.submission_text_from_artifacts`.
 
 The model returns JSON ``units`` aligned with :mod:`openai_trio_rag_frontload` so downstream
 answer-key enrichment, RAG embedding, trio JSON export, and grading stay unchanged.
@@ -34,7 +34,7 @@ import re
 from typing import Any
 
 from app.config import Config
-from app.grading.artifact_plaintext import (
+from app.grading.parsing.artifact_plaintext import (
     artifacts_to_concatenated_plain,
     bytes_with_suffix_to_plain,
     infer_modality_from_artifact_keys,
@@ -43,7 +43,7 @@ from app.grading.llm_router import OpenAIJsonClient, anthropic_multimodal_struct
 
 from .chunker import modality_from_hints, task_type_from_hints
 from .ingestion import IngestionEnvelope
-from .schemas import GradingChunk, Modality, TaskType
+from app.grading.schemas import GradingChunk, Modality, TaskType
 
 _log = logging.getLogger(__name__)
 

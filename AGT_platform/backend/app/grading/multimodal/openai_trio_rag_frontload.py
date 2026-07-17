@@ -25,11 +25,11 @@ from typing import Any
 
 from app.config import Config
 from app.grading.llm_router import OpenAIJsonClient
-from app.grading.submission_chunks import reflow_pdf_sections_in_plaintext
+from app.grading.parsing.submission_chunks import reflow_pdf_sections_in_plaintext
+from app.grading.parsing.chunker import modality_from_hints, task_type_from_hints
+from app.grading.parsing.ingestion import IngestionEnvelope
 
-from .chunker import modality_from_hints, task_type_from_hints
-from .ingestion import IngestionEnvelope
-from .schemas import GradingChunk, Modality, TaskType
+from app.grading.schemas import GradingChunk, Modality, TaskType
 
 _log = logging.getLogger(__name__)
 
@@ -417,7 +417,7 @@ def _openai_trio_rag_frontload_audio_halves(
     Two-pass trio extraction (one per audio-half transcript) + OpenAI embeddings,
     blending each chunk's canonical vector with the transcript embedding for that half.
     """
-    from .audio_half_split import blend_chunk_embedding_with_half
+    from app.grading.parsing.audio_half_split import blend_chunk_embedding_with_half
 
     audit: dict[str, Any] = {"ok": False, "audio_half_split_dual_path": True}
     key = (cfg.OPENAI_API_KEY or "").strip()

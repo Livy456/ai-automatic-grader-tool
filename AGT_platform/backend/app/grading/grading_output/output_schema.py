@@ -14,7 +14,7 @@ import json
 import logging
 from typing import Any
 
-from app.grading.rubric_allowlist import filter_criteria_dicts_to_allowlist
+from app.grading.rubric_routing.rubric_allowlist import filter_criteria_dicts_to_allowlist
 
 _log = logging.getLogger(__name__)
 

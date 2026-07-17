@@ -12,8 +12,8 @@ import math
 from typing import Any
 
 from .entropy import semantic_entropy_from_cluster_counts
-from .schemas import ParsedChunkGrade
 from .semantic_clusterer import assign_cluster
+from app.grading.schemas import ParsedChunkGrade
 
 
 def cluster_assignment(

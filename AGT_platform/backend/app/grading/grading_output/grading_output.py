@@ -1,6 +1,6 @@
 """
 Map :class:`AssignmentGradeResult` to the grading JSON contract used by
-:func:`app.grading.output_schema.validate_grading_output` (``overall`` + ``criteria``).
+:func:`app.grading.grading_output.output_schema.validate_grading_output` (``overall`` + ``criteria``).
 
 Each ``question_grades`` entry includes one criterion row per routed rubric dimension
 (with ``name``, ``score``, ``max_points``, ``confidence``, ``justification``, ``evidence``,
@@ -11,12 +11,12 @@ from __future__ import annotations
 
 from typing import Any
 
-from app.grading.consistency_rules import run_rule_checks
-from app.grading.output_schema import finalize_criterion_grading_fields
-from app.grading.rubric_allowlist import filter_criteria_dicts_to_allowlist
-from app.grading.multimodal.rubric_calibration import snap_half_nearest_display
+from app.grading.grading_output.consistency_rules import run_rule_checks
+from app.grading.grading_output.output_schema import finalize_criterion_grading_fields
+from app.grading.rubric_routing.rubric_allowlist import filter_criteria_dicts_to_allowlist
+from app.grading.rubric_routing.rubric_calibration import snap_half_nearest_display
 
-from .schemas import AssignmentGradeResult, ChunkGradeOutcome
+from app.grading.schemas import AssignmentGradeResult, ChunkGradeOutcome
 
 
 def _mean_criterion_score_fractions(rows: list[dict[str, Any]]) -> float:
@@ -290,7 +290,7 @@ def multimodal_assignment_to_grading_dict(
     modality_profile: dict[str, Any] | None = None,
 ) -> dict[str, Any]:
     """
-    Build a dict suitable for :func:`~app.grading.output_schema.validate_grading_output`.
+    Build a dict suitable for :func:`~app.grading.grading_output.output_schema.validate_grading_output`.
 
     Criteria are merged across chunks with **max** score per criterion name (same idea
     as chunk-entropy assignment merge).  Top-level ``overall.score`` is the **mean** of

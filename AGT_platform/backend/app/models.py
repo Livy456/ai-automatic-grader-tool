@@ -18,7 +18,7 @@ class AssignmentUpload(Base):
     id = Column(PG_UUID(as_uuid=True), primary_key=True, default=uuid.uuid4)
     filename = Column(String(512), nullable=False)
     storage_uri = Column(Text, nullable=False)
-    status = Column(String(32), nullable=False, default="uploaded")  # uploaded|grading|graded|error
+    status = Column(String(32), nullable=False, default="uploaded")  # uploaded|queued|grading|graded|error
     suggested_grade = Column(Float, nullable=True)
     feedback = Column(Text, nullable=True)
 

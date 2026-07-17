@@ -25,7 +25,7 @@ from .notebook_chunker import (
     build_notebook_qa_chunks,
     ipynb_to_plaintext_for_structure_llm,
 )
-from .schemas import GradingChunk, Modality, TaskType
+from app.grading.schemas import GradingChunk, Modality, TaskType
 from .chunker import modality_from_hints, task_type_from_hints
 from .answer_key_chunk_enrich import _chunk_query_text, _cosine
 
@@ -68,7 +68,7 @@ def _safe_qid(raw: str, idx: int) -> str:
 
 
 def _questions_from_blank_llm(plain: str, cfg: Config) -> list[dict[str, str]]:
-    from . import rag_embeddings as _rag
+    from app.grading.multimodal import rag_embeddings as _rag
 
     client, model = _rag._multimodal_structure_chat_client(cfg, purpose="trio")
     if client is None:

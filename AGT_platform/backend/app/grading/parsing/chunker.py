@@ -2,23 +2,23 @@
 Chunking: build grading chunks (units) from ingestion + optional LMS question map.
 
 Default path (non-ipynb): **structured submission chunking** — reflows each
-``=== PDF TEXT ===`` region via :func:`app.grading.submission_chunks.reflow_pdf_sections_in_plaintext`,
-then :func:`app.grading.submission_chunks.build_submission_chunks` (PDF vertical reflow again
+``=== PDF TEXT ===`` region via :func:`app.grading.parsing.submission_chunks.reflow_pdf_sections_in_plaintext`,
+then :func:`app.grading.parsing.submission_chunks.build_submission_chunks` (PDF vertical reflow again
 per section, journal-style prompt boundaries when modality hints match) and
-:func:`app.grading.grading_units.build_grading_units_from_chunks` to form Q/A units.
+:func:`app.grading.parsing.grading_units.build_grading_units_from_chunks` to form Q/A units.
 """
 
 from __future__ import annotations
 
 from typing import Any, Protocol
 
-from app.grading.grading_units import build_grading_units_from_chunks
-from app.grading.submission_chunks import (
+from app.grading.parsing.grading_units import build_grading_units_from_chunks
+from app.grading.parsing.submission_chunks import (
     build_submission_chunks,
     reflow_pdf_sections_in_plaintext,
 )
 from .ingestion import IngestionEnvelope
-from .schemas import GradingChunk, Modality, TaskType
+from app.grading.schemas import GradingChunk, Modality, TaskType
 
 
 class GradingChunker(Protocol):

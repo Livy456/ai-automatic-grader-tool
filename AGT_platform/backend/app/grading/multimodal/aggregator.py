@@ -7,9 +7,13 @@ from __future__ import annotations
 import statistics
 from typing import Sequence
 
-from .entropy import criterion_disagreement_max
-from .semantic_confidence import aggregate_assignment_confidence, summarize_chunk_confidence_from_counts
-from .schemas import (
+from app.grading.confidence_calculation.entropy import criterion_disagreement_max
+from app.grading.confidence_calculation.semantic_confidence import (
+    aggregate_assignment_confidence,
+    summarize_chunk_confidence_from_counts,
+)
+
+from app.grading.schemas import (
     AssignmentGradeResult,
     ChunkGradeOutcome,
     MultimodalGradingConfig,

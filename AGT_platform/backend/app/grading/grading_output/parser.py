@@ -9,11 +9,11 @@ import logging
 from dataclasses import replace
 from typing import Any
 
-from app.grading.rubric_allowlist import (
+from app.grading.rubric_routing.rubric_allowlist import (
     match_criterion_name_to_allowlist,
     rubric_rows_to_allowlist,
 )
-from app.grading.multimodal.rubric_calibration import (
+from app.grading.rubric_routing.rubric_calibration import (
     anchor_map_monotone_increasing,
     ceiling_half_point_on_grid,
     format_anchor_map_for_log,
@@ -21,7 +21,7 @@ from app.grading.multimodal.rubric_calibration import (
     validate_raw_score_increment,
 )
 
-from .schemas import CriterionScore, ParsedChunkGrade, RubricType
+from app.grading.schemas import CriterionScore, ParsedChunkGrade, RubricType
 
 _log = logging.getLogger(__name__)
 

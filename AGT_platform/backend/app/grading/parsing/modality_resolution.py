@@ -10,7 +10,7 @@ _AUDIO_ARTIFACT_KEYS = frozenset({"mp3", "wav", "m4a"})
 
 
 def normalize_modality_hint_for_multimodal(raw: str) -> str:
-    """Map LMS / legacy labels to :class:`~app.grading.multimodal.schemas.Modality` values."""
+    """Map LMS / legacy labels to :class:`~app.grading.schemas.Modality` values."""
     r = (raw or "").strip().lower()
     if r == "video":
         return "video_oral"

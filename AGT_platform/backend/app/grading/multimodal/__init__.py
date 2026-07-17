@@ -2,10 +2,13 @@
 Multimodal grading pipeline: ingestion → chunking → rubric routing → per-chunk grading →
 uncertainty → aggregation → output.
 
-**Scope:** This package owns **unit-level** multimodal grading (notebooks, PDFs, mixed
-artifacts). Shared helpers that are also used outside multimodal (e.g. ``submission_chunks``,
-``grading_units``, ``app.grading.rag_embeddings.compute_submission_embedding``) stay under
-``app.grading`` to avoid circular imports.
+**Scope:** This package owns the core multimodal orchestration (:mod:`pipeline`,
+:mod:`pipeline_runner`, :mod:`model_runner`, ``schemas``, :mod:`aggregator`,
+:mod:`review_router`, ``rag_embeddings``). Submission parsing/chunking, output-shape
+validation, AI-confidence math, and rubric routing live in their own sibling packages
+(:mod:`app.grading.parsing`, :mod:`app.grading.grading_output`,
+:mod:`app.grading.confidence_calculation`, :mod:`app.grading.rubric_routing`) so they can
+be reused outside multimodal without circular imports.
 
 **Celery / DB grading:** :mod:`app.tasks` calls
 :func:`~app.grading.multimodal.course_multimodal_runner.run_db_submission_multimodal_pipeline`
@@ -14,40 +17,20 @@ and :func:`~app.grading.multimodal.course_multimodal_runner.run_standalone_multi
 tests live under ``tests/test_multimodal_pipeline.py``.
 
 See ``AGT_platform/backend/docs/multimodal_grading_pipeline.md`` for architecture.
+
+The public names below are resolved **lazily** (`PEP 562 <https://peps.python.org/pep-0562/>`_
+module ``__getattr__``) rather than imported eagerly at package-import time. Several of them
+(``.pipeline``, ``.pipeline_runner``) transitively import from the sibling ``parsing`` /
+``rubric_routing`` / ``confidence_calculation`` / ``grading_output`` packages, which in turn
+need to reach modules inside *this* package (``rag_embeddings``, etc.) — eagerly importing
+that whole web here would risk a circular import the moment any of those siblings is imported
+before this package finishes initializing.
 """
 
 from __future__ import annotations
 
-from .grading_output import multimodal_assignment_to_grading_dict
-from .model_runner import ChunkModelRunner, MultiModelChunkRunner
-from .semantic_confidence import (
-    aggregate_assignment_confidence,
-    cluster_assignment,
-    compute_semantic_entropy,
-    estimate_cluster_distribution,
-    normalize_entropy_to_confidence,
-    summarize_chunk_confidence_from_counts,
-)
-from .pipeline import (
-    MultimodalGradingPipeline,
-    PipelineArtifactStore,
-    build_envelope_from_plaintext,
-    create_multimodal_pipeline_from_app_config,
-    default_rubric_dir,
-)
-from .pipeline_runner import run_multimodal_grading
-from .schemas import (
-    AssignmentGradeResult,
-    ChunkGradeOutcome,
-    GradingChunk,
-    Modality,
-    MultimodalGradingConfig,
-    ParsedChunkGrade,
-    ReviewStatus,
-    RubricType,
-    SampledChunkGrade,
-    TaskType,
-)
+import importlib
+from typing import Any
 
 __all__ = [
     "aggregate_assignment_confidence",
@@ -76,3 +59,47 @@ __all__ = [
     "default_rubric_dir",
     "run_multimodal_grading",
 ]
+
+# name -> module that actually defines it. Leading-dot entries are submodules of this
+# package (resolved relative to __name__); others are fully-qualified absolute imports.
+_ATTR_SOURCES = {
+    "multimodal_assignment_to_grading_dict": "app.grading.grading_output.grading_output",
+    "aggregate_assignment_confidence": "app.grading.confidence_calculation.semantic_confidence",
+    "cluster_assignment": "app.grading.confidence_calculation.semantic_confidence",
+    "compute_semantic_entropy": "app.grading.confidence_calculation.semantic_confidence",
+    "estimate_cluster_distribution": "app.grading.confidence_calculation.semantic_confidence",
+    "normalize_entropy_to_confidence": "app.grading.confidence_calculation.semantic_confidence",
+    "summarize_chunk_confidence_from_counts": "app.grading.confidence_calculation.semantic_confidence",
+    "ChunkModelRunner": ".model_runner",
+    "MultiModelChunkRunner": ".model_runner",
+    "MultimodalGradingPipeline": ".pipeline",
+    "PipelineArtifactStore": ".pipeline",
+    "build_envelope_from_plaintext": ".pipeline",
+    "create_multimodal_pipeline_from_app_config": ".pipeline",
+    "default_rubric_dir": ".pipeline",
+    "run_multimodal_grading": ".pipeline_runner",
+    "AssignmentGradeResult": "app.grading.schemas",
+    "ChunkGradeOutcome": "app.grading.schemas",
+    "GradingChunk": "app.grading.schemas",
+    "Modality": "app.grading.schemas",
+    "MultimodalGradingConfig": "app.grading.schemas",
+    "ParsedChunkGrade": "app.grading.schemas",
+    "ReviewStatus": "app.grading.schemas",
+    "RubricType": "app.grading.schemas",
+    "SampledChunkGrade": "app.grading.schemas",
+    "TaskType": "app.grading.schemas",
+}
+
+
+def __getattr__(name: str) -> Any:
+    source = _ATTR_SOURCES.get(name)
+    if source is None:
+        raise AttributeError(f"module {__name__!r} has no attribute {name!r}")
+    module = importlib.import_module(source, __name__ if source.startswith(".") else None)
+    value = getattr(module, name)
+    globals()[name] = value
+    return value
+
+
+def __dir__() -> list[str]:
+    return sorted(__all__)

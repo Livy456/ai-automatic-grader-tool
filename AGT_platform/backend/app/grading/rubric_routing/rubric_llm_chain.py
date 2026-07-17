@@ -14,9 +14,9 @@ from typing import Any
 
 from app.config import Config
 
-from .ingestion import IngestionEnvelope
-from .rag_embeddings import _multimodal_structure_chat_client
-from .schemas import GradingChunk, RubricType
+from app.grading.multimodal.rag_embeddings import _multimodal_structure_chat_client
+from app.grading.schemas import GradingChunk, RubricType
+from app.grading.parsing.ingestion import IngestionEnvelope
 
 _log = logging.getLogger(__name__)
 

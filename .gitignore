@@ -88,6 +88,10 @@ env.production.gpu
 **/assignments_to_grade/*
 **/rubric/*
 **/grading_output/*
+# Exception: app/grading/grading_output/ is a *source code* package (output-shape validation,
+# consistency rules, LLM-response parsing), not a runtime output directory - keep it tracked.
+!AGT_platform/backend/app/grading/grading_output/
+!AGT_platform/backend/app/grading/grading_output/**
 **/RAG_embedding/*
 **/multi-modal_assignments_to_grade/*
 **/multi-modal_RAG_embeding/*
