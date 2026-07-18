@@ -6,7 +6,6 @@ temp file so memory stays bounded for big student/teacher files.
 """
 from __future__ import annotations
 
-import tempfile
 import uuid
 from typing import BinaryIO, Optional
 
@@ -99,24 +98,17 @@ def _upload_fileobj(
     return key
 
 
-def upload_from_werkzeug_file(cfg: Config, file_storage, key: str) -> str:
+def upload_from_fastapi_file(cfg: Config, upload_file, key: str) -> str:
     """
-    Stream upload from Flask/Werkzeug FileStorage into MinIO without loading whole file into RAM.
-    Uses a SpooledTemporaryFile (spills to disk after max_size bytes in memory).
+    Stream upload from a FastAPI/Starlette ``UploadFile`` into MinIO without loading the whole
+    file into RAM. Starlette already buffers the multipart body into ``upload_file.file`` (a
+    ``SpooledTemporaryFile`` that spills to disk once it exceeds Starlette's in-memory
+    threshold) while parsing the request, so by the time a route handler runs, reading it here
+    is a plain, already-bounded-memory file read — no extra spooling needed on our side.
     """
-    content_type = file_storage.mimetype or "application/octet-stream"
-    max_mem = cfg.MINIO_UPLOAD_SPOOL_MAX_MEMORY_BYTES
-    spool: tempfile.SpooledTemporaryFile = tempfile.SpooledTemporaryFile(max_size=max_mem)
-    try:
-        while True:
-            chunk = file_storage.stream.read(1024 * 1024)
-            if not chunk:
-                break
-            spool.write(chunk)
-        spool.seek(0)
-        return _upload_fileobj(cfg, spool, key, content_type)
-    finally:
-        spool.close()
+    content_type = upload_file.content_type or "application/octet-stream"
+    upload_file.file.seek(0)
+    return _upload_fileobj(cfg, upload_file.file, key, content_type)
 
 
 def put_object(
@@ -128,7 +120,7 @@ def put_object(
 ) -> str:
     """
     Upload from a bounded stream (e.g. BytesIO). Key: {prefix}/{uuid_hex}.
-    Prefer upload_from_werkzeug_file for arbitrary large uploads.
+    Prefer upload_from_fastapi_file for arbitrary large uploads.
     """
     key = f"{prefix}/{uuid.uuid4().hex}"
     if length <= cfg.MINIO_INLINE_UPLOAD_MAX_BYTES:
@@ -184,7 +176,7 @@ def presigned_put_url(
 ) -> str:
     """
     Browser → MinIO direct upload. Client must send the same Content-Type header on PUT.
-    Keeps large files off the Flask host (production ingress is metadata + presign only).
+    Keeps large files off the API host (production ingress is metadata + presign only).
     """
     exp = expires if expires is not None else cfg.MINIO_PRESIGN_PUT_EXPIRES
     client = minio_client_for_presign(cfg)

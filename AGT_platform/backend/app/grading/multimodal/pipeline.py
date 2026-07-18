@@ -78,12 +78,12 @@ often cause provider timeouts.
 
 from __future__ import annotations
 
+import asyncio
 import json
 import logging
 import os
 import re
 from collections import Counter
-from concurrent.futures import ThreadPoolExecutor
 from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Any, Callable
@@ -340,20 +340,23 @@ class MultimodalGradingPipeline:
             return self.runner.app_config
         return None
 
-    def _grade_chunk_llm(
+    async def _grade_chunk_llm_async(
         self,
         chunk: GradingChunk,
         *,
         answer_key_for_prompt: str,
         dataset_plain: str,
+        semaphore: asyncio.Semaphore,
     ) -> tuple[ChunkGradeOutcome, dict[str, Any]]:
         """
         Build the grading prompt, run k model samples, parse + cluster, aggregate, and
         evaluate review status for one chunk. Assumes ``route_rubric`` has already run for
         ``chunk``. Only reads shared, read-only pipeline state (``self.config``,
         ``self.runner``) and returns everything the caller needs rather than mutating shared
-        audit/result lists directly, so this is safe to call concurrently for many chunks from
-        :meth:`run`'s thread pool.
+        audit/result lists directly, so this is safe to run concurrently for many chunks from
+        :meth:`run`'s ``asyncio.gather`` dispatch. ``semaphore`` bounds how many LLM calls are
+        actually in flight at once across the *whole* grading run (see
+        :meth:`_grade_all_chunks_async`), not just this chunk's own samples.
 
         Returns ``(outcome, grading_audit_fields)``.
         """
@@ -363,10 +366,11 @@ class MultimodalGradingPipeline:
             answer_key_text=answer_key_for_prompt,
             dataset_context_text=dataset_plain,
         )
-        raw_samples = self.runner.run_chunk_samples(
+        raw_samples = await self.runner.run_chunk_samples_async(
             chunk,
             system_prompt=chunk_multimodal_grading_system_prompt(chunk),
             user_prompt=user_prompt,
+            semaphore=semaphore,
         )
 
         parsed_samples: list[SampledChunkGrade] = []
@@ -477,6 +481,37 @@ class MultimodalGradingPipeline:
             "total_samples": len(raw_samples),
         }
         return outcome, grading_audit
+
+    async def _grade_all_chunks_async(
+        self,
+        chunks: list[GradingChunk],
+        *,
+        concurrency: int,
+        answer_key_for_prompt: str,
+        dataset_plain: str,
+    ) -> list[tuple[ChunkGradeOutcome, dict[str, Any]]]:
+        """
+        Grade every chunk concurrently. All chunks' coroutines are scheduled together, but a
+        single ``asyncio.Semaphore`` shared across every chunk (and every sample within each
+        chunk) caps the number of LLM calls actually in flight at once for this whole grading
+        run to ``concurrency`` — not per chunk. ``asyncio.gather`` returns results in the same
+        order as ``chunks``, so callers get deterministic ordering regardless of which chunk's
+        LLM calls happen to finish first.
+        """
+        semaphore = asyncio.Semaphore(max(1, concurrency))
+        return list(
+            await asyncio.gather(
+                *[
+                    self._grade_chunk_llm_async(
+                        chunk,
+                        answer_key_for_prompt=answer_key_for_prompt,
+                        dataset_plain=dataset_plain,
+                        semaphore=semaphore,
+                    )
+                    for chunk in chunks
+                ]
+            )
+        )
 
     def run(
         self,
@@ -819,42 +854,26 @@ class MultimodalGradingPipeline:
                 },
             )
 
-        # The LLM-bound grading step (one or more blocking chat calls per chunk) dominates
-        # end-to-end grading latency, so chunks are graded concurrently via a bounded thread
-        # pool (I/O-bound work; threads are released while waiting on the network) instead of
-        # one-chunk-at-a-time. ``ThreadPoolExecutor.map`` preserves input order in its results,
-        # so audit entries / chunk_outcomes below stay in the same deterministic chunk order
-        # as the sequential path (concurrency=1).
+        # The LLM-bound grading step (one or more chat calls per chunk) dominates end-to-end
+        # grading latency, so chunks are graded concurrently through an async engine
+        # (AsyncOpenAI + asyncio.gather) rather than one blocking call at a time. ``run()``
+        # stays a plain sync method — the asyncio event loop is created and torn down just for
+        # this step via ``asyncio.run`` — so every existing sync caller (Celery tasks, tests,
+        # scripts) keeps calling ``run()`` exactly as before. Do not call ``run()`` from inside
+        # an already-running event loop (e.g. an ``async def`` request handler); dispatch
+        # grading through Celery instead, as the FastAPI routes do.
         concurrency = max(
             1,
-            min(
-                int(getattr(embed_cfg, "MULTIMODAL_CHUNK_GRADING_CONCURRENCY", 6) or 6),
-                len(chunks),
-            ),
+            int(getattr(embed_cfg, "MULTIMODAL_LLM_CALL_CONCURRENCY", 3) or 3),
         )
-        if concurrency <= 1:
-            graded = [
-                self._grade_chunk_llm(
-                    chunk,
-                    answer_key_for_prompt=answer_key_for_prompt,
-                    dataset_plain=dataset_plain,
-                )
-                for chunk in chunks
-            ]
-        else:
-            with ThreadPoolExecutor(
-                max_workers=concurrency, thread_name_prefix="multimodal-chunk-grade"
-            ) as pool:
-                graded = list(
-                    pool.map(
-                        lambda c: self._grade_chunk_llm(
-                            c,
-                            answer_key_for_prompt=answer_key_for_prompt,
-                            dataset_plain=dataset_plain,
-                        ),
-                        chunks,
-                    )
-                )
+        graded = asyncio.run(
+            self._grade_all_chunks_async(
+                chunks,
+                concurrency=concurrency,
+                answer_key_for_prompt=answer_key_for_prompt,
+                dataset_plain=dataset_plain,
+            )
+        )
 
         chunk_outcomes: list[ChunkGradeOutcome] = []
         for outcome, grading_audit in graded:

@@ -79,6 +79,15 @@ class ChatClient(Protocol):
     ) -> dict: ...
 
 
+class AsyncChatClient(Protocol):
+    """Async counterpart of :class:`ChatClient` — awaitable chat calls so many samples/chunks
+    can be in flight concurrently (via ``asyncio.gather``) instead of blocking one at a time."""
+
+    async def chat_json(
+        self, messages: list[dict], *, temperature: float | None = None
+    ) -> dict: ...
+
+
 class OpenAIJsonClient:
     """Server-side OpenAI only; API key never leaves backend workers."""
 
@@ -131,6 +140,67 @@ class OpenAIJsonClient:
                 resp = client.chat.completions.create(**kwargs)
             else:
                 raise
+        content = resp.choices[0].message.content or ""
+        usage: dict[str, int] = {"prompt_tokens": 0, "completion_tokens": 0, "total_tokens": 0}
+        u = getattr(resp, "usage", None)
+        if u is not None:
+            usage["prompt_tokens"] = int(getattr(u, "prompt_tokens", 0) or 0)
+            usage["completion_tokens"] = int(getattr(u, "completion_tokens", 0) or 0)
+            usage["total_tokens"] = int(getattr(u, "total_tokens", 0) or 0)
+        return parse_llm_json_content(content), usage
+
+
+class AsyncOpenAIJsonClient:
+    """
+    Async counterpart of :class:`OpenAIJsonClient` (``openai.AsyncOpenAI``) so per-chunk
+    multimodal grading can issue several chat calls concurrently via ``asyncio.gather``
+    instead of blocking one call at a time. Same retry-without-``response_format`` fallback
+    and usage/parsing behavior as the sync client.
+    """
+
+    def __init__(self, api_key: str, model: str):
+        self._api_key = api_key
+        self.model = model
+
+    async def chat_json(
+        self,
+        messages: list[dict],
+        *,
+        temperature: float | None = None,
+        response_format: dict[str, Any] | None = None,
+    ) -> dict:
+        parsed, _usage = await self.chat_json_with_usage(
+            messages, temperature=temperature, response_format=response_format
+        )
+        return parsed
+
+    async def chat_json_with_usage(
+        self,
+        messages: list[dict],
+        *,
+        temperature: float | None = None,
+        response_format: dict[str, Any] | None = None,
+    ) -> tuple[dict[str, Any], dict[str, int]]:
+        from openai import AsyncOpenAI
+
+        oa_messages = [{"role": m["role"], "content": m["content"]} for m in messages]
+        temp = 0.3 if temperature is None else float(temperature)
+        kwargs: dict[str, Any] = {
+            "model": self.model,
+            "messages": oa_messages,
+            "temperature": temp,
+        }
+        if response_format is not None:
+            kwargs["response_format"] = response_format
+        async with AsyncOpenAI(api_key=self._api_key) as client:
+            try:
+                resp = await client.chat.completions.create(**kwargs)
+            except Exception:
+                if response_format is not None:
+                    kwargs.pop("response_format", None)
+                    resp = await client.chat.completions.create(**kwargs)
+                else:
+                    raise
         content = resp.choices[0].message.content or ""
         usage: dict[str, int] = {"prompt_tokens": 0, "completion_tokens": 0, "total_tokens": 0}
         u = getattr(resp, "usage", None)
@@ -346,6 +416,50 @@ def build_multimodal_grading_clients(cfg: Config) -> list[tuple[ChatClient, str]
 
     for spec in (cfg.GRADING_MODEL_2, cfg.GRADING_MODEL_3):
         parsed = _parse_model_spec(spec, cfg)
+        if parsed:
+            clients.append(parsed)
+
+    return clients
+
+
+def _parse_async_model_spec(spec: str, cfg: Config) -> tuple[AsyncChatClient, str] | None:
+    """Async counterpart of :func:`_parse_model_spec`."""
+    if not spec:
+        return None
+    s = spec.strip()
+    if ":" in s and not s.lower().startswith("openai:"):
+        _log.warning("Ignoring unsupported model spec %r (only openai:… is supported).", spec)
+        return None
+    model_name = s[len("openai:") :].strip() if s.startswith("openai:") else s
+    if not model_name:
+        return None
+    key = (cfg.OPENAI_API_KEY or "").strip()
+    if not key:
+        return None
+    return AsyncOpenAIJsonClient(key, model_name), f"openai:{model_name}"
+
+
+def build_async_multimodal_grading_clients(cfg: Config) -> list[tuple[AsyncChatClient, str]]:
+    """
+    Async counterpart of :func:`build_multimodal_grading_clients` — same model selection
+    (``OPENAI_MULTIMODAL_GRADING_MODEL`` + optional ``GRADING_MODEL_2``/``GRADING_MODEL_3``),
+    but returns awaitable :class:`AsyncOpenAIJsonClient` instances so
+    :class:`app.grading.multimodal.model_runner.MultiModelChunkRunner` can grade many
+    chunks/samples concurrently via ``asyncio.gather`` instead of one blocking call at a time.
+    """
+    key = (cfg.OPENAI_API_KEY or "").strip()
+    if not key:
+        _log.warning(
+            "Multimodal grading requires OPENAI_API_KEY; no OpenAI grading clients configured."
+        )
+        return []
+    omid = openai_multimodal_grading_model(cfg)
+    clients: list[tuple[AsyncChatClient, str]] = [
+        (AsyncOpenAIJsonClient(key, omid), f"openai:{omid}")
+    ]
+
+    for spec in (cfg.GRADING_MODEL_2, cfg.GRADING_MODEL_3):
+        parsed = _parse_async_model_spec(spec, cfg)
         if parsed:
             clients.append(parsed)
 

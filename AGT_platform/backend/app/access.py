@@ -1,14 +1,11 @@
 from __future__ import annotations
 
-from functools import wraps
-
-from flask import request
-
 from .extensions import SessionLocal
 from .models import User
 
 
 _GUEST_EMAIL = "guest@local.ai-grader"
+
 
 def _ensure_guest_user() -> User:
     db = SessionLocal()
@@ -28,30 +25,9 @@ def _ensure_guest_user() -> User:
         db.close()
 
 
-def get_user_from_token():
-    # Authorization is intentionally disabled: always provide a default guest context
-    # so API endpoints continue to receive request.user with id/email/role.
+def get_user_from_token() -> dict:
+    # Authorization is intentionally disabled: always provide a default guest context so API
+    # endpoints continue to receive a user id/email/role. See app.deps.get_current_user /
+    # app.deps.require_role, which wrap this for FastAPI route dependencies.
     user = _ensure_guest_user()
     return {"id": int(user.id), "email": user.email, "role": user.role}
-
-
-def require_auth(fn):
-    @wraps(fn)
-    def wrapper(*args, **kwargs):
-        request.user = get_user_from_token()
-        return fn(*args, **kwargs)
-
-    return wrapper
-
-
-def require_role(*_roles):
-    
-    def deco(fn):
-        @wraps(fn)
-        def wrapper(*args, **kwargs):
-            request.user = get_user_from_token()
-            return fn(*args, **kwargs)
-
-        return wrapper
-
-    return deco

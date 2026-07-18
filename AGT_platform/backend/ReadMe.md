@@ -25,13 +25,24 @@ Make sure you are in the **`AGT_platform/backend`** directory for local Python c
 
    With Docker, run migrations **inside** the backend container (see root **`README.md`**).
 
-4. Run the API:
+4. Run the API. The backend is a **FastAPI** app served by **uvicorn** (previously Flask):
 
    ```bash
+   # Dev (auto-reload):
    python -m app.main
+   # or, equivalently, explicit uvicorn invocation (recommended for prod-like runs):
+   uvicorn app.main:app --host 0.0.0.0 --port 5000
    ```
 
-5. Access the backend locally at the host/port your environment configures (see app defaults and `.env`).
+5. Access the backend locally at the host/port your environment configures (see app defaults and `.env`). Interactive API docs are auto-generated at `/docs` (Swagger UI) and `/redoc`.
+
+6. Run the Celery worker for grading tasks (course / standalone / assignment-upload all share the `gpu` queue):
+
+   ```bash
+   celery -A app.tasks worker -Q gpu -l info
+   ```
+
+   Worker process concurrency defaults to `CELERY_WORKER_CONCURRENCY` (3) — see `app/config.py`. Per-task LLM call concurrency (how many OpenAI calls one grading run has in flight at once) is separately controlled by `MULTIMODAL_LLM_CALL_CONCURRENCY` (also 3 by default); size both together against your OpenAI rate limit.
 
 **Adding a new migration** (after model changes), from **`backend/`**:
 

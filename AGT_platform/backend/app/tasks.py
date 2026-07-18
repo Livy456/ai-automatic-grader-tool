@@ -45,13 +45,23 @@ celery_app.conf.task_routes = {
 }
 # Bound prefetch so one worker does not hoard many large grading tasks in memory.
 celery_app.conf.worker_prefetch_multiplier = max(1, _cfg.CELERY_WORKER_PREFETCH)
+# Default worker process concurrency: 3 grading tasks in parallel (see Config docstring). A
+# worker started with an explicit ``--concurrency=N`` CLI flag still overrides this default.
+celery_app.conf.worker_concurrency = max(1, _cfg.CELERY_WORKER_CONCURRENCY)
 celery_app.conf.task_acks_late = True
 celery_app.conf.task_reject_on_worker_lost = True
 
 
-def init_celery(app):
-    celery_app.conf.broker_url = app.config["REDIS_URL"]
-    celery_app.conf.result_backend = app.config["REDIS_URL"]
+def init_celery(cfg: Config | None = None) -> None:
+    """
+    Re-apply broker/result-backend URLs from ``Config`` (or the module-level default).
+    ``celery_app`` is already configured at import time from ``Config()`` above; call this
+    at app-startup only if you need to refresh it against a differently-sourced ``Config``
+    instance (e.g. in tests).
+    """
+    c = cfg or Config()
+    celery_app.conf.broker_url = c.REDIS_URL
+    celery_app.conf.result_backend = c.REDIS_URL
 
 
 def _evidence_for_db(ev):

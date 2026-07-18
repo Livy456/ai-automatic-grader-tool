@@ -29,13 +29,12 @@ a chunking issue.
 
 from __future__ import annotations
 
+import asyncio
 import json
 import logging
 import os
 import re
 import tempfile
-import threading
-import time
 import unittest
 from unittest.mock import MagicMock, patch
 from collections import defaultdict
@@ -2146,12 +2145,14 @@ class MultiModelChunkRunnerJsonTests(unittest.TestCase):
 
 class MultimodalPipelineChunkConcurrencyTests(unittest.TestCase):
     """
-    Per-chunk grading (the dominant source of grading latency) runs on a bounded thread pool
-    keyed by ``MULTIMODAL_CHUNK_GRADING_CONCURRENCY``. Regardless of how many chunks actually
-    run in parallel, ``chunk_outcomes`` / ``pipeline_audit["grading"]`` must stay in the same
-    deterministic order as the input chunks, and every chunk must be graded exactly once. No
-    real LLM/embedding calls are made: chunks are fed straight in via the chunk cache path
-    (bypassing chunking/RAG) and graded by a fake in-process runner.
+    Per-chunk grading (the dominant source of grading latency) runs through an asyncio engine
+    (``asyncio.gather`` + a semaphore keyed by ``MULTIMODAL_LLM_CALL_CONCURRENCY``) so LLM calls
+    can be in flight concurrently instead of one blocking call at a time. Regardless of the
+    concurrency cap, ``chunk_outcomes`` / ``pipeline_audit["grading"]`` must stay in the same
+    deterministic order as the input chunks, every chunk must be graded exactly once, and the
+    number of calls actually "in flight" at once must never exceed the configured cap. No real
+    LLM/embedding calls are made: chunks are fed straight in via the chunk cache path (bypassing
+    chunking/RAG) and graded by a fake in-process async runner.
     """
 
     @staticmethod
@@ -2170,22 +2171,31 @@ class MultimodalPipelineChunkConcurrencyTests(unittest.TestCase):
 
     def _run_with_concurrency(
         self, concurrency: int, chunk_ids: list[str]
-    ) -> tuple[list[str], list[str]]:
+    ) -> tuple[list[str], list[str], int]:
         from app.grading.multimodal.pipeline import MultimodalGradingPipeline
         from app.grading.parsing.chunk_cache import save_grading_chunks_cache
 
         chunks = [self._fake_chunk(cid) for cid in chunk_ids]
         call_order: list[str] = []
-        order_lock = threading.Lock()
+        in_flight = {"current": 0, "max": 0}
 
         class _FakeRunner:
-            """No real LLM calls; a short sleep makes real overlap observable under
-            concurrency > 1 without depending on timing for correctness assertions."""
+            """
+            No real LLM calls; an ``asyncio.sleep`` while holding the shared semaphore makes
+            real overlap (and the cap on it) observable without depending on wall-clock timing
+            for correctness assertions.
+            """
 
-            def run_chunk_samples(self, chunk, *, system_prompt, user_prompt):
-                with order_lock:
+            async def run_chunk_samples_async(
+                self, chunk, *, system_prompt, user_prompt, semaphore=None
+            ):
+                sem = semaphore or asyncio.Semaphore(10_000)
+                async with sem:
                     call_order.append(chunk.chunk_id)
-                time.sleep(0.02)
+                    in_flight["current"] += 1
+                    in_flight["max"] = max(in_flight["max"], in_flight["current"])
+                    await asyncio.sleep(0.02)
+                    in_flight["current"] -= 1
                 raw = json.dumps(
                     {
                         "rubric_type": "free_response",
@@ -2229,26 +2239,31 @@ class MultimodalPipelineChunkConcurrencyTests(unittest.TestCase):
                 },
             )
             # No app_cfg is passed to the pipeline (fake runner isn't a MultiModelChunkRunner),
-            # so run() falls back to a fresh app Config() for MULTIMODAL_CHUNK_GRADING_CONCURRENCY
-            # — patch the class default rather than needing a real app_cfg wired through.
-            with patch.object(Config, "MULTIMODAL_CHUNK_GRADING_CONCURRENCY", concurrency):
+            # so run() falls back to a fresh app Config() for MULTIMODAL_LLM_CALL_CONCURRENCY —
+            # patch the class default rather than needing a real app_cfg wired through.
+            with patch.object(Config, "MULTIMODAL_LLM_CALL_CONCURRENCY", concurrency):
                 result = pipeline.run(envelope)
 
         grading_audit = result.stage_artifacts["pipeline_audit"]["grading"]
         audit_order = [row["chunk_id"] for row in grading_audit]
-        return audit_order, call_order
+        return audit_order, call_order, in_flight["max"]
 
-    def test_sequential_concurrency_preserves_call_and_audit_order(self):
+    def test_low_concurrency_bounds_in_flight_calls(self):
         chunk_ids = [f"c{i}" for i in range(5)]
-        audit_order, call_order = self._run_with_concurrency(1, chunk_ids)
+        audit_order, call_order, max_in_flight = self._run_with_concurrency(1, chunk_ids)
+        self.assertEqual(max_in_flight, 1)
         self.assertEqual(call_order, chunk_ids)
         self.assertEqual(audit_order, chunk_ids)
 
-    def test_concurrent_grading_preserves_audit_order_and_grades_every_chunk_once(self):
+    def test_bounded_concurrency_respects_semaphore_and_preserves_order(self):
         chunk_ids = [f"c{i}" for i in range(8)]
-        audit_order, call_order = self._run_with_concurrency(4, chunk_ids)
-        # Grading may run out of order across threads, but results/audit must be
-        # reordered back to match the input chunk order.
+        audit_order, call_order, max_in_flight = self._run_with_concurrency(3, chunk_ids)
+        # More chunks (8) than the cap (3), so the cap should actually be reached...
+        self.assertEqual(max_in_flight, 3)
+        # ...but never exceeded.
+        self.assertLessEqual(max_in_flight, 3)
+        # asyncio.gather always returns results in input order, regardless of which chunk's
+        # coroutine happens to finish first.
         self.assertEqual(audit_order, chunk_ids)
         # Every chunk graded exactly once, regardless of concurrency.
         self.assertEqual(sorted(call_order), sorted(chunk_ids))

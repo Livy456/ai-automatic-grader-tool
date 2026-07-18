@@ -65,7 +65,8 @@ class Config:
     # cookies stay on the same host as the callback. Leave empty to use the request Host.
     PUBLIC_API_URL = _env_str("PUBLIC_API_URL").strip().rstrip("/")
 
-    # OAuth (Authlib) stores CSRF state in Flask session cookies.
+    # OAuth (Authlib) would store CSRF state in session cookies (no OAuth router is currently
+    # registered in app.main — see app.access: authorization is intentionally disabled).
     # Must be False when the API is reached over http:// (e.g. localhost:5000) or the browser
     # will not store/send the session cookie and the callback returns 400 "state mismatch".
     # Set True in production when users only hit the API over HTTPS (e.g. .env.production).
@@ -137,7 +138,7 @@ class Config:
         default=3600,
     )
 
-    # Production: false — browser uses presigned object storage only. Dev docker: set true to use multipart to Flask.
+    # Production: false — browser uses presigned object storage only. Dev docker: set true to use multipart to the API.
     ALLOW_FLASK_MULTIPART_UPLOAD = _env_bool("ALLOW_FLASK_MULTIPART_UPLOAD")
 
     OIDC_CLIENT_ID = _env_str("OIDC_CLIENT_ID")
@@ -247,14 +248,16 @@ class Config:
         1,
         min(_env_int("MULTIMODAL_SAMPLES_PER_MODEL", default=5), 16),
     )
-    # How many chunks to grade concurrently (thread pool; each chunk still does its own
-    # sequential client/sample calls). Chunk grading is the dominant source of grading
-    # latency (one blocking LLM call per chunk per sample), so this is the main lever for
-    # reducing end-to-end grading time. 1 = old sequential behavior. Keep below your OpenAI
-    # rate-limit / concurrent-request budget.
-    MULTIMODAL_CHUNK_GRADING_CONCURRENCY = max(
+    # Max LLM calls in flight at once (asyncio.Semaphore) for one grading run, across *all*
+    # chunks and samples — not per chunk. Per-chunk grading (one or more chat calls per chunk,
+    # per sample) is the dominant source of grading latency, so this is the main lever for
+    # reducing end-to-end grading time: MultimodalGradingPipeline grades chunks concurrently
+    # via AsyncOpenAI + asyncio.gather, bounded by this semaphore. 1 = fully sequential. Keep
+    # this at/under your Celery worker concurrency × OpenAI rate-limit budget (see
+    # CELERY_WORKER_CONCURRENCY below).
+    MULTIMODAL_LLM_CALL_CONCURRENCY = max(
         1,
-        min(_env_int("MULTIMODAL_CHUNK_GRADING_CONCURRENCY", default=6), 32),
+        min(_env_int("MULTIMODAL_LLM_CALL_CONCURRENCY", default=3), 32),
     )
     # Optional absolute path for assignment-wide multimodal ``custom_rubric/*.json`` caches.
     # Empty → ``MULTIMODAL_CUSTOM_RUBRIC_OUTPUT_DIR`` env → repo ``custom_rubric/``.
@@ -448,8 +451,13 @@ class Config:
 
     WHISPER_ENABLED = _env_bool("WHISPER_ENABLED")
 
-    # Celery worker tuning (documented for ops; worker command line should match).
-    CELERY_WORKER_CONCURRENCY = _env_int("CELERY_WORKER_CONCURRENCY", default=1)
+    # Celery worker tuning. Applied directly via ``celery_app.conf.worker_concurrency`` in
+    # app/tasks.py (no need to pass --concurrency on the CLI, though an explicit CLI flag still
+    # takes precedence). Default 3: up to 3 grading tasks (course / standalone / assignment
+    # upload — all share the "gpu" queue) run in parallel per worker process. Combined with
+    # MULTIMODAL_LLM_CALL_CONCURRENCY=3 per task, that's up to 9 concurrent OpenAI calls per
+    # worker process at default settings — size both together against your rate limit.
+    CELERY_WORKER_CONCURRENCY = _env_int("CELERY_WORKER_CONCURRENCY", default=3)
     CELERY_WORKER_PREFETCH = _env_int("CELERY_WORKER_PREFETCH", default=1)
 
     _cors = _env_str("CORS_ORIGINS").strip()
