@@ -106,6 +106,31 @@ def _backfill_empty_evidence_from_any_sample(
                 break
 
 
+_STUDENT_RESPONSE_EVIDENCE_FALLBACK_MAX_CHARS = 600
+
+
+def _backfill_evidence_from_student_response(
+    consensus_crit: dict[str, float],
+    ev_map: dict[str, str],
+    student_response_text: str,
+) -> None:
+    """
+    Last-resort evidence backfill: a criterion can still be empty here when *every* grading
+    sample returned an empty ``evidence`` quote for it (the model judged that criterion
+    unaddressed, forgot the field, etc.) even though the chunk's ``student_response`` is
+    non-empty. Rather than showing "no evidence" next to a visibly present response, fall back
+    to a truncated excerpt of the chunk's own student response so the evidence shown in the UI
+    is never empty when there is actual student work to point to.
+    """
+    snippet = student_response_text.strip()[:_STUDENT_RESPONSE_EVIDENCE_FALLBACK_MAX_CHARS].strip()
+    if not snippet:
+        return
+    for name in consensus_crit:
+        if str(ev_map.get(name) or "").strip():
+            continue
+        ev_map[name] = snippet
+
+
 def _confidence_note_from_nearest_sample(
     valid_parsed: list[SampledChunkGrade],
     consensus_score: float,
@@ -156,6 +181,7 @@ def aggregate_chunk_samples(
     cluster_counts: dict[str, int],
     cfg: MultimodalGradingConfig,
     rubric_fallback_names: list[str] | None = None,
+    chunk_student_response: str = "",
 ) -> ChunkGradeOutcome:
     valid_norms = [
         s.parsed.normalized_score
@@ -199,6 +225,9 @@ def aggregate_chunk_samples(
     )
     _backfill_empty_evidence_from_any_sample(
         valid_parsed, consensus_crit, evidence
+    )
+    _backfill_evidence_from_student_response(
+        consensus_crit, evidence, chunk_student_response
     )
     confidence_note = _confidence_note_from_nearest_sample(valid_parsed, estimate)
     if not valid_parsed:

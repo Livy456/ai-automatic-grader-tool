@@ -203,6 +203,34 @@ class Config:
             200_000,
         ),
     )
+    # Claude parsing agent: Pydantic-validated single-call decomposition into per-question
+    # (question, student_response, answer) triples (see claude_parsing_agent.py). Tried first,
+    # ahead of the OpenAI trio frontload and every heuristic chunker, in both the multimodal and
+    # standalone grading pipelines (see MultimodalGradingPipeline.run).
+    # off | auto (default) | on — auto/on run only when ANTHROPIC_API_KEY is set.
+    _claude_agent = _env_str("MULTIMODAL_CLAUDE_PARSING_AGENT").strip().lower()
+    if _claude_agent in ("0", "false", "no", "off"):
+        MULTIMODAL_CLAUDE_PARSING_AGENT = "off"
+    elif _claude_agent in ("1", "true", "yes", "on"):
+        MULTIMODAL_CLAUDE_PARSING_AGENT = "on"
+    else:
+        MULTIMODAL_CLAUDE_PARSING_AGENT = "auto"
+    MULTIMODAL_CLAUDE_PARSING_AGENT_MODEL = (
+        _env_str("MULTIMODAL_CLAUDE_PARSING_AGENT_MODEL").strip() or "claude-opus-4-7"
+    )
+    MULTIMODAL_CLAUDE_PARSING_AGENT_MAX_TOKENS = max(
+        1024,
+        min(_env_int("MULTIMODAL_CLAUDE_PARSING_AGENT_MAX_TOKENS", default=16384), 128000),
+    )
+    MULTIMODAL_CLAUDE_PARSING_AGENT_MAX_CHARS_PER_SOURCE = max(
+        8000,
+        min(
+            _env_int(
+                "MULTIMODAL_CLAUDE_PARSING_AGENT_MAX_CHARS_PER_SOURCE", default=120_000
+            ),
+            500_000,
+        ),
+    )
     OPENAI_MODEL = _env_str("OPENAI_MODEL").strip() or "gpt-4o-mini"
     # If true, re-run or arbitrate grading with OpenAI when local model confidence is low.
     ESCALATE_TO_OPENAI = _env_bool("ESCALATE_TO_OPENAI")

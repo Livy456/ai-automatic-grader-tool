@@ -546,9 +546,22 @@ def _collect_blank_question_for_segment(
     cells: list[dict[str, Any]],
     start_i: int,
     end_i: int,
-) -> list[str]:
-    """Cells ``start_i`` … ``end_i`` inclusive from the blank; scaffold cell uses prefix only."""
-    parts: list[str] = []
+) -> tuple[list[str], list[str]]:
+    """
+    Cells ``start_i`` … ``end_i`` inclusive from the blank; scaffold cell uses prefix only.
+
+    Returns ``(question_parts, context_parts)``. A segment often opens with the *previous*
+    question's grading cell (e.g. ``# Test for problem 1.1`` / ``assert ...``) sitting right
+    before the next question's heading, since segment boundaries are anchored on scaffold code
+    cells, not on markdown headings. Without filtering, that leftover test/instructor cell — and
+    the question number it references — got swept into *this* question's prompt text (visible in
+    the UI as "the question includes the previous question's test code"). Route anything that
+    ``_is_test_code`` / ``_is_instructor_code`` classifies as instructor-only into
+    ``context_parts`` instead, matching how :func:`build_notebook_qa_chunks` /
+    :func:`build_notebook_question_boundary_chunks` already separate the two.
+    """
+    q_parts: list[str] = []
+    ctx_parts: list[str] = []
     for j in range(start_i, end_i + 1):
         if j < 0 or j >= len(cells):
             continue
@@ -559,21 +572,36 @@ def _collect_blank_question_for_segment(
         ct = cell.get("cell_type", "")
         if ct == "code" and j == end_i:
             pref, _tail = split_code_cell_at_scaffold_for_student_tail(src)
-            parts.append(pref if pref.strip() else src)
+            q_parts.append(pref if pref.strip() else src)
+        elif ct == "code" and (_is_test_code(src) or _is_instructor_code(src)):
+            ctx_parts.append(src)
         else:
-            parts.append(src)
-    return parts
+            q_parts.append(src)
+    return q_parts, ctx_parts
 
 
 def _collect_student_response_for_segment(
     cells: list[dict[str, Any]],
     anchor_i: int,
     next_anchor_i: int,
-) -> list[str]:
-    """Student work: tail of scaffold cell at ``anchor_i`` plus following cells until next anchor."""
+) -> tuple[list[str], list[str]]:
+    """
+    Student work: tail of scaffold cell at ``anchor_i`` plus following cells until the next
+    scaffold anchor.
+
+    Returns ``(response_parts, context_parts)``. The window up to ``next_anchor_i`` can contain
+    the *current* question's own instructor test/assert cell **and** the markdown heading +
+    instructions for the *next* question (both cells sit after this anchor but before the next
+    one). Without filtering, both got appended straight into ``student_response`` — visible in
+    the UI as "the response contains test code and instructions for another question." Test /
+    instructor cells are routed to ``context_parts`` (mirrors
+    :func:`_collect_blank_question_for_segment`); a markdown ``question``/``section_header`` cell
+    ends collection immediately since everything from there on belongs to the next question.
+    """
     parts: list[str] = []
+    ctx_parts: list[str] = []
     if anchor_i < 0 or anchor_i >= len(cells):
-        return parts
+        return parts, ctx_parts
     anchor_cell = cells[anchor_i]
     if anchor_cell.get("cell_type") == "code":
         src = _cell_source(anchor_cell)
@@ -582,10 +610,48 @@ def _collect_student_response_for_segment(
             parts.append(tail)
     end = min(next_anchor_i, len(cells))
     for j in range(anchor_i + 1, end):
-        src = _cell_source(cells[j]).strip()
-        if src:
+        cell = cells[j]
+        src = _cell_source(cell).strip()
+        if not src:
+            continue
+        role = _classify_cell(cell, j)
+        if role in ("question", "section_header"):
+            break
+        if role in ("test_code", "instructor_code"):
+            ctx_parts.append(src)
+        elif role == "student_text" and _markdown_looks_like_prompt_extension(src):
+            ctx_parts.append(src)
+        else:
             parts.append(src)
-    return parts
+    return parts, ctx_parts
+
+
+def _segment_has_new_question_heading(
+    cells: list[dict[str, Any]],
+    start_i: int,
+    end_i: int,
+) -> bool:
+    """
+    True when a markdown ``question``/``section_header`` cell appears in ``[start_i, end_i)``.
+
+    Distinguishes a genuinely new question from a *second* scaffold cell that still belongs to
+    the previous one (e.g. a "define a helper function" cell followed by a separate "call it
+    here" cell, with no heading between them) — see
+    :func:`try_build_notebook_scaffold_aligned_chunks`, which otherwise emitted one chunk per
+    scaffold cell and split a single question into multiple duplicate-looking entries.
+    """
+    for j in range(start_i, end_i):
+        if j < 0 or j >= len(cells):
+            continue
+        cell = cells[j]
+        if cell.get("cell_type") != "markdown":
+            continue
+        src = _cell_source(cell)
+        if not src.strip():
+            continue
+        if _classify_markdown(src, j) in ("question", "section_header"):
+            return True
+    return False
 
 
 def try_build_notebook_scaffold_aligned_chunks(
@@ -622,16 +688,32 @@ def try_build_notebook_scaffold_aligned_chunks(
     units: list[dict[str, Any]] = []
     for k, (ib, isc) in enumerate(zip(b_idx, s_idx, strict=True)):
         prev_b = b_idx[k - 1] if k > 0 else -1
-        q_parts = _collect_blank_question_for_segment(blank_cells, prev_b + 1, ib)
+        q_parts, ctx_parts = _collect_blank_question_for_segment(blank_cells, prev_b + 1, ib)
         next_s = s_idx[k + 1] if k + 1 < len(s_idx) else len(student_cells)
-        r_parts = _collect_student_response_for_segment(student_cells, isc, next_s)
+        r_parts, r_ctx_parts = _collect_student_response_for_segment(student_cells, isc, next_s)
         q_blob = "\n\n".join(q_parts).strip()
         r_blob = "\n\n".join(r_parts).strip()
         if not q_blob and not r_blob:
             continue
+        starts_new_question = k == 0 or _segment_has_new_question_heading(
+            blank_cells, prev_b + 1, ib
+        )
+        if not starts_new_question and units:
+            # Same question as the previous scaffold anchor — extend it in place rather than
+            # emitting a second chunk that would show up as a duplicate "question" in the UI.
+            prev_unit = units[-1]
+            prev_unit["question_parts"].extend(q_parts)
+            prev_unit["context_parts"].extend(ctx_parts)
+            prev_unit["response_parts"].extend(r_parts)
+            prev_unit["context_parts"].extend(r_ctx_parts)
+            prev_unit["has_student_content"] = prev_unit["has_student_content"] or bool(
+                r_blob
+            )
+            continue
         qid = resolve_question_cell_id(q_blob[:1200] if q_blob else f"scaffold_{k}", ordinal=k + 1)
         u = _new_unit(qid)
         u["question_parts"] = q_parts if q_parts else [q_blob or f"(scaffold segment {k + 1})"]
+        u["context_parts"] = ctx_parts + r_ctx_parts
         u["response_parts"] = r_parts if r_parts else ([] if not r_blob else [r_blob])
         u["has_student_content"] = bool(r_blob.strip())
         units.append(u)

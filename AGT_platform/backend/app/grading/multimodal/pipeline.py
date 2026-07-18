@@ -8,7 +8,14 @@ Callers supply ``rubric_rows_by_type`` (e.g. from ``rubric/default.json`` or
 :func:`app.grading.rubric_routing.generic_rubric_loader.load_four_generic_rubric_rows_by_type`)
 so routing plus custom rubric can choose among scaffolded, free response, EDA, and oral templates.
 
-Chunking uses :func:`app.grading.multimodal.rag_embeddings.build_multimodal_grading_chunks`
+**Chunking (tried in order):** first
+:func:`app.grading.parsing.claude_parsing_agent.try_build_claude_parsing_agent_chunks` — a
+Pydantic-validated Claude agent that decomposes the submission directly into isolated
+``(question, student_response, answer)`` triples in one call (``MULTIMODAL_CLAUDE_PARSING_AGENT``,
+default **auto** = on whenever ``ANTHROPIC_API_KEY`` is set). This runs for both this pipeline's
+callers — course multimodal grading *and* the standalone autograder — since both share this one
+``run()``. When it is disabled/unavailable/fails (returns ``None``), chunking falls back to
+:func:`app.grading.multimodal.rag_embeddings.build_multimodal_grading_chunks`
 (notebook cell-order, optional LLM QA on PDF-reflowed text, structured Q/A chunking), unless
 ``OPENAI_API_KEY`` is set and ``MULTIMODAL_OPENAI_TRIO_RAG_FRONTLOAD`` is not ``off`` (default
 **auto** = on) — then
@@ -110,6 +117,7 @@ from app.grading.confidence_calculation.semantic_confidence import (
 from app.grading.parsing.notebook_chunker import sanitize_grading_chunks_placeholders
 from app.grading.parsing.llm_triplet_three_source import multimodal_llm_triplet_three_source_enabled
 from app.grading.parsing.template_aligned_notebook_chunks import blank_template_chunking_requested
+from app.grading.parsing.claude_parsing_agent import try_build_claude_parsing_agent_chunks
 
 from .aggregator import aggregate_assignment, aggregate_chunk_samples
 from .model_runner import ChunkModelRunner, MultiModelChunkRunner
@@ -169,6 +177,26 @@ def default_blank_assignments_dir() -> Path:
 def default_assignment_chunking_dir() -> Path:
     """``…/ai-automatic-grader-tool/assignment_chunking`` (repo root)."""
     return Path(__file__).resolve().parents[5] / "assignment_chunking"
+
+
+def _chunk_student_response_text(chunk: GradingChunk) -> str:
+    """
+    Best-effort student-response text for evidence backfill (see
+    :func:`app.grading.multimodal.aggregator._backfill_evidence_from_student_response`).
+    Mirrors the same trio → response_preview → extracted_text fallback chain used when
+    building the ``student_response`` shown to graders elsewhere in this codebase (e.g.
+    ``app.tasks._student_response_from_chunking_row``).
+    """
+    ev = chunk.evidence or {}
+    trio = ev.get("trio")
+    if isinstance(trio, dict):
+        sr = str(trio.get("student_response") or "").strip()
+        if sr:
+            return sr
+    rp = str(ev.get("response_preview") or "").strip()
+    if rp:
+        return rp
+    return str(chunk.extracted_text or "").strip()
 
 
 def _safe_trio_export_stem(assignment_id: str) -> str:
@@ -425,6 +453,7 @@ class MultimodalGradingPipeline:
             cluster_counts=dict(cluster_counts),
             cfg=self.config,
             rubric_fallback_names=rubric_fb or None,
+            chunk_student_response=_chunk_student_response_text(chunk),
         )
         sample_details = [
             {
@@ -648,57 +677,76 @@ class MultimodalGradingPipeline:
                 from app.grading.parsing.audio_half_split import maybe_prepare_audio_half_split
 
                 maybe_prepare_audio_half_split(envelope, app_cfg)
-            raw_tpl = hints.get("blank_assignment_template_bytes")
-            raw_nb = hints.get("blank_assignment_ipynb_bytes")
-            blank_for_flags = (
-                bytes(raw_tpl)
-                if isinstance(raw_tpl, (bytes, bytearray))
-                else (
-                    bytes(raw_nb) if isinstance(raw_nb, (bytes, bytearray)) else b""
+
+            # Claude parsing agent (Pydantic-validated question/response/answer decomposition)
+            # is tried first, ahead of the OpenAI trio frontload and every heuristic chunker
+            # below — both this pipeline's callers (course multimodal grading *and* the
+            # standalone autograder) share this one ``run()``, so enabling it here covers both.
+            # Isolating one question from the next (and from instructor test/setup code) is
+            # Claude's job here, not a set of cell-classification regexes, so it returns ``None``
+            # (never raises) on any failure and every existing fallback below still applies.
+            claude_agent_result = (
+                try_build_claude_parsing_agent_chunks(
+                    envelope, app_cfg, answer_key_plaintext=answer_key_for_prompt
                 )
+                if app_cfg is not None
+                else None
             )
-            has_student_artifacts = bool(
-                envelope.artifacts
-                and any(
-                    isinstance(v, (bytes, bytearray)) and len(bytes(v).strip()) > 0
-                    for v in envelope.artifacts.values()
+            if claude_agent_result is not None:
+                chunks, chunker_mode = claude_agent_result
+                art.append("claude_parsing_agent", {"n_chunks": len(chunks)})
+            else:
+                raw_tpl = hints.get("blank_assignment_template_bytes")
+                raw_nb = hints.get("blank_assignment_ipynb_bytes")
+                blank_for_flags = (
+                    bytes(raw_tpl)
+                    if isinstance(raw_tpl, (bytes, bytearray))
+                    else (
+                        bytes(raw_nb) if isinstance(raw_nb, (bytes, bytearray)) else b""
+                    )
                 )
-            )
-            skip_openai_frontload = bool(
-                envelope.artifacts.get("ipynb")
-                and blank_template_chunking_requested(
-                    blank_bytes=blank_for_flags, cfg=app_cfg
+                has_student_artifacts = bool(
+                    envelope.artifacts
+                    and any(
+                        isinstance(v, (bytes, bytearray)) and len(bytes(v).strip()) > 0
+                        for v in envelope.artifacts.values()
+                    )
                 )
-            ) or bool(
-                app_cfg is not None
-                and multimodal_llm_triplet_three_source_enabled(app_cfg)
-                and bool(blank_for_flags.strip())
-                and bool(answer_key_plain.strip())
-                and has_student_artifacts
-            )
-            if (
-                app_cfg is not None
-                and multimodal_openai_trio_rag_frontload_enabled(app_cfg)
-                and not skip_openai_frontload
-            ):
-                fl_chunks, fl_audit = run_openai_trio_rag_frontload(
-                    envelope, app_cfg, answer_key_for_prompt
+                skip_openai_frontload = bool(
+                    envelope.artifacts.get("ipynb")
+                    and blank_template_chunking_requested(
+                        blank_bytes=blank_for_flags, cfg=app_cfg
+                    )
+                ) or bool(
+                    app_cfg is not None
+                    and multimodal_llm_triplet_three_source_enabled(app_cfg)
+                    and bool(blank_for_flags.strip())
+                    and bool(answer_key_plain.strip())
+                    and has_student_artifacts
                 )
-                openai_trio_rag_frontload_audit = dict(fl_audit or {})
-                if fl_chunks:
-                    chunks = fl_chunks
-                    chunker_mode = "openai_trio_rag_frontload"
-                    openai_frontload_ok = bool(fl_audit.get("ok"))
-                    art.append("openai_trio_rag_frontload", openai_trio_rag_frontload_audit)
+                if (
+                    app_cfg is not None
+                    and multimodal_openai_trio_rag_frontload_enabled(app_cfg)
+                    and not skip_openai_frontload
+                ):
+                    fl_chunks, fl_audit = run_openai_trio_rag_frontload(
+                        envelope, app_cfg, answer_key_for_prompt
+                    )
+                    openai_trio_rag_frontload_audit = dict(fl_audit or {})
+                    if fl_chunks:
+                        chunks = fl_chunks
+                        chunker_mode = "openai_trio_rag_frontload"
+                        openai_frontload_ok = bool(fl_audit.get("ok"))
+                        art.append("openai_trio_rag_frontload", openai_trio_rag_frontload_audit)
+                    else:
+                        chunks, chunker_mode = build_multimodal_grading_chunks(envelope, app_cfg)
+                        if openai_trio_rag_frontload_audit.get("error"):
+                            _log.warning(
+                                "OpenAI trio+RAG frontload skipped: %s",
+                                openai_trio_rag_frontload_audit.get("error"),
+                            )
                 else:
                     chunks, chunker_mode = build_multimodal_grading_chunks(envelope, app_cfg)
-                    if openai_trio_rag_frontload_audit.get("error"):
-                        _log.warning(
-                            "OpenAI trio+RAG frontload skipped: %s",
-                            openai_trio_rag_frontload_audit.get("error"),
-                        )
-            else:
-                chunks, chunker_mode = build_multimodal_grading_chunks(envelope, app_cfg)
             wf(
                 "chunk_and_embed",
                 chunker_mode=chunker_mode,
