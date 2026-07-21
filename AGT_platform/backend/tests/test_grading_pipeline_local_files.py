@@ -68,34 +68,34 @@ from pathlib import Path
 from types import SimpleNamespace
 
 from app.config import Config
-from app.grading.grading_units import build_grading_units_from_chunks
-from app.grading.modality_resolution import resolve_modality_profile
+from app.grading.chunking.grading_units import build_grading_units_from_chunks
+from app.grading.parsing.modality_resolution import resolve_modality_profile
 from app.grading.multimodal import (
     create_multimodal_pipeline_from_app_config,
     multimodal_assignment_to_grading_dict,
 )
-from app.grading.multimodal.generic_rubric_loader import (
+from app.grading.rubric_routing.generic_rubric_loader import (
     flat_rubric_rows_from_by_type,
     four_generic_rubric_files_present,
     load_four_generic_rubric_rows_by_type,
     merge_four_generics_to_sections_document,
 )
-from app.grading.multimodal.ingestion import ingest_raw_submission
-from app.grading.multimodal.schemas import RubricType
-from app.grading.answer_key_resolve import resolve_answer_key_plaintext
-from app.grading.output_schema import validate_grading_output
-from app.grading.multimodal.rubric_fallback import DEFAULT_STANDALONE_RUBRIC
+from app.grading.parsing.ingestion import ingest_raw_submission
+from app.grading.schemas import RubricType
+from app.grading.parsing.answer_key_resolve import resolve_answer_key_plaintext
+from app.grading.grading_output.output_schema import validate_grading_output
+from app.grading.rubric_routing.rubric_fallback import DEFAULT_STANDALONE_RUBRIC
 from app.grading.rag_embeddings import compute_submission_embedding, save_rag_embedding_bundle
-from app.grading.submission_chunks import build_submission_chunks, write_chunks_json
-from app.grading.submission_text import submission_text_from_artifacts
+from app.grading.chunking.submission_chunks import build_submission_chunks, write_chunks_json
+from app.grading.parsing.submission_text import submission_text_from_artifacts
 
 # Repo root: .../ai-automatic-grader-tool (contains AGT_platform/, assignments_to_grade/, ...)
 REPO_ROOT = Path(__file__).resolve().parents[3]
-ASSIGNMENTS_DIR = REPO_ROOT / "assignments_to_grade"
+ASSIGNMENTS_DIR = REPO_ROOT / "assignment_input" / "assignments_to_grade"
 RUBRIC_DIR = REPO_ROOT / "rubric"
 OUTPUT_DIR = REPO_ROOT / "grading_output"
 RAG_DIR = REPO_ROOT / "RAG_embedding"
-ANSWER_KEY_DIR = REPO_ROOT / "answer_key"
+ANSWER_KEY_DIR = REPO_ROOT / "assignment_input" / "answer_key"
 
 _GENERIC_BASENAMES = ("default", "generic", "rubric")
 
@@ -450,7 +450,7 @@ class TestGradingPipelineLocalFiles(unittest.TestCase):
     """Run the multimodal grading pipeline on local assignment + rubric fixtures."""
 
     def test_grade_local_assignments_write_json(self) -> None:
-        from app.grading.llm_router import build_multimodal_grading_clients
+        from app.llm.llm_router import build_multimodal_grading_clients
 
         groups = _assignment_groups()
         if not groups:

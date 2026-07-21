@@ -2,7 +2,7 @@
 
 import unittest
 
-from app.grading.output_schema import (
+from app.grading.grading_output.output_schema import (
     GradingOutputValidationError,
     coerce_grading_output_shape,
     validate_grading_output,

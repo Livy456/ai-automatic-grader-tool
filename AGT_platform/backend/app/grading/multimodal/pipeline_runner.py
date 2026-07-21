@@ -15,32 +15,33 @@ from pathlib import Path
 from typing import Any
 
 from app.config import Config
-from app.grading.modality_resolution import (
+from app.grading.parsing.modality_resolution import (
     augment_prompt_for_modality_profile,
     infer_modality_from_artifacts,
     normalize_modality_hint_for_multimodal,
     resolve_modality_profile,
 )
-from app.grading.output_schema import coerce_grading_output_shape, validate_grading_output
-from app.grading.submission_text import submission_text_from_artifacts
-from app.grading.tools import extract_text_from_pdf
+from app.grading.grading_output.output_schema import coerce_grading_output_shape, validate_grading_output
+from app.grading.parsing.submission_text import submission_text_from_artifacts
+from app.grading.parsing.tools import extract_text_from_pdf
 
-from .generic_rubric_loader import (
+from app.grading.rubric_routing.generic_rubric_loader import (
     _row_from_criterion,
     flat_rubric_rows_from_by_type,
     four_generic_rubric_files_present,
     load_four_generic_rubric_rows_by_type,
     merge_four_generics_to_sections_document,
 )
-from .grading_output import multimodal_assignment_to_grading_dict
-from .ingestion import ingest_raw_submission
+from app.grading.grading_output.grading_output import multimodal_assignment_to_grading_dict
+from app.grading.parsing.ingestion import ingest_raw_submission
+from app.grading.rubric_routing.rubric_fallback import DEFAULT_STANDALONE_RUBRIC
+
 from .pipeline import (
     create_multimodal_pipeline_from_app_config,
     default_answer_key_dir,
     default_rubric_dir,
 )
-from .rubric_fallback import DEFAULT_STANDALONE_RUBRIC
-from .schemas import MultimodalGradingConfig, RubricType
+from app.grading.schemas import MultimodalGradingConfig, RubricType
 
 _log = logging.getLogger(__name__)
 

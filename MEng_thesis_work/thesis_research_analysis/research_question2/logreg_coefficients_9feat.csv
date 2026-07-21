@@ -1,0 +1,10 @@
+feature,standardized_coef
+text__length_of_written_response,0.5461526764507775
+text__lexical_sophistication,0.28516872806108207
+oral_video__conceptual_explanation,0.25620961570477424
+Programming__code_length,0.21868543087382686
+text__sentiment,0.12873552152895834
+Programming__code_style_metric,-0.09914044567392444
+oral_video__fluency,0.0953506236424019
+oral_video__tempo,-0.08495681323686552
+Programming__test_coverage,0.03301049345953897

@@ -9,7 +9,7 @@ from celery import Celery
 from sqlalchemy.orm import selectinload
 
 from .config import Config
-from .extensions import SessionLocal, engine, init_db
+from .database.init_db import SessionLocal, engine, init_db
 from .grading.multimodal.course_multimodal_runner import (
     run_db_submission_multimodal_pipeline,
     run_standalone_multimodal_pipeline,
@@ -17,17 +17,19 @@ from .grading.multimodal.course_multimodal_runner import (
 from .grading.multimodal.pipeline_runner import (
     build_submission_artifacts,
     excerpt_attachment_bytes,
+    run_multimodal_grading,
 )
-from .models import (
+from .database.models import (
     AIScore,
     Assignment,
     AssignmentAttachment,
+    AssignmentUpload,
     StandaloneAIScore,
     StandaloneArtifact,
     StandaloneSubmission,
     Submission,
 )
-from .storage import get_object_bytes, minio_client
+from .database.storage import get_object_bytes, minio_client
 
 celery_app = Celery(__name__)
 
@@ -39,16 +41,27 @@ celery_app.conf.result_backend = _cfg.REDIS_URL
 celery_app.conf.task_routes = {
     "grade_submission": {"queue": "gpu"},
     "grade_standalone_submission": {"queue": "gpu"},
+    "grade_assignment_upload": {"queue": "gpu"},
 }
 # Bound prefetch so one worker does not hoard many large grading tasks in memory.
 celery_app.conf.worker_prefetch_multiplier = max(1, _cfg.CELERY_WORKER_PREFETCH)
+# Default worker process concurrency: 3 grading tasks in parallel (see Config docstring). A
+# worker started with an explicit ``--concurrency=N`` CLI flag still overrides this default.
+celery_app.conf.worker_concurrency = max(1, _cfg.CELERY_WORKER_CONCURRENCY)
 celery_app.conf.task_acks_late = True
 celery_app.conf.task_reject_on_worker_lost = True
 
 
-def init_celery(app):
-    celery_app.conf.broker_url = app.config["REDIS_URL"]
-    celery_app.conf.result_backend = app.config["REDIS_URL"]
+def init_celery(cfg: Config | None = None) -> None:
+    """
+    Re-apply broker/result-backend URLs from ``Config`` (or the module-level default).
+    ``celery_app`` is already configured at import time from ``Config()`` above; call this
+    at app-startup only if you need to refresh it against a differently-sourced ``Config``
+    instance (e.g. in tests).
+    """
+    c = cfg or Config()
+    celery_app.conf.broker_url = c.REDIS_URL
+    celery_app.conf.result_backend = c.REDIS_URL
 
 
 def _evidence_for_db(ev):
@@ -797,6 +810,84 @@ def grade_standalone_submission(self, submission_id: int):
             if s2 and s2.status == "grading":
                 s2.status = "error"
                 s2.updated_at = datetime.utcnow()
+                db.commit()
+        raise
+    finally:
+        db.close()
+
+
+@celery_app.task(name="grade_assignment_upload", bind=True, max_retries=2)
+def grade_assignment_upload(self, assignment_id: str):
+    """
+    GPU-queue grading for the public "upload one file, grade it" assignment-upload flow
+    (``POST /api/assignments/<id>/grade``). Idempotent, same pattern as grade_submission /
+    grade_standalone_submission: only one successful queued -> grading transition per
+    assignment; duplicate deliveries no-op after work started.
+    """
+    _ensure_db()
+    cfg = Config()
+    db = SessionLocal()
+    a = None
+    try:
+        a = (
+            db.query(AssignmentUpload)
+            .filter(AssignmentUpload.id == assignment_id)
+            .with_for_update()
+            .first()
+        )
+        if not a:
+            return
+        if a.status in ("grading", "graded"):
+            return
+        if a.status == "error":
+            return
+        if a.status != "queued":
+            # e.g. still uploading — do not grade
+            return
+
+        a.status = "grading"
+        a.updated_at = datetime.utcnow()
+        db.commit()
+
+        raw = get_object_bytes(cfg, a.storage_uri)
+        stem = Path(a.filename or "upload").stem
+        artifacts = build_submission_artifacts([(a.filename or "upload", raw)])
+        if not artifacts:
+            raise ValueError(
+                f"Unsupported file type for multimodal grading: {a.filename!r}"
+            )
+
+        assignment = SimpleNamespace(
+            modality=None,
+            rubric=None,
+            title=stem,
+            description=f"Assignment upload: {a.filename}",
+        )
+        result = run_multimodal_grading(
+            cfg,
+            assignment=assignment,
+            artifacts_bytes=artifacts,
+            assignment_id=str(a.id),
+            student_id="assignment_upload",
+            rubric_column=None,
+            assignment_stem=stem,
+            validate_output=True,
+        )
+        overall = result.get("overall") or {}
+        score = overall.get("score")
+        a.suggested_grade = float(score) if score is not None else None
+        a.feedback = str(overall.get("summary") or "").strip() or None
+        a.status = "graded"
+        a.updated_at = datetime.utcnow()
+        db.commit()
+    except Exception as exc:
+        db.rollback()
+        if a is not None:
+            a2 = db.query(AssignmentUpload).filter(AssignmentUpload.id == assignment_id).first()
+            if a2 and a2.status == "grading":
+                a2.status = "error"
+                a2.feedback = f"Grading failed: {type(exc).__name__}: {exc}"
+                a2.updated_at = datetime.utcnow()
                 db.commit()
         raise
     finally:

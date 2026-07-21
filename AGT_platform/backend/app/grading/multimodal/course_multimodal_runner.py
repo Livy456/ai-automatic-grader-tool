@@ -9,8 +9,9 @@ from __future__ import annotations
 
 from typing import Any
 
+from app.grading.rubric_routing.rubric_fallback import DEFAULT_STANDALONE_RUBRIC
+
 from .pipeline_runner import run_multimodal_grading, rubric_column_to_by_type_and_flat
-from .rubric_fallback import DEFAULT_STANDALONE_RUBRIC
 
 __all__ = [
     "DEFAULT_STANDALONE_RUBRIC",
@@ -66,7 +67,7 @@ def run_standalone_multimodal_pipeline(
     """Standalone autograder: default structured rubric; prose rubric/AK in the prompt."""
     from types import SimpleNamespace
 
-    from app.grading.modality_resolution import infer_modality_from_artifacts
+    from app.grading.parsing.modality_resolution import infer_modality_from_artifacts
 
     merged_rubric_note_parts: list[str] = []
     if rubric_text and rubric_text.strip():

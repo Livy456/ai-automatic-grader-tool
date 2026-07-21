@@ -1,3 +1,5 @@
+# REVIEW THIS FILE LATER!! Need to make it more readable and more efficient.
+
 """
 Build embedding vectors for submission text (SentenceTransformers, OpenAI, or hash fallback).
 """
@@ -33,6 +35,7 @@ def deterministic_hash_embedding(text: str, dimensions: int = 256) -> list[float
     filled = 0
     counter = 0
     scale = 1.0 / 65535.0
+
     while filled < dimensions:
         block = hashlib.sha256(seed + counter.to_bytes(4, "big")).digest()
         counter += 1
@@ -40,6 +43,7 @@ def deterministic_hash_embedding(text: str, dimensions: int = 256) -> list[float
         u16 = np.frombuffer(block, dtype=np.uint16, count=need)
         out[filled : filled + need] = u16.astype(np.float64) * scale - 0.5
         filled += need
+
     return out.tolist()
 
 

@@ -5,7 +5,7 @@ from __future__ import annotations
 import math
 import unittest
 
-from app.grading.multimodal.semantic_confidence import (
+from app.grading.confidence_calculation.semantic_confidence import (
     aggregate_assignment_confidence,
     estimate_cluster_distribution,
     normalize_entropy_to_confidence,

@@ -5,19 +5,26 @@ plan** (``custom_rubric/`` JSON: one generic type + per-question criteria, reuse
 rubric routing → LLM grading → entropy → aggregation → output.
 
 Callers supply ``rubric_rows_by_type`` (e.g. from ``rubric/default.json`` or
-:func:`app.grading.multimodal.generic_rubric_loader.load_four_generic_rubric_rows_by_type`)
+:func:`app.grading.rubric_routing.generic_rubric_loader.load_four_generic_rubric_rows_by_type`)
 so routing plus custom rubric can choose among scaffolded, free response, EDA, and oral templates.
 
-Chunking uses :func:`app.grading.multimodal.rag_embeddings.build_multimodal_grading_chunks`
+**Chunking (tried in order):** first
+:func:`app.grading.chunking.claude_parsing_agent.try_build_claude_parsing_agent_chunks` — a
+Pydantic-validated Claude agent that decomposes the submission directly into isolated
+``(question, student_response, answer)`` triples in one call (``MULTIMODAL_CLAUDE_PARSING_AGENT``,
+default **auto** = on whenever ``ANTHROPIC_API_KEY`` is set). This runs for both this pipeline's
+callers — course multimodal grading *and* the standalone autograder — since both share this one
+``run()``. When it is disabled/unavailable/fails (returns ``None``), chunking falls back to
+:func:`app.grading.chunking.rag_embeddings.build_multimodal_grading_chunks`
 (notebook cell-order, optional LLM QA on PDF-reflowed text, structured Q/A chunking), unless
 ``OPENAI_API_KEY`` is set and ``MULTIMODAL_OPENAI_TRIO_RAG_FRONTLOAD`` is not ``off`` (default
 **auto** = on) — then
-:func:`app.grading.multimodal.openai_trio_rag_frontload.run_openai_trio_rag_frontload`
+:func:`app.grading.chunking.openai_trio_rag_frontload.run_openai_trio_rag_frontload`
 runs one or more chat calls (overlapping windows when the submission is long) with
 ``OPENAI_TRIO_RAG_CHAT_MODEL`` (default ``gpt-5.4-nano``) to emit
 trio JSON plus OpenAI **Embeddings** for each unit (``OPENAI_TRIO_RAG_EMBEDDING_MODEL``), and
 trio relabeling via ``MULTIMODAL_LLM_TRIO_CHUNKING`` is skipped. Otherwise optional
-:func:`app.grading.multimodal.rag_embeddings.refine_chunks_trio_with_structure_llm` uses **Claude**
+:func:`app.grading.chunking.rag_embeddings.refine_chunks_trio_with_structure_llm` uses **Claude**
 (Anthropic) when configured, else **OpenAI**, for trio fields. Per-chunk
 **grading** uses **OpenAI only** (``OPENAI_MULTIMODAL_GRADING_MODEL`` / ``OPENAI_API_KEY``).
 RAG embeddings otherwise use
@@ -31,12 +38,12 @@ before chunking so plain units can reuse one document-span vector when safe (aud
 ``multimodal_rag_prewindow_plain_audit`` on ``modality_hints``).
 
 **Answer key:** if ``modality_hints["answer_key_plaintext"]`` is empty, the pipeline calls
-:func:`app.grading.answer_key_resolve.resolve_answer_key_plaintext` against
+:func:`app.grading.parsing.answer_key_resolve.resolve_answer_key_plaintext` against
 ``modality_hints["answer_key_dir"]`` or the repository ``answer_key/`` folder.
 
 **Blank template (optional):** the pipeline resolves a matching instructor **template file**
 (``.ipynb``, ``.pdf``, ``.docx``, ``.py``, ``.txt``, ``.md``, ``.csv``, ``.xlsx``) via
-:func:`app.grading.answer_key_resolve.resolve_blank_assignment_template` under
+:func:`app.grading.parsing.answer_key_resolve.resolve_blank_assignment_template` under
 ``modality_hints["blank_assignments_dir"]`` or ``blank_assignments/``, storing bytes in
 ``modality_hints["blank_assignment_template_bytes"]`` and the suffix in
 ``blank_assignment_template_suffix``. When the template is ``.ipynb``, the same bytes are also
@@ -49,7 +56,7 @@ OpenAI trio+RAG frontload is skipped when blank-template chunking is active **or
 :mod:`llm_triplet_three_source` can own trios (single structured LLM call over blank + student + key).
 
 **Chunk cache:** set ``modality_hints["multimodal_chunk_cache_path"]`` to a JSON file produced
-by :func:`app.grading.multimodal.chunk_cache.save_grading_chunks_cache` to skip rebuilding
+by :func:`app.grading.chunking.chunk_cache.save_grading_chunks_cache` to skip rebuilding
 chunks and (when embeddings are present in the file) skip per-unit embedding calls.
 
 **Trio export:** after chunking, the pipeline writes ``{assignment_id}_trio_chunks.json`` under
@@ -65,7 +72,7 @@ The legacy ``assignment_chunking_output_dir`` hint still overrides the directory
 
 **Placeholder strip:** after chunking (and optional trio LLM), boilerplate lines such as
 ``# write code for problem 1.1 here`` / ``# your code here`` are removed from chunk text and
-trio fields (see :func:`app.grading.multimodal.notebook_chunker.sanitize_grading_chunks_placeholders`)
+trio fields (see :func:`app.grading.chunking.notebook_chunker.sanitize_grading_chunks_placeholders`)
 before answer-key alignment and grading.
 
 **Agentic trace:** ordered phases are stored on the result as
@@ -78,6 +85,7 @@ often cause provider timeouts.
 
 from __future__ import annotations
 
+import asyncio
 import json
 import logging
 import os
@@ -88,46 +96,48 @@ from pathlib import Path
 from typing import Any, Callable
 
 from app.config import Config
-from app.grading.answer_key_resolve import resolve_answer_key_plaintext
-from app.grading.answer_key_resolve import resolve_blank_assignment_template
-from app.grading.llm_router import multimodal_structure_llm_trace_label
-from app.grading.dataset_resolve import attach_dataset_context_for_notebook
+from app.grading.parsing.answer_key_resolve import resolve_answer_key_plaintext
+from app.grading.parsing.answer_key_resolve import resolve_blank_assignment_template
+from app.llm.llm_router import multimodal_structure_llm_trace_label
+from app.grading.parsing.dataset_resolve import attach_dataset_context_for_notebook
 
-from .aggregator import aggregate_assignment, aggregate_chunk_samples
-from .chunk_cache import (
+from app.grading.chunking.chunk_cache import (
     chunks_have_unit_embeddings,
     load_grading_chunks_cache,
     save_grading_chunks_cache,
 )
-from .custom_rubric_export import apply_custom_rubric_plan_to_chunks
-from .ingestion import IngestionEnvelope, ingest_raw_submission
+from app.grading.rubric_routing.custom_rubric_export import apply_custom_rubric_plan_to_chunks
+from app.grading.parsing.ingestion import IngestionEnvelope, ingest_raw_submission
+from app.grading.grading_output.parser import parse_chunk_grade_json
+from app.grading.rubric_routing.rubric_router import route_rubric
+from app.grading.confidence_calculation.semantic_confidence import (
+    cluster_assignment,
+    summarize_chunk_confidence_from_counts,
+)
+from app.grading.chunking.notebook_chunker import sanitize_grading_chunks_placeholders
+from app.grading.chunking.llm_triplet_three_source import multimodal_llm_triplet_three_source_enabled
+from app.grading.chunking.template_aligned_notebook_chunks import blank_template_chunking_requested
+from app.grading.chunking.claude_parsing_agent import try_build_claude_parsing_agent_chunks
+
+from .aggregator import aggregate_assignment, aggregate_chunk_samples
 from .model_runner import ChunkModelRunner, MultiModelChunkRunner
-from .parser import parse_chunk_grade_json
-from .prompts_chunk import (
+from app.llm.prompts_chunk import (
     build_chunk_grading_prompt,
     chunk_multimodal_grading_system_prompt,
 )
 from .review_router import evaluate_chunk_review
-from .rubric_router import route_rubric
-from .semantic_confidence import (
-    cluster_assignment,
-    summarize_chunk_confidence_from_counts,
-)
-from .notebook_chunker import sanitize_grading_chunks_placeholders
-from .openai_trio_rag_frontload import (
+from app.grading.chunking.openai_trio_rag_frontload import (
     multimodal_openai_trio_rag_frontload_enabled,
     run_openai_trio_rag_frontload,
 )
-from .llm_triplet_three_source import multimodal_llm_triplet_three_source_enabled
-from .template_aligned_notebook_chunks import blank_template_chunking_requested
-from .rag_embeddings import (
+from app.grading.chunking.rag_embeddings import (
     build_multimodal_grading_chunks,
     enrich_chunks_with_rag_embeddings,
     multimodal_llm_trio_chunking_enabled,
     multimodal_rag_embed_units_enabled,
     refine_chunks_trio_with_structure_llm,
 )
-from .schemas import (
+from app.grading.schemas import (
     AssignmentGradeResult,
     ChunkGradeOutcome,
     GradingChunk,
@@ -140,8 +150,8 @@ _log = logging.getLogger(__name__)
 
 
 def default_answer_key_dir() -> Path:
-    """``…/ai-automatic-grader-tool/answer_key`` (repo root)."""
-    return Path(__file__).resolve().parents[5] / "answer_key"
+    """``…/ai-automatic-grader-tool/assignment_input/answer_key`` (repo root)."""
+    return Path(__file__).resolve().parents[5] / "assignment_input" / "answer_key"
 
 
 def default_rubric_dir() -> Path:
@@ -160,13 +170,33 @@ def default_rag_embedding_dir() -> Path:
 
 
 def default_blank_assignments_dir() -> Path:
-    """``…/ai-automatic-grader-tool/blank_assignments`` (repo root)."""
-    return Path(__file__).resolve().parents[5] / "blank_assignments"
+    """``…/ai-automatic-grader-tool/assignment_input/blank_assignments`` (repo root)."""
+    return Path(__file__).resolve().parents[5] / "assignment_input" / "blank_assignments"
 
 
 def default_assignment_chunking_dir() -> Path:
     """``…/ai-automatic-grader-tool/assignment_chunking`` (repo root)."""
     return Path(__file__).resolve().parents[5] / "assignment_chunking"
+
+
+def _chunk_student_response_text(chunk: GradingChunk) -> str:
+    """
+    Best-effort student-response text for evidence backfill (see
+    :func:`app.grading.multimodal.aggregator._backfill_evidence_from_student_response`).
+    Mirrors the same trio → response_preview → extracted_text fallback chain used when
+    building the ``student_response`` shown to graders elsewhere in this codebase (e.g.
+    ``app.tasks._student_response_from_chunking_row``).
+    """
+    ev = chunk.evidence or {}
+    trio = ev.get("trio")
+    if isinstance(trio, dict):
+        sr = str(trio.get("student_response") or "").strip()
+        if sr:
+            return sr
+    rp = str(ev.get("response_preview") or "").strip()
+    if rp:
+        return rp
+    return str(chunk.extracted_text or "").strip()
 
 
 def _safe_trio_export_stem(assignment_id: str) -> str:
@@ -237,7 +267,7 @@ def _assignment_chunking_export_payload(
     envelope: IngestionEnvelope,
 ) -> dict[str, Any]:
     """Serializable chunking audit (embeddings stripped from ``evidence``)."""
-    from .rag_embeddings import (
+    from app.grading.chunking.rag_embeddings import (
         ASSIGNMENT_PARSING_SYSTEM_PROMPT,
         sanitize_evidence_for_grading_prompt,
     )
@@ -338,6 +368,180 @@ class MultimodalGradingPipeline:
             return self.runner.app_config
         return None
 
+    async def _grade_chunk_llm_async(
+        self,
+        chunk: GradingChunk,
+        *,
+        answer_key_for_prompt: str,
+        dataset_plain: str,
+        semaphore: asyncio.Semaphore,
+    ) -> tuple[ChunkGradeOutcome, dict[str, Any]]:
+        """
+        Build the grading prompt, run k model samples, parse + cluster, aggregate, and
+        evaluate review status for one chunk. Assumes ``route_rubric`` has already run for
+        ``chunk``. Only reads shared, read-only pipeline state (``self.config``,
+        ``self.runner``) and returns everything the caller needs rather than mutating shared
+        audit/result lists directly, so this is safe to run concurrently for many chunks from
+        :meth:`run`'s ``asyncio.gather`` dispatch. ``semaphore`` bounds how many LLM calls are
+        actually in flight at once across the *whole* grading run (see
+        :meth:`_grade_all_chunks_async`), not just this chunk's own samples.
+
+        Returns ``(outcome, grading_audit_fields)``.
+        """
+        user_prompt = build_chunk_grading_prompt(
+            chunk,
+            task_description=self.task_description,
+            answer_key_text=answer_key_for_prompt,
+            dataset_context_text=dataset_plain,
+        )
+        raw_samples = await self.runner.run_chunk_samples_async(
+            chunk,
+            system_prompt=chunk_multimodal_grading_system_prompt(chunk),
+            user_prompt=user_prompt,
+            semaphore=semaphore,
+        )
+
+        parsed_samples: list[SampledChunkGrade] = []
+        cluster_counts: Counter[str] = Counter()
+
+        rubric_mx: dict[str, float] = {}
+        for rr in chunk.rubric_rows or []:
+            rn = str(rr.get("name") or "").strip()
+            if rn:
+                try:
+                    rubric_mx[rn] = float(rr.get("max_points") or rr.get("max_score") or 0)
+                except (TypeError, ValueError):
+                    pass
+
+        strong = bool(self.config.confidence_clustering_strong_pattern)
+        for s in raw_samples:
+            parsed, warns = parse_chunk_grade_json(
+                s.raw_text,
+                rubric_max_points=rubric_mx,
+                rubric_rows=list(chunk.rubric_rows or []),
+                invalid_raw_score_policy=str(
+                    getattr(self.config, "raw_score_invalid_policy", "regenerate")
+                    or "regenerate"
+                ),
+            )
+            parse_ok = parsed is not None
+            pw = list(warns)
+            ck: str | None = cluster_assignment(parsed, strong_pattern=strong)
+            if ck is not None:
+                cluster_counts[ck] += 1
+            parsed_samples.append(
+                SampledChunkGrade(
+                    model_id=s.model_id,
+                    sample_index=s.sample_index,
+                    raw_text=s.raw_text,
+                    parsed=parsed,
+                    parse_ok=parse_ok,
+                    parse_warnings=pw,
+                    cluster_key=ck,
+                )
+            )
+
+        co = summarize_chunk_confidence_from_counts(dict(cluster_counts))
+        rubric_fb = [
+            str(rr.get("name") or "").strip()
+            for rr in (chunk.rubric_rows or [])
+            if str(rr.get("name") or "").strip()
+        ]
+        outcome = aggregate_chunk_samples(
+            chunk.chunk_id,
+            parsed_samples,
+            cluster_counts=dict(cluster_counts),
+            cfg=self.config,
+            rubric_fallback_names=rubric_fb or None,
+            chunk_student_response=_chunk_student_response_text(chunk),
+        )
+        sample_details = [
+            {
+                "model_id": s.model_id,
+                "sample_index": s.sample_index,
+                "parse_ok": s.parse_ok,
+                "normalized_score": s.parsed.normalized_score if s.parsed else None,
+                "cluster_key": s.cluster_key,
+            }
+            for s in parsed_samples
+        ]
+        outcome.stage_artifacts = {
+            "system_prompt": chunk_multimodal_grading_system_prompt(chunk),
+            "user_prompt": user_prompt,
+            "raw_sample_count": len(raw_samples),
+            "confidence_trace": {
+                "clustering_strong_pattern": strong,
+                "cluster_counts": dict(cluster_counts),
+                "p_hat": co["p_hat"],
+                "semantic_entropy_nats": co["semantic_entropy_nats"],
+                "entropy_max_reference_nats": co["entropy_max_reference_nats"],
+                "ai_confidence": co["ai_confidence"],
+                "n_observed_clusters": co["n_observed_clusters"],
+                "n_valid_samples": co["n_valid_samples"],
+                "samples": sample_details,
+            },
+        }
+        outcome = evaluate_chunk_review(outcome, parsed_samples, self.config)
+        trace = outcome.stage_artifacts.get("confidence_trace")
+        if isinstance(trace, dict):
+            trace["review_status"] = outcome.review_status.value
+            trace["review_reasons"] = list(outcome.review_reasons)
+        model_ids = sorted({s.model_id for s in raw_samples})
+        meta_spm: int | None = None
+        if isinstance(self.runner, MultiModelChunkRunner):
+            meta_spm = int(
+                getattr(
+                    self.runner.app_config,
+                    "MULTIMODAL_SAMPLES_PER_MODEL",
+                    5,
+                )
+            )
+        outcome.stage_artifacts["model_ids"] = model_ids
+        outcome.stage_artifacts["samples_per_model"] = meta_spm
+
+        grading_audit = {
+            "chunk_id": chunk.chunk_id,
+            "semantic_entropy": co["semantic_entropy_nats"],
+            "ai_confidence": co["ai_confidence"],
+            "entropy_max_reference_nats": co["entropy_max_reference_nats"],
+            "cluster_counts": dict(cluster_counts),
+            "review": outcome.review_status.value,
+            "model_ids": model_ids,
+            "total_samples": len(raw_samples),
+        }
+        return outcome, grading_audit
+
+    async def _grade_all_chunks_async(
+        self,
+        chunks: list[GradingChunk],
+        *,
+        concurrency: int,
+        answer_key_for_prompt: str,
+        dataset_plain: str,
+    ) -> list[tuple[ChunkGradeOutcome, dict[str, Any]]]:
+        """
+        Grade every chunk concurrently. All chunks' coroutines are scheduled together, but a
+        single ``asyncio.Semaphore`` shared across every chunk (and every sample within each
+        chunk) caps the number of LLM calls actually in flight at once for this whole grading
+        run to ``concurrency`` — not per chunk. ``asyncio.gather`` returns results in the same
+        order as ``chunks``, so callers get deterministic ordering regardless of which chunk's
+        LLM calls happen to finish first.
+        """
+        semaphore = asyncio.Semaphore(max(1, concurrency))
+        return list(
+            await asyncio.gather(
+                *[
+                    self._grade_chunk_llm_async(
+                        chunk,
+                        answer_key_for_prompt=answer_key_for_prompt,
+                        dataset_plain=dataset_plain,
+                        semaphore=semaphore,
+                    )
+                    for chunk in chunks
+                ]
+            )
+        )
+
     def run(
         self,
         envelope: IngestionEnvelope,
@@ -437,7 +641,7 @@ class MultimodalGradingPipeline:
         app_cfg = self._resolve_app_config()
 
         if app_cfg is not None:
-            from .rag_embeddings import precompute_document_rag_prewindow_for_pipeline
+            from app.grading.chunking.rag_embeddings import precompute_document_rag_prewindow_for_pipeline
 
             precompute_document_rag_prewindow_for_pipeline(envelope, app_cfg, wf)
 
@@ -470,60 +674,79 @@ class MultimodalGradingPipeline:
                     cache_read,
                 )
             if app_cfg is not None:
-                from .audio_half_split import maybe_prepare_audio_half_split
+                from app.grading.parsing.audio_half_split import maybe_prepare_audio_half_split
 
                 maybe_prepare_audio_half_split(envelope, app_cfg)
-            raw_tpl = hints.get("blank_assignment_template_bytes")
-            raw_nb = hints.get("blank_assignment_ipynb_bytes")
-            blank_for_flags = (
-                bytes(raw_tpl)
-                if isinstance(raw_tpl, (bytes, bytearray))
-                else (
-                    bytes(raw_nb) if isinstance(raw_nb, (bytes, bytearray)) else b""
+
+            # Claude parsing agent (Pydantic-validated question/response/answer decomposition)
+            # is tried first, ahead of the OpenAI trio frontload and every heuristic chunker
+            # below — both this pipeline's callers (course multimodal grading *and* the
+            # standalone autograder) share this one ``run()``, so enabling it here covers both.
+            # Isolating one question from the next (and from instructor test/setup code) is
+            # Claude's job here, not a set of cell-classification regexes, so it returns ``None``
+            # (never raises) on any failure and every existing fallback below still applies.
+            claude_agent_result = (
+                try_build_claude_parsing_agent_chunks(
+                    envelope, app_cfg, answer_key_plaintext=answer_key_for_prompt
                 )
+                if app_cfg is not None
+                else None
             )
-            has_student_artifacts = bool(
-                envelope.artifacts
-                and any(
-                    isinstance(v, (bytes, bytearray)) and len(bytes(v).strip()) > 0
-                    for v in envelope.artifacts.values()
+            if claude_agent_result is not None:
+                chunks, chunker_mode = claude_agent_result
+                art.append("claude_parsing_agent", {"n_chunks": len(chunks)})
+            else:
+                raw_tpl = hints.get("blank_assignment_template_bytes")
+                raw_nb = hints.get("blank_assignment_ipynb_bytes")
+                blank_for_flags = (
+                    bytes(raw_tpl)
+                    if isinstance(raw_tpl, (bytes, bytearray))
+                    else (
+                        bytes(raw_nb) if isinstance(raw_nb, (bytes, bytearray)) else b""
+                    )
                 )
-            )
-            skip_openai_frontload = bool(
-                envelope.artifacts.get("ipynb")
-                and blank_template_chunking_requested(
-                    blank_bytes=blank_for_flags, cfg=app_cfg
+                has_student_artifacts = bool(
+                    envelope.artifacts
+                    and any(
+                        isinstance(v, (bytes, bytearray)) and len(bytes(v).strip()) > 0
+                        for v in envelope.artifacts.values()
+                    )
                 )
-            ) or bool(
-                app_cfg is not None
-                and multimodal_llm_triplet_three_source_enabled(app_cfg)
-                and bool(blank_for_flags.strip())
-                and bool(answer_key_plain.strip())
-                and has_student_artifacts
-            )
-            if (
-                app_cfg is not None
-                and multimodal_openai_trio_rag_frontload_enabled(app_cfg)
-                and not skip_openai_frontload
-            ):
-                fl_chunks, fl_audit = run_openai_trio_rag_frontload(
-                    envelope, app_cfg, answer_key_for_prompt
+                skip_openai_frontload = bool(
+                    envelope.artifacts.get("ipynb")
+                    and blank_template_chunking_requested(
+                        blank_bytes=blank_for_flags, cfg=app_cfg
+                    )
+                ) or bool(
+                    app_cfg is not None
+                    and multimodal_llm_triplet_three_source_enabled(app_cfg)
+                    and bool(blank_for_flags.strip())
+                    and bool(answer_key_plain.strip())
+                    and has_student_artifacts
                 )
-                openai_trio_rag_frontload_audit = dict(fl_audit or {})
-                if fl_chunks:
-                    chunks = fl_chunks
-                    chunker_mode = "openai_trio_rag_frontload"
-                    openai_frontload_ok = bool(fl_audit.get("ok"))
-                    art.append("openai_trio_rag_frontload", openai_trio_rag_frontload_audit)
+                if (
+                    app_cfg is not None
+                    and multimodal_openai_trio_rag_frontload_enabled(app_cfg)
+                    and not skip_openai_frontload
+                ):
+                    fl_chunks, fl_audit = run_openai_trio_rag_frontload(
+                        envelope, app_cfg, answer_key_for_prompt
+                    )
+                    openai_trio_rag_frontload_audit = dict(fl_audit or {})
+                    if fl_chunks:
+                        chunks = fl_chunks
+                        chunker_mode = "openai_trio_rag_frontload"
+                        openai_frontload_ok = bool(fl_audit.get("ok"))
+                        art.append("openai_trio_rag_frontload", openai_trio_rag_frontload_audit)
+                    else:
+                        chunks, chunker_mode = build_multimodal_grading_chunks(envelope, app_cfg)
+                        if openai_trio_rag_frontload_audit.get("error"):
+                            _log.warning(
+                                "OpenAI trio+RAG frontload skipped: %s",
+                                openai_trio_rag_frontload_audit.get("error"),
+                            )
                 else:
                     chunks, chunker_mode = build_multimodal_grading_chunks(envelope, app_cfg)
-                    if openai_trio_rag_frontload_audit.get("error"):
-                        _log.warning(
-                            "OpenAI trio+RAG frontload skipped: %s",
-                            openai_trio_rag_frontload_audit.get("error"),
-                        )
-            else:
-                chunks, chunker_mode = build_multimodal_grading_chunks(envelope, app_cfg)
             wf(
                 "chunk_and_embed",
                 chunker_mode=chunker_mode,
@@ -572,7 +795,7 @@ class MultimodalGradingPipeline:
             )
 
         if app_cfg is not None and answer_key_plain:
-            from .answer_key_chunk_enrich import (
+            from app.grading.chunking.answer_key_chunk_enrich import (
                 embed_full_answer_key_for_audit,
                 enrich_chunks_with_per_question_answer_key,
             )
@@ -659,7 +882,9 @@ class MultimodalGradingPipeline:
             n_chunks=len(chunks),
         )
 
-        chunk_outcomes: list[ChunkGradeOutcome] = []
+        # Rubric routing is cheap/local (no LLM calls) and mutates each chunk in place, so it
+        # stays a plain sequential pass — this also keeps "rubric_routing" audit entries in a
+        # deterministic, chunk order.
         for chunk in chunks:
             route_rubric(
                 chunk,
@@ -677,131 +902,30 @@ class MultimodalGradingPipeline:
                 },
             )
 
-            user_prompt = build_chunk_grading_prompt(
-                chunk,
-                task_description=self.task_description,
-                answer_key_text=answer_key_for_prompt,
-                dataset_context_text=dataset_plain,
+        # The LLM-bound grading step (one or more chat calls per chunk) dominates end-to-end
+        # grading latency, so chunks are graded concurrently through an async engine
+        # (AsyncOpenAI + asyncio.gather) rather than one blocking call at a time. ``run()``
+        # stays a plain sync method — the asyncio event loop is created and torn down just for
+        # this step via ``asyncio.run`` — so every existing sync caller (Celery tasks, tests,
+        # scripts) keeps calling ``run()`` exactly as before. Do not call ``run()`` from inside
+        # an already-running event loop (e.g. an ``async def`` request handler); dispatch
+        # grading through Celery instead, as the FastAPI routes do.
+        concurrency = max(
+            1,
+            int(getattr(embed_cfg, "MULTIMODAL_LLM_CALL_CONCURRENCY", 3) or 3),
+        )
+        graded = asyncio.run(
+            self._grade_all_chunks_async(
+                chunks,
+                concurrency=concurrency,
+                answer_key_for_prompt=answer_key_for_prompt,
+                dataset_plain=dataset_plain,
             )
-            raw_samples = self.runner.run_chunk_samples(
-                chunk,
-                system_prompt=chunk_multimodal_grading_system_prompt(chunk),
-                user_prompt=user_prompt,
-            )
+        )
 
-            parsed_samples: list[SampledChunkGrade] = []
-            cluster_counts: Counter[str] = Counter()
-
-            rubric_mx: dict[str, float] = {}
-            for rr in chunk.rubric_rows or []:
-                rn = str(rr.get("name") or "").strip()
-                if rn:
-                    try:
-                        rubric_mx[rn] = float(rr.get("max_points") or rr.get("max_score") or 0)
-                    except (TypeError, ValueError):
-                        pass
-
-            strong = bool(self.config.confidence_clustering_strong_pattern)
-            for s in raw_samples:
-                parsed, warns = parse_chunk_grade_json(
-                    s.raw_text,
-                    rubric_max_points=rubric_mx,
-                    rubric_rows=list(chunk.rubric_rows or []),
-                    invalid_raw_score_policy=str(
-                        getattr(self.config, "raw_score_invalid_policy", "regenerate")
-                        or "regenerate"
-                    ),
-                )
-                parse_ok = parsed is not None
-                pw = list(warns)
-                ck: str | None = cluster_assignment(
-                    parsed, strong_pattern=strong
-                )
-                if ck is not None:
-                    cluster_counts[ck] += 1
-                parsed_samples.append(
-                    SampledChunkGrade(
-                        model_id=s.model_id,
-                        sample_index=s.sample_index,
-                        raw_text=s.raw_text,
-                        parsed=parsed,
-                        parse_ok=parse_ok,
-                        parse_warnings=pw,
-                        cluster_key=ck,
-                    )
-                )
-
-            co = summarize_chunk_confidence_from_counts(dict(cluster_counts))
-            rubric_fb = [
-                str(rr.get("name") or "").strip()
-                for rr in (chunk.rubric_rows or [])
-                if str(rr.get("name") or "").strip()
-            ]
-            outcome = aggregate_chunk_samples(
-                chunk.chunk_id,
-                parsed_samples,
-                cluster_counts=dict(cluster_counts),
-                cfg=self.config,
-                rubric_fallback_names=rubric_fb or None,
-            )
-            sample_details = [
-                {
-                    "model_id": s.model_id,
-                    "sample_index": s.sample_index,
-                    "parse_ok": s.parse_ok,
-                    "normalized_score": s.parsed.normalized_score
-                    if s.parsed
-                    else None,
-                    "cluster_key": s.cluster_key,
-                }
-                for s in parsed_samples
-            ]
-            outcome.stage_artifacts = {
-                "system_prompt": chunk_multimodal_grading_system_prompt(chunk),
-                "user_prompt": user_prompt,
-                "raw_sample_count": len(raw_samples),
-                "confidence_trace": {
-                    "clustering_strong_pattern": strong,
-                    "cluster_counts": dict(cluster_counts),
-                    "p_hat": co["p_hat"],
-                    "semantic_entropy_nats": co["semantic_entropy_nats"],
-                    "entropy_max_reference_nats": co["entropy_max_reference_nats"],
-                    "ai_confidence": co["ai_confidence"],
-                    "n_observed_clusters": co["n_observed_clusters"],
-                    "n_valid_samples": co["n_valid_samples"],
-                    "samples": sample_details,
-                },
-            }
-            outcome = evaluate_chunk_review(outcome, parsed_samples, self.config)
-            trace = outcome.stage_artifacts.get("confidence_trace")
-            if isinstance(trace, dict):
-                trace["review_status"] = outcome.review_status.value
-                trace["review_reasons"] = list(outcome.review_reasons)
-            model_ids = sorted({s.model_id for s in raw_samples})
-            meta_spm: int | None = None
-            if isinstance(self.runner, MultiModelChunkRunner):
-                meta_spm = int(
-                    getattr(
-                        self.runner.app_config,
-                        "MULTIMODAL_SAMPLES_PER_MODEL",
-                        5,
-                    )
-                )
-            outcome.stage_artifacts["model_ids"] = model_ids
-            outcome.stage_artifacts["samples_per_model"] = meta_spm
-            art.append(
-                "grading",
-                {
-                    "chunk_id": chunk.chunk_id,
-                    "semantic_entropy": co["semantic_entropy_nats"],
-                    "ai_confidence": co["ai_confidence"],
-                    "entropy_max_reference_nats": co["entropy_max_reference_nats"],
-                    "cluster_counts": dict(cluster_counts),
-                    "review": outcome.review_status.value,
-                    "model_ids": model_ids,
-                    "total_samples": len(raw_samples),
-                },
-            )
+        chunk_outcomes: list[ChunkGradeOutcome] = []
+        for outcome, grading_audit in graded:
+            art.append("grading", grading_audit)
             chunk_outcomes.append(outcome)
 
         assign = aggregate_assignment(
@@ -849,7 +973,7 @@ def create_multimodal_pipeline_from_app_config(
     """
     Build :class:`MultimodalGradingPipeline` with :class:`MultiModelChunkRunner`.
 
-    Uses :func:`~app.grading.llm_router.build_multimodal_grading_clients` (**OpenAI only** for
+    Uses :func:`~app.llm.llm_router.build_multimodal_grading_clients` (**OpenAI only** for
     per-chunk grading via ``OPENAI_MULTIMODAL_GRADING_MODEL``), plus optional
     ``GRADING_MODEL_2`` / ``GRADING_MODEL_3`` (``openai:`` specs only),
     ``MULTIMODAL_SAMPLES_PER_MODEL`` and ``GRADING_SAMPLE_TEMPERATURE`` for stochastic
