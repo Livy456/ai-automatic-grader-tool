@@ -107,7 +107,7 @@ env.production.gpu
 /multi_llm_semantic_entropy.md
 README [OLD].md
 
-**/thesis_research_analysis/*
+# **/thesis_research_analysis/*
 
 *./AGT_platform/backend/app/access.py
 

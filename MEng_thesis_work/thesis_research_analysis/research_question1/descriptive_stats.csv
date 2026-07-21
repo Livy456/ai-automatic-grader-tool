@@ -1,0 +1,5 @@
+grouping,group_value,n,mean_D_score,median_D_score,sd_D_score,mean_abs_D_score,median_abs_D_score,D_rate,n_high_disagreement,mean_ai_score,mean_human_score,mean_ai_confidence,mean_semantic_entropy
+modality,Programming,35,-0.04977,-0.019444,0.255836,0.17627,0.124124,0.542857,19,0.685914,0.735684,0.607579,0.294024
+modality,oral_video,30,-0.168064,-0.149448,0.095138,0.168064,0.149448,0.733333,22,0.474225,0.642289,0.321039,0.497726
+modality,text,30,-0.077143,-0.106337,0.155649,0.144884,0.131901,0.666667,20,0.667965,0.745109,0.49295,0.360019
+pooled,POOLED,95,-0.09577,-0.114757,0.191069,0.163767,0.130278,0.642105,61,0.613397,0.709167,0.480894,0.379191
