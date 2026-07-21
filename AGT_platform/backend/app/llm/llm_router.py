@@ -403,7 +403,7 @@ def build_multimodal_grading_clients(cfg: Config) -> list[tuple[ChatClient, str]
 
     Optional ``GRADING_MODEL_2`` / ``GRADING_MODEL_3`` may add extra ``openai:`` models.
     Parsing and trio chunking use Claude/OpenAI via
-    :func:`anthropic_multimodal_structure_client` and :func:`app.grading.multimodal.rag_embeddings._multimodal_structure_chat_client`.
+    :func:`anthropic_multimodal_structure_client` and :func:`app.grading.chunking.rag_embeddings._multimodal_structure_chat_client`.
     """
     key = (cfg.OPENAI_API_KEY or "").strip()
     if not key:

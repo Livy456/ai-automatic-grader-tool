@@ -1,7 +1,7 @@
 # DELETE THIS FILE LATER!!
 
 """
-Match a tabular / text dataset in ``assignments_to_grade/`` to a notebook submission.
+Match a tabular / text dataset in ``assignment_input/assignments_to_grade/`` to a notebook submission.
 
 Uses the same embedding path as RAG (:func:`app.grading.rag_embeddings.compute_submission_embedding`)
 and cosine similarity between the assignment plaintext vector and each candidate file’s
@@ -21,9 +21,9 @@ _DATA_SUFFIXES = frozenset({".csv", ".tsv", ".txt", ".json"})
 
 
 def default_assignments_to_grade_dir() -> Path:
-    """``…/ai-automatic-grader-tool/assignments_to_grade`` (repo root sibling of ``AGT_platform``)."""
-    # .../AGT_platform/backend/app/grading/dataset_resolve.py → parents[4] = repo root
-    return Path(__file__).resolve().parents[4] / "assignments_to_grade"
+    """``…/ai-automatic-grader-tool/assignment_input/assignments_to_grade`` (repo root sibling of ``AGT_platform``)."""
+    # .../AGT_platform/backend/app/grading/parsing/dataset_resolve.py → parents[5] = repo root
+    return Path(__file__).resolve().parents[5] / "assignment_input" / "assignments_to_grade"
 
 
 def list_data_asset_files(directory: Path) -> list[Path]:

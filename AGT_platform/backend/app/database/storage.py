@@ -14,7 +14,7 @@ from botocore.client import Config as BotoClientConfig
 from botocore.exceptions import ClientError
 from boto3.s3.transfer import TransferConfig
 
-from .config import Config
+from ..config import Config
 
 # Multipart: good default for notebooks, videos, large PDFs
 _TRANSFER = TransferConfig(

@@ -23,10 +23,10 @@ from app.grading.parsing.artifact_plaintext import (
     artifacts_to_concatenated_plain,
     infer_modality_from_artifact_keys,
 )
-from app.grading.llm_router import AnthropicJsonClient
+from app.llm.llm_router import AnthropicJsonClient
 
 from .chunker import modality_from_hints, task_type_from_hints
-from .ingestion import IngestionEnvelope
+from app.grading.parsing.ingestion import IngestionEnvelope
 from app.grading.schemas import GradingChunk, Modality, TaskType
 
 _log = logging.getLogger(__name__)

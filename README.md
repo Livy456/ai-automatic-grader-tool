@@ -35,7 +35,7 @@ pytest test/ -v
 
 - **One full local multimodal grade** (writes under `grading_output/` and `RAG_embedding/`): from `AGT_platform/backend/`, run  
   `pytest tests/test_grading_pipeline_local_files.py::TestGradingPipelineLocalFiles::test_grade_local_assignments_write_json -v`  
-  Requires `assignments_to_grade/`, `rubric/`, and `OPENAI_API_KEY` in `.env`. Optional env vars are listed in that test’s docstring.
+  Requires `assignment_input/assignments_to_grade/`, `rubric/`, and `OPENAI_API_KEY` in `.env`. Optional env vars are listed in that test’s docstring.
 
 - **Many repeated runs** (e.g. **15**), for analysis under `research analysis/`: set **`MULTIMODAL_RESEARCH_ASSIGNMENT_ID`** to the assignment stem and **`MULTIMODAL_RESEARCH_RUN_COUNT=15`**, then run **`pytest tests/test_multimodal_research_runs.py -v -rs`** from `AGT_platform/backend/`. Full examples, resume behavior, and outputs are documented in **`AGT_platform/backend/ReadMe.md`** (section *Multimodal grading pipeline (local)*).
 

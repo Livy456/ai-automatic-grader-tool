@@ -9,7 +9,7 @@ from celery import Celery
 from sqlalchemy.orm import selectinload
 
 from .config import Config
-from .extensions import SessionLocal, engine, init_db
+from .database.extensions import SessionLocal, engine, init_db
 from .grading.multimodal.course_multimodal_runner import (
     run_db_submission_multimodal_pipeline,
     run_standalone_multimodal_pipeline,
@@ -19,7 +19,7 @@ from .grading.multimodal.pipeline_runner import (
     excerpt_attachment_bytes,
     run_multimodal_grading,
 )
-from .models import (
+from .database.models import (
     AIScore,
     Assignment,
     AssignmentAttachment,
@@ -29,7 +29,7 @@ from .models import (
     StandaloneSubmission,
     Submission,
 )
-from .storage import get_object_bytes, minio_client
+from .database.storage import get_object_bytes, minio_client
 
 celery_app = Celery(__name__)
 

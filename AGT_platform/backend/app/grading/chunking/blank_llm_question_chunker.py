@@ -20,7 +20,7 @@ from typing import Any
 
 from app.config import Config
 
-from .ingestion import IngestionEnvelope
+from app.grading.parsing.ingestion import IngestionEnvelope
 from .notebook_chunker import (
     build_notebook_qa_chunks,
     ipynb_to_plaintext_for_structure_llm,
@@ -68,7 +68,7 @@ def _safe_qid(raw: str, idx: int) -> str:
 
 
 def _questions_from_blank_llm(plain: str, cfg: Config) -> list[dict[str, str]]:
-    from app.grading.multimodal import rag_embeddings as _rag
+    from app.grading.chunking import rag_embeddings as _rag
 
     client, model = _rag._multimodal_structure_chat_client(cfg, purpose="trio")
     if client is None:

@@ -13,7 +13,7 @@ After notebook (or heuristic) chunking, each unit has a ``question_id`` and opti
    **snippet**, and ``answer_key_rag`` (per-unit embedding) for downstream RAG / audit.
 
 Raw vectors are stripped from grader prompts via
-:func:`app.grading.multimodal.rag_embeddings.sanitize_evidence_for_grading_prompt`.
+:func:`app.grading.chunking.rag_embeddings.sanitize_evidence_for_grading_prompt`.
 """
 
 from __future__ import annotations

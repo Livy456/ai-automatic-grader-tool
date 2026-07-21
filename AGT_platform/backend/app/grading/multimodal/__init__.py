@@ -2,13 +2,14 @@
 Multimodal grading pipeline: ingestion → chunking → rubric routing → per-chunk grading →
 uncertainty → aggregation → output.
 
-**Scope:** This package owns the core multimodal orchestration (:mod:`pipeline`,
+**Scope:** This package owns the core multimodal orchestration only (:mod:`pipeline`,
 :mod:`pipeline_runner`, :mod:`model_runner`, ``schemas``, :mod:`aggregator`,
-:mod:`review_router`, ``rag_embeddings``). Submission parsing/chunking, output-shape
-validation, AI-confidence math, and rubric routing live in their own sibling packages
-(:mod:`app.grading.parsing`, :mod:`app.grading.grading_output`,
-:mod:`app.grading.confidence_calculation`, :mod:`app.grading.rubric_routing`) so they can
-be reused outside multimodal without circular imports.
+:mod:`review_router`). Submission parsing, chunking, LLM routing/prompts, output-shape
+validation, AI-confidence math, and rubric routing live in their own sibling/top-level
+packages (:mod:`app.grading.parsing`, :mod:`app.grading.chunking`, :mod:`app.llm`,
+:mod:`app.grading.grading_output`, :mod:`app.grading.confidence_calculation`,
+:mod:`app.grading.rubric_routing`) so they can be reused outside multimodal without circular
+imports.
 
 **Celery / DB grading:** :mod:`app.tasks` calls
 :func:`~app.grading.multimodal.course_multimodal_runner.run_db_submission_multimodal_pipeline`
@@ -21,10 +22,9 @@ See ``AGT_platform/backend/docs/multimodal_grading_pipeline.md`` for architectur
 The public names below are resolved **lazily** (`PEP 562 <https://peps.python.org/pep-0562/>`_
 module ``__getattr__``) rather than imported eagerly at package-import time. Several of them
 (``.pipeline``, ``.pipeline_runner``) transitively import from the sibling ``parsing`` /
-``rubric_routing`` / ``confidence_calculation`` / ``grading_output`` packages, which in turn
-need to reach modules inside *this* package (``rag_embeddings``, etc.) — eagerly importing
-that whole web here would risk a circular import the moment any of those siblings is imported
-before this package finishes initializing.
+``chunking`` / ``rubric_routing`` / ``confidence_calculation`` / ``grading_output`` packages
+and from :mod:`app.llm` — eagerly importing that whole web here would risk a circular import
+the moment any of those siblings is imported before this package finishes initializing.
 """
 
 from __future__ import annotations

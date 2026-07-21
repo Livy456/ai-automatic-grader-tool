@@ -74,7 +74,7 @@ from pathlib import Path
 from types import SimpleNamespace
 
 from app.config import Config
-from app.grading.llm_router import build_multimodal_grading_clients
+from app.llm.llm_router import build_multimodal_grading_clients
 from app.grading.parsing.modality_resolution import resolve_modality_profile
 from app.grading.multimodal import (
     create_multimodal_pipeline_from_app_config,

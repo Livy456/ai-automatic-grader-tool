@@ -45,14 +45,14 @@ from typing import Any
 import requests
 
 from app.config import Config
-from app.grading.llm_router import (
+from app.llm.llm_router import (
     build_multimodal_grading_clients,
     huggingface_grading_model_id,
     multimodal_llm_backend_uses_huggingface,
     multimodal_llm_backend_uses_openai,
     multimodal_structure_llm_trace_label,
 )
-from app.grading.parsing.grading_units import build_grading_units_from_chunks
+from app.grading.chunking.grading_units import build_grading_units_from_chunks
 from app.grading.parsing.modality_resolution import (
     normalize_modality_hint_for_multimodal,
     resolve_modality_profile,
@@ -76,22 +76,22 @@ from app.grading.multimodal.aggregator import aggregate_chunk_samples
 from app.grading.rubric_routing.rubric_router import RubricRouteResult, route_rubric
 from app.grading.confidence_calculation.entropy import semantic_entropy_from_cluster_counts
 from app.grading.grading_output.parser import parse_chunk_grade_json
-from app.grading.parsing.answer_key_chunk_enrich import (
+from app.grading.chunking.answer_key_chunk_enrich import (
     code_reference_matches_student,
     enrich_chunks_with_per_question_answer_key,
     split_answer_key_sections,
 )
-from app.grading.parsing.chunk_cache import save_grading_chunks_cache
-from app.grading.parsing.notebook_chunker import (
+from app.grading.chunking.chunk_cache import save_grading_chunks_cache
+from app.grading.chunking.notebook_chunker import (
     build_notebook_qa_chunks,
     build_notebook_question_boundary_chunks,
 )
-from app.grading.parsing.template_aligned_notebook_chunks import (
+from app.grading.chunking.template_aligned_notebook_chunks import (
     build_blank_template_aligned_notebook_chunks,
 )
 from app.grading.parsing.answer_key_resolve import resolve_blank_assignment_ipynb
-from app.grading.multimodal.prompts_chunk import build_chunk_grading_prompt
-from app.grading.multimodal.rag_embeddings import (
+from app.llm.prompts_chunk import build_chunk_grading_prompt
+from app.grading.chunking.rag_embeddings import (
     build_multimodal_grading_chunks,
     enrich_chunks_with_rag_embeddings,
 )
@@ -103,7 +103,7 @@ from app.grading.rag_embeddings import (
     save_rag_embedding_bundle,
     sentence_transformers_embed_text,
 )
-from app.grading.parsing.submission_chunks import build_submission_chunks, write_chunks_json
+from app.grading.chunking.submission_chunks import build_submission_chunks, write_chunks_json
 from app.grading.parsing.submission_text import submission_text_from_artifacts
 
 _log = logging.getLogger(__name__)
@@ -183,11 +183,11 @@ def _hf_integration_preflight(cfg: Config) -> tuple[bool, str]:
 
 
 REPO_ROOT = Path(__file__).resolve().parents[3]
-ASSIGNMENTS_DIR = REPO_ROOT / "assignments_to_grade"
+ASSIGNMENTS_DIR = REPO_ROOT / "assignment_input" / "assignments_to_grade"
 RUBRIC_DIR = REPO_ROOT / "rubric"
 OUTPUT_DIR = REPO_ROOT / "grading_output"
 RAG_DIR = REPO_ROOT / "RAG_embedding"
-ANSWER_KEY_DIR = REPO_ROOT / "answer_key"
+ANSWER_KEY_DIR = REPO_ROOT / "assignment_input" / "answer_key"
 
 _SUPPORTED_SUFFIXES = {".ipynb", ".py", ".pdf", ".txt", ".md", ".mp4", ".docx"}
 # Tabular / data files in ``assignments_to_grade/`` are for ``dataset_resolve`` — not separate submissions.
@@ -499,7 +499,7 @@ _EDA_RUBRIC_STUB = [
 
 class AnswerKeyCodeMatchTests(unittest.TestCase):
     def test_strip_assignment_placeholder_lines(self) -> None:
-        from app.grading.parsing.notebook_chunker import strip_assignment_placeholder_lines
+        from app.grading.chunking.notebook_chunker import strip_assignment_placeholder_lines
 
         raw = (
             "# write code for problem 1.1 here\n"
@@ -526,7 +526,7 @@ class AnswerKeyCodeMatchTests(unittest.TestCase):
             )
         )
 
-    @patch("app.grading.parsing.answer_key_chunk_enrich.compute_submission_embedding")
+    @patch("app.grading.chunking.answer_key_chunk_enrich.compute_submission_embedding")
     def test_enrich_prefers_trio_answer_key_when_it_matches_student(
         self, mock_emb: MagicMock,
     ) -> None:
@@ -843,7 +843,7 @@ class NotebookChunkingAccuracyTests(unittest.TestCase):
 
     def test_notebook_chunker_produces_chunks(self) -> None:
         """Each ipynb must produce at least one chunk with non-empty text."""
-        from app.grading.parsing.notebook_chunker import build_notebook_qa_chunks
+        from app.grading.chunking.notebook_chunker import build_notebook_qa_chunks
 
         ipynb_items = self._get_ipynb_paths()
         if not ipynb_items:
@@ -867,7 +867,7 @@ class NotebookChunkingAccuracyTests(unittest.TestCase):
 
     def test_every_chunk_has_student_content(self) -> None:
         """Each chunk should contain student work, not just a question prompt."""
-        from app.grading.parsing.notebook_chunker import build_notebook_qa_chunks
+        from app.grading.chunking.notebook_chunker import build_notebook_qa_chunks
 
         ipynb_items = self._get_ipynb_paths()
         if not ipynb_items:
@@ -890,7 +890,7 @@ class NotebookChunkingAccuracyTests(unittest.TestCase):
 
     def test_structured_notebook_question_ids(self) -> None:
         """Notebooks with ### Question X.Y headers produce numeric question IDs."""
-        from app.grading.parsing.notebook_chunker import build_notebook_qa_chunks
+        from app.grading.chunking.notebook_chunker import build_notebook_qa_chunks
 
         for stem, path in self._get_ipynb_paths():
             with self.subTest(assignment=stem):
@@ -933,7 +933,7 @@ class NotebookChunkingAccuracyTests(unittest.TestCase):
 
     def test_pipeline_uses_notebook_chunker_for_ipynb(self) -> None:
         """When ipynb bytes are in the envelope, the pipeline uses notebook_cell_order."""
-        from app.grading.multimodal.rag_embeddings import build_multimodal_grading_chunks
+        from app.grading.chunking.rag_embeddings import build_multimodal_grading_chunks
 
         ipynb_items = self._get_ipynb_paths()
         if not ipynb_items:
@@ -961,7 +961,7 @@ class ClaudeStructuredAssignmentChunkerTests(unittest.TestCase):
     """Claude JSON ``units`` → :class:`GradingChunk` (no live API)."""
 
     def test_try_build_maps_units_to_trio_schema(self) -> None:
-        from app.grading.parsing.claude_structured_assignment_chunker import (
+        from app.grading.chunking.claude_structured_assignment_chunker import (
             try_build_claude_structured_assignment_chunks,
         )
 
@@ -991,7 +991,7 @@ class ClaudeStructuredAssignmentChunkerTests(unittest.TestCase):
         mock_inst = MagicMock()
         mock_inst.chat_json = MagicMock(return_value=fake)
         with patch(
-            "app.grading.parsing.claude_structured_assignment_chunker.AnthropicJsonClient",
+            "app.grading.chunking.claude_structured_assignment_chunker.AnthropicJsonClient",
             return_value=mock_inst,
         ):
             chunks = try_build_claude_structured_assignment_chunks(envelope, cfg)
@@ -1007,7 +1007,7 @@ class ClaudeStructuredAssignmentChunkerTests(unittest.TestCase):
         self.assertTrue((chunks[0].evidence or {}).get("_claude_structured_units"))
 
     def test_build_multimodal_prefers_claude_when_enabled(self) -> None:
-        from app.grading.multimodal.rag_embeddings import build_multimodal_grading_chunks
+        from app.grading.chunking.rag_embeddings import build_multimodal_grading_chunks
 
         cfg = Config()
         cfg.ANTHROPIC_API_KEY = "test-key"
@@ -1034,7 +1034,7 @@ class ClaudeStructuredAssignmentChunkerTests(unittest.TestCase):
         mock_inst = MagicMock()
         mock_inst.chat_json = MagicMock(return_value=fake)
         with patch(
-            "app.grading.parsing.claude_structured_assignment_chunker.AnthropicJsonClient",
+            "app.grading.chunking.claude_structured_assignment_chunker.AnthropicJsonClient",
             return_value=mock_inst,
         ):
             chunks, mode = build_multimodal_grading_chunks(envelope, cfg)
@@ -1043,7 +1043,7 @@ class ClaudeStructuredAssignmentChunkerTests(unittest.TestCase):
         self.assertEqual(chunks[0].question_id, "p0")
 
     def test_forced_on_falls_back_to_heuristic_when_claude_empty(self) -> None:
-        from app.grading.multimodal import rag_embeddings
+        from app.grading.chunking import rag_embeddings
 
         cfg = Config()
         cfg.ANTHROPIC_API_KEY = "test-key"
@@ -1068,7 +1068,7 @@ class ClaudeStructuredAssignmentChunkerTests(unittest.TestCase):
         mock_inst = MagicMock()
         mock_inst.chat_json = MagicMock(return_value={"units": []})
         with patch(
-            "app.grading.parsing.claude_structured_assignment_chunker.AnthropicJsonClient",
+            "app.grading.chunking.claude_structured_assignment_chunker.AnthropicJsonClient",
             return_value=mock_inst,
         ):
             with patch.object(
@@ -1101,7 +1101,7 @@ class ClaudeParsingAgentTests(unittest.TestCase):
         )
 
     def test_try_build_maps_units_to_pydantic_validated_chunks(self) -> None:
-        from app.grading.parsing.claude_parsing_agent import (
+        from app.grading.chunking.claude_parsing_agent import (
             try_build_claude_parsing_agent_chunks,
         )
 
@@ -1123,7 +1123,7 @@ class ClaudeParsingAgentTests(unittest.TestCase):
         mock_inst = MagicMock()
         mock_inst.chat_json = MagicMock(return_value=fake)
         with patch(
-            "app.grading.parsing.claude_parsing_agent.AnthropicJsonClient",
+            "app.grading.chunking.claude_parsing_agent.AnthropicJsonClient",
             return_value=mock_inst,
         ):
             result = try_build_claude_parsing_agent_chunks(envelope, cfg)
@@ -1142,7 +1142,7 @@ class ClaudeParsingAgentTests(unittest.TestCase):
 
     def test_schema_invalid_response_returns_none(self) -> None:
         """A response that fails Pydantic validation (units not a list) must not raise."""
-        from app.grading.parsing.claude_parsing_agent import (
+        from app.grading.chunking.claude_parsing_agent import (
             try_build_claude_parsing_agent_chunks,
         )
 
@@ -1153,14 +1153,14 @@ class ClaudeParsingAgentTests(unittest.TestCase):
         mock_inst = MagicMock()
         mock_inst.chat_json = MagicMock(return_value={"units": "not-a-list"})
         with patch(
-            "app.grading.parsing.claude_parsing_agent.AnthropicJsonClient",
+            "app.grading.chunking.claude_parsing_agent.AnthropicJsonClient",
             return_value=mock_inst,
         ):
             result = try_build_claude_parsing_agent_chunks(envelope, cfg)
         self.assertIsNone(result)
 
     def test_empty_units_returns_none(self) -> None:
-        from app.grading.parsing.claude_parsing_agent import (
+        from app.grading.chunking.claude_parsing_agent import (
             try_build_claude_parsing_agent_chunks,
         )
 
@@ -1171,7 +1171,7 @@ class ClaudeParsingAgentTests(unittest.TestCase):
         mock_inst = MagicMock()
         mock_inst.chat_json = MagicMock(return_value={"units": []})
         with patch(
-            "app.grading.parsing.claude_parsing_agent.AnthropicJsonClient",
+            "app.grading.chunking.claude_parsing_agent.AnthropicJsonClient",
             return_value=mock_inst,
         ):
             result = try_build_claude_parsing_agent_chunks(envelope, cfg)
@@ -1182,7 +1182,7 @@ class ClaudeParsingAgentTests(unittest.TestCase):
         When ``audio_half_split`` already ran (earlier in ``pipeline.py``), the agent must use
         that transcript instead of re-transcribing the raw audio bytes a second time.
         """
-        from app.grading.parsing.claude_parsing_agent import (
+        from app.grading.chunking.claude_parsing_agent import (
             try_build_claude_parsing_agent_chunks,
         )
 
@@ -1223,10 +1223,10 @@ class ClaudeParsingAgentTests(unittest.TestCase):
         mock_inst = MagicMock()
         mock_inst.chat_json = MagicMock(return_value=fake)
         with patch(
-            "app.grading.parsing.claude_parsing_agent.AnthropicJsonClient",
+            "app.grading.chunking.claude_parsing_agent.AnthropicJsonClient",
             return_value=mock_inst,
         ), patch(
-            "app.grading.parsing.claude_parsing_agent.artifacts_to_concatenated_plain"
+            "app.grading.chunking.claude_parsing_agent.artifacts_to_concatenated_plain"
         ) as mock_transcribe:
             result = try_build_claude_parsing_agent_chunks(envelope, cfg)
         mock_transcribe.assert_not_called()
@@ -1243,7 +1243,7 @@ class ClaudeParsingAgentTests(unittest.TestCase):
     def test_failed_audio_transcript_returns_none_without_calling_claude(self) -> None:
         """A Whisper failure/placeholder marker must not be sent to Claude as if it were real
         student work."""
-        from app.grading.parsing.claude_parsing_agent import (
+        from app.grading.chunking.claude_parsing_agent import (
             try_build_claude_parsing_agent_chunks,
         )
 
@@ -1259,10 +1259,10 @@ class ClaudeParsingAgentTests(unittest.TestCase):
         )
         mock_inst = MagicMock()
         with patch(
-            "app.grading.parsing.claude_parsing_agent.AnthropicJsonClient",
+            "app.grading.chunking.claude_parsing_agent.AnthropicJsonClient",
             return_value=mock_inst,
         ), patch(
-            "app.grading.parsing.claude_parsing_agent.artifacts_to_concatenated_plain",
+            "app.grading.chunking.claude_parsing_agent.artifacts_to_concatenated_plain",
             return_value="=== AUDIO TRANSCRIPT ===\n[WHISPER_EMPTY_TRANSCRIPT]",
         ):
             result = try_build_claude_parsing_agent_chunks(envelope, cfg)
@@ -1270,7 +1270,7 @@ class ClaudeParsingAgentTests(unittest.TestCase):
         mock_inst.chat_json.assert_not_called()
 
     def test_modality_guidance_differs_for_code_vs_written_vs_oral(self) -> None:
-        from app.grading.parsing.claude_parsing_agent import _modality_guidance
+        from app.grading.chunking.claude_parsing_agent import _modality_guidance
         from app.grading.schemas import Modality as _Modality
 
         code_note = _modality_guidance(_Modality.CODE, {})
@@ -1286,7 +1286,7 @@ class ClaudeParsingAgentTests(unittest.TestCase):
         self.assertIn("speech-to-text transcript", oral_via_hint)
 
     def test_disabled_without_anthropic_key(self) -> None:
-        from app.grading.parsing.claude_parsing_agent import (
+        from app.grading.chunking.claude_parsing_agent import (
             claude_parsing_agent_enabled,
             try_build_claude_parsing_agent_chunks,
         )
@@ -1297,7 +1297,7 @@ class ClaudeParsingAgentTests(unittest.TestCase):
         self.assertIsNone(try_build_claude_parsing_agent_chunks(self._envelope(), cfg))
 
     def test_explicitly_off_short_circuits_even_with_key(self) -> None:
-        from app.grading.parsing.claude_parsing_agent import claude_parsing_agent_enabled
+        from app.grading.chunking.claude_parsing_agent import claude_parsing_agent_enabled
 
         cfg = Config()
         cfg.ANTHROPIC_API_KEY = "test-key"
@@ -2802,7 +2802,7 @@ class MultimodalPipelineChunkConcurrencyTests(unittest.TestCase):
         self, concurrency: int, chunk_ids: list[str]
     ) -> tuple[list[str], list[str], int]:
         from app.grading.multimodal.pipeline import MultimodalGradingPipeline
-        from app.grading.parsing.chunk_cache import save_grading_chunks_cache
+        from app.grading.chunking.chunk_cache import save_grading_chunks_cache
 
         chunks = [self._fake_chunk(cid) for cid in chunk_ids]
         call_order: list[str] = []
@@ -2918,7 +2918,7 @@ class MultimodalHuggingFaceRoutingTests(unittest.TestCase):
         self.assertIn("all-MiniLM", src)
 
     def test_multimodal_openai_trio_rag_frontload_enabled_respects_off(self) -> None:
-        from app.grading.multimodal.openai_trio_rag_frontload import (
+        from app.grading.chunking.openai_trio_rag_frontload import (
             multimodal_openai_trio_rag_frontload_enabled,
         )
 
@@ -2952,7 +2952,7 @@ class MultimodalHuggingFaceRoutingTests(unittest.TestCase):
 
     def test_build_multimodal_grading_clients_openai_only_ignores_structure_backend(self) -> None:
         """Multimodal per-chunk grading uses OpenAI regardless of structure MULTIMODAL_LLM_BACKEND."""
-        from app.grading.llm_router import build_multimodal_grading_clients
+        from app.llm.llm_router import build_multimodal_grading_clients
 
         cfg = Config()
         cfg.MULTIMODAL_LLM_BACKEND = "huggingface"
@@ -2962,7 +2962,7 @@ class MultimodalHuggingFaceRoutingTests(unittest.TestCase):
         self.assertEqual(b, ["openai:gpt-5.4-nano"])
 
     def test_huggingface_grading_model_id_maps_llama_package_descriptor(self) -> None:
-        from app.grading.llm_router import huggingface_grading_model_id
+        from app.llm.llm_router import huggingface_grading_model_id
 
         cfg = Config()
         cfg.HUGGINGFACE_GRADING_MODEL_ID = "Llama-4-Maverick-17B-128E-Instruct:fp8"
@@ -3001,7 +3001,7 @@ class MultimodalHuggingFaceRoutingTests(unittest.TestCase):
     def test_refine_trio_invokes_structure_client(self) -> None:
         from unittest.mock import MagicMock, patch
 
-        from app.grading.multimodal.rag_embeddings import refine_chunks_trio_with_structure_llm
+        from app.grading.chunking.rag_embeddings import refine_chunks_trio_with_structure_llm
 
         mock_client = MagicMock()
         mock_client.chat_json.return_value = {
@@ -3022,7 +3022,7 @@ class MultimodalHuggingFaceRoutingTests(unittest.TestCase):
             evidence={"trio": {}},
         )
         with patch(
-            "app.grading.multimodal.rag_embeddings._multimodal_structure_chat_client",
+            "app.grading.chunking.rag_embeddings._multimodal_structure_chat_client",
             return_value=(mock_client, "meta-llama/Llama-4-Maverick-17B-128E-Instruct-FP8"),
         ):
             refine_chunks_trio_with_structure_llm([ch], cfg)
@@ -3035,7 +3035,7 @@ class MultimodalHuggingFaceRoutingTests(unittest.TestCase):
         from unittest.mock import MagicMock, patch
 
         from app.grading.parsing.ingestion import ingest_raw_submission
-        from app.grading.multimodal.openai_trio_rag_frontload import (
+        from app.grading.chunking.openai_trio_rag_frontload import (
             run_openai_trio_rag_frontload,
         )
 
@@ -3064,10 +3064,10 @@ class MultimodalHuggingFaceRoutingTests(unittest.TestCase):
             return [[0.1, 0.2, 0.3] for _ in range(len(texts))], 80
 
         with patch(
-            "app.grading.multimodal.openai_trio_rag_frontload.OpenAIJsonClient",
+            "app.grading.chunking.openai_trio_rag_frontload.OpenAIJsonClient",
             return_value=inst,
         ), patch(
-            "app.grading.multimodal.openai_trio_rag_frontload._openai_embed_batch",
+            "app.grading.chunking.openai_trio_rag_frontload._openai_embed_batch",
             side_effect=fake_embed,
         ):
             env = ingest_raw_submission(
@@ -3095,7 +3095,7 @@ class MultimodalHuggingFaceRoutingTests(unittest.TestCase):
         from unittest.mock import MagicMock, patch
 
         from app.grading.parsing.ingestion import ingest_raw_submission
-        from app.grading.multimodal.openai_trio_rag_frontload import (
+        from app.grading.chunking.openai_trio_rag_frontload import (
             run_openai_trio_rag_frontload,
         )
 
@@ -3121,10 +3121,10 @@ class MultimodalHuggingFaceRoutingTests(unittest.TestCase):
         )
 
         with patch(
-            "app.grading.multimodal.openai_trio_rag_frontload.OpenAIJsonClient",
+            "app.grading.chunking.openai_trio_rag_frontload.OpenAIJsonClient",
             return_value=inst,
         ), patch(
-            "app.grading.multimodal.openai_trio_rag_frontload._openai_embed_batch",
+            "app.grading.chunking.openai_trio_rag_frontload._openai_embed_batch",
             side_effect=RuntimeError("401 fake"),
         ):
             env = ingest_raw_submission(
@@ -3150,7 +3150,7 @@ class MultimodalHuggingFaceRoutingTests(unittest.TestCase):
         from unittest.mock import MagicMock, patch
 
         from app.grading.parsing.ingestion import ingest_raw_submission
-        from app.grading.multimodal.openai_trio_rag_frontload import (
+        from app.grading.chunking.openai_trio_rag_frontload import (
             run_openai_trio_rag_frontload,
         )
 
@@ -3181,10 +3181,10 @@ class MultimodalHuggingFaceRoutingTests(unittest.TestCase):
 
         long_text = "x" * 5000
         with patch(
-            "app.grading.multimodal.openai_trio_rag_frontload.OpenAIJsonClient",
+            "app.grading.chunking.openai_trio_rag_frontload.OpenAIJsonClient",
             return_value=inst,
         ), patch(
-            "app.grading.multimodal.openai_trio_rag_frontload._openai_embed_batch",
+            "app.grading.chunking.openai_trio_rag_frontload._openai_embed_batch",
             side_effect=fake_embed,
         ):
             env = ingest_raw_submission(
@@ -3205,7 +3205,7 @@ class MultimodalHuggingFaceRoutingTests(unittest.TestCase):
         from unittest.mock import MagicMock, patch
 
         from app.grading.parsing.ingestion import ingest_raw_submission
-        from app.grading.multimodal.openai_trio_rag_frontload import (
+        from app.grading.chunking.openai_trio_rag_frontload import (
             run_openai_trio_rag_frontload,
         )
 
@@ -3238,10 +3238,10 @@ class MultimodalHuggingFaceRoutingTests(unittest.TestCase):
             return [[0.1, 0.2] for _ in range(len(texts))], 12
 
         with patch(
-            "app.grading.multimodal.openai_trio_rag_frontload.OpenAIJsonClient",
+            "app.grading.chunking.openai_trio_rag_frontload.OpenAIJsonClient",
             return_value=inst,
         ), patch(
-            "app.grading.multimodal.openai_trio_rag_frontload._openai_embed_batch",
+            "app.grading.chunking.openai_trio_rag_frontload._openai_embed_batch",
             side_effect=fake_embed,
         ):
             env = ingest_raw_submission(
@@ -3260,7 +3260,7 @@ class MultimodalHuggingFaceRoutingTests(unittest.TestCase):
             self.assertLessEqual(len(str(trio.get("student_response") or "")), 150)
 
     def test_chunk_multimodal_grading_system_prompt_oral_supplement(self) -> None:
-        from app.grading.multimodal.prompts_chunk import (
+        from app.llm.prompts_chunk import (
             SYSTEM_CHUNK_GRADER,
             chunk_multimodal_grading_system_prompt,
         )

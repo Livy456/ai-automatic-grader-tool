@@ -8,7 +8,7 @@ from sqlalchemy.orm import Session
 
 from app.audit import log_event
 from app.deps import get_db, require_role
-from app.models import Assignment, AuditLog, Course, Enrollment, IssuedJwt, User
+from app.database.models import Assignment, AuditLog, Course, Enrollment, IssuedJwt, User
 
 router = APIRouter()
 

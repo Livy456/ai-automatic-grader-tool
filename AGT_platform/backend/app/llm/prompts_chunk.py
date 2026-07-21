@@ -7,12 +7,12 @@ from __future__ import annotations
 import json
 from typing import Any
 
-from app.grading.parsing.answer_key_chunk_enrich import (
+from app.grading.chunking.answer_key_chunk_enrich import (
     code_reference_matches_student,
     grading_student_code_blob,
 )
 
-from .rag_embeddings import (
+from app.grading.chunking.rag_embeddings import (
     _optional_positive_int_env,
     sanitize_evidence_for_grading_prompt,
 )

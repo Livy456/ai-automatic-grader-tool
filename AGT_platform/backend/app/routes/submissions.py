@@ -16,8 +16,8 @@ from werkzeug.utils import secure_filename
 from app.audit import log_event
 from app.config import Config
 from app.deps import get_current_user, get_db
-from app.models import AIScore, Assignment, Enrollment, Submission, SubmissionArtifact
-from app.storage import object_exists, presigned_put_url, upload_from_fastapi_file
+from app.database.models import AIScore, Assignment, Enrollment, Submission, SubmissionArtifact
+from app.database.storage import object_exists, presigned_put_url, upload_from_fastapi_file
 from app.tasks import grade_submission
 
 router = APIRouter()

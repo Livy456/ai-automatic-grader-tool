@@ -12,7 +12,7 @@ if not (os.getenv("DATABASE_URL") or "").strip():
     load_dotenv(_BACKEND_DIR / ".env.local")
     load_dotenv(_BACKEND_DIR / ".env", override=True)
 
-from app.models import Base
+from app.database.models import Base
 
 
 # this is the Alembic Config object, which provides

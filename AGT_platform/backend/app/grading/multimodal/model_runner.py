@@ -1,14 +1,14 @@
 """
 Protocol for k samples per chunk.
 
-``MultiModelChunkRunner`` uses :func:`app.grading.llm_router.build_multimodal_grading_clients`
+``MultiModelChunkRunner`` uses :func:`app.llm.llm_router.build_multimodal_grading_clients`
 (OpenAI-only for per-chunk grading) and draws
 ``MULTIMODAL_SAMPLES_PER_MODEL`` stochastic samples **per client** at
 ``GRADING_SAMPLE_TEMPERATURE``.
 
 ``run_chunk_samples_async`` is the concurrency-friendly counterpart used by
 :class:`app.grading.multimodal.pipeline.MultimodalGradingPipeline`: it draws the same samples
-via :func:`app.grading.llm_router.build_async_multimodal_grading_clients` (``AsyncOpenAI``) and
+via :func:`app.llm.llm_router.build_async_multimodal_grading_clients` (``AsyncOpenAI``) and
 runs them with ``asyncio.gather`` instead of a blocking sequential loop, so many
 chunks/samples can be in flight together. An optional ``asyncio.Semaphore`` bounds how many of
 those calls are actually in flight at once across an entire grading run (not just this chunk).
@@ -22,7 +22,7 @@ import logging
 from typing import Any, Callable, Protocol
 
 from app.config import Config
-from app.grading.llm_router import (
+from app.llm.llm_router import (
     AsyncChatClient,
     ChatClient,
     build_async_multimodal_grading_clients,

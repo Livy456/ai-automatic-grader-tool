@@ -9,22 +9,22 @@ Callers supply ``rubric_rows_by_type`` (e.g. from ``rubric/default.json`` or
 so routing plus custom rubric can choose among scaffolded, free response, EDA, and oral templates.
 
 **Chunking (tried in order):** first
-:func:`app.grading.parsing.claude_parsing_agent.try_build_claude_parsing_agent_chunks` — a
+:func:`app.grading.chunking.claude_parsing_agent.try_build_claude_parsing_agent_chunks` — a
 Pydantic-validated Claude agent that decomposes the submission directly into isolated
 ``(question, student_response, answer)`` triples in one call (``MULTIMODAL_CLAUDE_PARSING_AGENT``,
 default **auto** = on whenever ``ANTHROPIC_API_KEY`` is set). This runs for both this pipeline's
 callers — course multimodal grading *and* the standalone autograder — since both share this one
 ``run()``. When it is disabled/unavailable/fails (returns ``None``), chunking falls back to
-:func:`app.grading.multimodal.rag_embeddings.build_multimodal_grading_chunks`
+:func:`app.grading.chunking.rag_embeddings.build_multimodal_grading_chunks`
 (notebook cell-order, optional LLM QA on PDF-reflowed text, structured Q/A chunking), unless
 ``OPENAI_API_KEY`` is set and ``MULTIMODAL_OPENAI_TRIO_RAG_FRONTLOAD`` is not ``off`` (default
 **auto** = on) — then
-:func:`app.grading.multimodal.openai_trio_rag_frontload.run_openai_trio_rag_frontload`
+:func:`app.grading.chunking.openai_trio_rag_frontload.run_openai_trio_rag_frontload`
 runs one or more chat calls (overlapping windows when the submission is long) with
 ``OPENAI_TRIO_RAG_CHAT_MODEL`` (default ``gpt-5.4-nano``) to emit
 trio JSON plus OpenAI **Embeddings** for each unit (``OPENAI_TRIO_RAG_EMBEDDING_MODEL``), and
 trio relabeling via ``MULTIMODAL_LLM_TRIO_CHUNKING`` is skipped. Otherwise optional
-:func:`app.grading.multimodal.rag_embeddings.refine_chunks_trio_with_structure_llm` uses **Claude**
+:func:`app.grading.chunking.rag_embeddings.refine_chunks_trio_with_structure_llm` uses **Claude**
 (Anthropic) when configured, else **OpenAI**, for trio fields. Per-chunk
 **grading** uses **OpenAI only** (``OPENAI_MULTIMODAL_GRADING_MODEL`` / ``OPENAI_API_KEY``).
 RAG embeddings otherwise use
@@ -56,7 +56,7 @@ OpenAI trio+RAG frontload is skipped when blank-template chunking is active **or
 :mod:`llm_triplet_three_source` can own trios (single structured LLM call over blank + student + key).
 
 **Chunk cache:** set ``modality_hints["multimodal_chunk_cache_path"]`` to a JSON file produced
-by :func:`app.grading.parsing.chunk_cache.save_grading_chunks_cache` to skip rebuilding
+by :func:`app.grading.chunking.chunk_cache.save_grading_chunks_cache` to skip rebuilding
 chunks and (when embeddings are present in the file) skip per-unit embedding calls.
 
 **Trio export:** after chunking, the pipeline writes ``{assignment_id}_trio_chunks.json`` under
@@ -72,7 +72,7 @@ The legacy ``assignment_chunking_output_dir`` hint still overrides the directory
 
 **Placeholder strip:** after chunking (and optional trio LLM), boilerplate lines such as
 ``# write code for problem 1.1 here`` / ``# your code here`` are removed from chunk text and
-trio fields (see :func:`app.grading.parsing.notebook_chunker.sanitize_grading_chunks_placeholders`)
+trio fields (see :func:`app.grading.chunking.notebook_chunker.sanitize_grading_chunks_placeholders`)
 before answer-key alignment and grading.
 
 **Agentic trace:** ordered phases are stored on the result as
@@ -98,10 +98,10 @@ from typing import Any, Callable
 from app.config import Config
 from app.grading.parsing.answer_key_resolve import resolve_answer_key_plaintext
 from app.grading.parsing.answer_key_resolve import resolve_blank_assignment_template
-from app.grading.llm_router import multimodal_structure_llm_trace_label
+from app.llm.llm_router import multimodal_structure_llm_trace_label
 from app.grading.parsing.dataset_resolve import attach_dataset_context_for_notebook
 
-from app.grading.parsing.chunk_cache import (
+from app.grading.chunking.chunk_cache import (
     chunks_have_unit_embeddings,
     load_grading_chunks_cache,
     save_grading_chunks_cache,
@@ -114,23 +114,23 @@ from app.grading.confidence_calculation.semantic_confidence import (
     cluster_assignment,
     summarize_chunk_confidence_from_counts,
 )
-from app.grading.parsing.notebook_chunker import sanitize_grading_chunks_placeholders
-from app.grading.parsing.llm_triplet_three_source import multimodal_llm_triplet_three_source_enabled
-from app.grading.parsing.template_aligned_notebook_chunks import blank_template_chunking_requested
-from app.grading.parsing.claude_parsing_agent import try_build_claude_parsing_agent_chunks
+from app.grading.chunking.notebook_chunker import sanitize_grading_chunks_placeholders
+from app.grading.chunking.llm_triplet_three_source import multimodal_llm_triplet_three_source_enabled
+from app.grading.chunking.template_aligned_notebook_chunks import blank_template_chunking_requested
+from app.grading.chunking.claude_parsing_agent import try_build_claude_parsing_agent_chunks
 
 from .aggregator import aggregate_assignment, aggregate_chunk_samples
 from .model_runner import ChunkModelRunner, MultiModelChunkRunner
-from .prompts_chunk import (
+from app.llm.prompts_chunk import (
     build_chunk_grading_prompt,
     chunk_multimodal_grading_system_prompt,
 )
 from .review_router import evaluate_chunk_review
-from .openai_trio_rag_frontload import (
+from app.grading.chunking.openai_trio_rag_frontload import (
     multimodal_openai_trio_rag_frontload_enabled,
     run_openai_trio_rag_frontload,
 )
-from .rag_embeddings import (
+from app.grading.chunking.rag_embeddings import (
     build_multimodal_grading_chunks,
     enrich_chunks_with_rag_embeddings,
     multimodal_llm_trio_chunking_enabled,
@@ -150,8 +150,8 @@ _log = logging.getLogger(__name__)
 
 
 def default_answer_key_dir() -> Path:
-    """``…/ai-automatic-grader-tool/answer_key`` (repo root)."""
-    return Path(__file__).resolve().parents[5] / "answer_key"
+    """``…/ai-automatic-grader-tool/assignment_input/answer_key`` (repo root)."""
+    return Path(__file__).resolve().parents[5] / "assignment_input" / "answer_key"
 
 
 def default_rubric_dir() -> Path:
@@ -170,8 +170,8 @@ def default_rag_embedding_dir() -> Path:
 
 
 def default_blank_assignments_dir() -> Path:
-    """``…/ai-automatic-grader-tool/blank_assignments`` (repo root)."""
-    return Path(__file__).resolve().parents[5] / "blank_assignments"
+    """``…/ai-automatic-grader-tool/assignment_input/blank_assignments`` (repo root)."""
+    return Path(__file__).resolve().parents[5] / "assignment_input" / "blank_assignments"
 
 
 def default_assignment_chunking_dir() -> Path:
@@ -267,7 +267,7 @@ def _assignment_chunking_export_payload(
     envelope: IngestionEnvelope,
 ) -> dict[str, Any]:
     """Serializable chunking audit (embeddings stripped from ``evidence``)."""
-    from .rag_embeddings import (
+    from app.grading.chunking.rag_embeddings import (
         ASSIGNMENT_PARSING_SYSTEM_PROMPT,
         sanitize_evidence_for_grading_prompt,
     )
@@ -641,7 +641,7 @@ class MultimodalGradingPipeline:
         app_cfg = self._resolve_app_config()
 
         if app_cfg is not None:
-            from .rag_embeddings import precompute_document_rag_prewindow_for_pipeline
+            from app.grading.chunking.rag_embeddings import precompute_document_rag_prewindow_for_pipeline
 
             precompute_document_rag_prewindow_for_pipeline(envelope, app_cfg, wf)
 
@@ -795,7 +795,7 @@ class MultimodalGradingPipeline:
             )
 
         if app_cfg is not None and answer_key_plain:
-            from app.grading.parsing.answer_key_chunk_enrich import (
+            from app.grading.chunking.answer_key_chunk_enrich import (
                 embed_full_answer_key_for_audit,
                 enrich_chunks_with_per_question_answer_key,
             )
@@ -973,7 +973,7 @@ def create_multimodal_pipeline_from_app_config(
     """
     Build :class:`MultimodalGradingPipeline` with :class:`MultiModelChunkRunner`.
 
-    Uses :func:`~app.grading.llm_router.build_multimodal_grading_clients` (**OpenAI only** for
+    Uses :func:`~app.llm.llm_router.build_multimodal_grading_clients` (**OpenAI only** for
     per-chunk grading via ``OPENAI_MULTIMODAL_GRADING_MODEL``), plus optional
     ``GRADING_MODEL_2`` / ``GRADING_MODEL_3`` (``openai:`` specs only),
     ``MULTIMODAL_SAMPLES_PER_MODEL`` and ``GRADING_SAMPLE_TEMPERATURE`` for stochastic

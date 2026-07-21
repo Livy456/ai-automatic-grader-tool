@@ -10,8 +10,8 @@ from werkzeug.utils import secure_filename
 
 from app.config import Config
 from app.deps import get_db, require_role
-from app.models import Assignment, AssignmentAttachment
-from app.storage import upload_from_fastapi_file
+from app.database.models import Assignment, AssignmentAttachment
+from app.database.storage import upload_from_fastapi_file
 
 router = APIRouter()
 

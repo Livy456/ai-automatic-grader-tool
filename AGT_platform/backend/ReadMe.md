@@ -95,7 +95,7 @@ Per-chunk multimodal **grading** uses **OpenAI** when **`OPENAI_API_KEY`** is se
 
 ## LLM triplet chunking (blank + student + answer key)
 
-For notebook submissions, you can use a **single structured LLM call** that reads the instructor **blank** (from `blank_assignments/`), the **student** `.ipynb`, and the resolved **answer key** text, and emits `units` with `question` / `student_response` / `answer_key_segment` (same JSON contract as OpenAI trio frontload). The multimodal pipeline then runs answer-key enrichment, **RAG embeddings** on each trio (unless OpenAI frontload already embedded), and writes `{assignment_id}_trio_chunks.json` under `RAG_embedding/` as usual.
+For notebook submissions, you can use a **single structured LLM call** that reads the instructor **blank** (from `assignment_input/blank_assignments/`), the **student** `.ipynb`, and the resolved **answer key** text, and emits `units` with `question` / `student_response` / `answer_key_segment` (same JSON contract as OpenAI trio frontload). The multimodal pipeline then runs answer-key enrichment, **RAG embeddings** on each trio (unless OpenAI frontload already embedded), and writes `{assignment_id}_trio_chunks.json` under `RAG_embedding/` as usual.
 
 - **`MULTIMODAL_LLM_TRIPLET_THREE_SOURCE=on`** — enable this path (default: off). Requires a resolved blank notebook in `modality_hints`, non-empty `answer_key_plaintext`, and **`OPENAI_API_KEY`** (recommended; uses `OPENAI_TRIO_RAG_CHAT_MODEL`) or a working structure LLM from `MULTIMODAL_LLM_BACKEND`.
 - **`MULTIMODAL_LLM_TRIPLET_MAX_CHARS_PER_SOURCE`** — max characters per source (blank / student / key) sent to the model before truncation (default **1000000**). Provider context limits still apply.
@@ -106,7 +106,7 @@ When triplet mode is on **and** blank + answer key are present, **OpenAI trio+RA
 
 ## Multimodal grading pipeline (local)
 
-These flows use fixtures next to the repo root: `assignments_to_grade/`, `rubric/`, and (when present) `answer_key/`. Configure models and keys in **`AGT_platform/backend/.env`** (at minimum **`OPENAI_API_KEY`** for per-chunk multimodal grading; optional keys for embeddings, Whisper, and so on match `app/config.py`).
+These flows use fixtures next to the repo root: `assignment_input/assignments_to_grade/`, `rubric/`, and (when present) `assignment_input/answer_key/`. Configure models and keys in **`AGT_platform/backend/.env`** (at minimum **`OPENAI_API_KEY`** for per-chunk multimodal grading; optional keys for embeddings, Whisper, and so on match `app/config.py`).
 
 Work from **`AGT_platform/backend/`** so `pytest` picks up `tests/` and `app` on the path the same way CI does.
 
@@ -121,7 +121,7 @@ pytest tests/test_grading_pipeline_local_files.py::TestGradingPipelineLocalFiles
 
 Useful overrides (see the test module docstring in `tests/test_grading_pipeline_local_files.py` for full detail):
 
-- **`MULTIMODAL_LOCAL_TEST_MAX_ASSIGNMENTS`** — default **1** (first basename only). Use **`0`** or **`all`** to grade every stem under `assignments_to_grade/`.
+- **`MULTIMODAL_LOCAL_TEST_MAX_ASSIGNMENTS`** — default **1** (first basename only). Use **`0`** or **`all`** to grade every stem under `assignment_input/assignments_to_grade/`.
 - **`MULTIMODAL_LOCAL_TEST_GRADING_SAMPLES`** — default **1** (overrides **`MULTIMODAL_SAMPLES_PER_MODEL`** for this test). Use **`from_config`** to honor `.env`, or an integer **1–16**.
 - **`MULTIMODAL_LOCAL_TEST_MAX_GRADING_UNITS`** — default **8** chunk cap per assignment; **`0`** / **`all`** removes the cap.
 - **`SKIP_LOCAL_LLM_TESTS=1`** — skips the test so CI or laptops without API access do not call providers.
@@ -130,7 +130,7 @@ Useful overrides (see the test module docstring in `tests/test_grading_pipeline_
 
 The opt-in test **`tests/test_multimodal_research_runs.py`** repeats the multimodal pipeline for variance or evaluation. It is **skipped** unless **`MULTIMODAL_RESEARCH_ASSIGNMENT_ID`** is set, so normal `pytest` does not issue many paid calls.
 
-**15 runs** for one assignment (stem = basename under `assignments_to_grade/`, without the file extension):
+**15 runs** for one assignment (stem = basename under `assignment_input/assignments_to_grade/`, without the file extension):
 
 ```bash
 cd AGT_platform/backend

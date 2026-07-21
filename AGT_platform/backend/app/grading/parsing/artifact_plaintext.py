@@ -1,7 +1,7 @@
 """
 Convert graded **artifact bytes** (submission or blank template) into plain text for LLM/RAG.
 
-Used by :mod:`app.grading.parsing.submission_text` and :mod:`app.grading.parsing.llm_triplet_three_source`.
+Used by :mod:`app.grading.parsing.submission_text` and :mod:`app.grading.chunking.llm_triplet_three_source`.
 Optional formats (``docx``, ``xlsx``) use soft imports so the backend still starts if an extra
 library is not installed; those cases return a short placeholder string.
 """

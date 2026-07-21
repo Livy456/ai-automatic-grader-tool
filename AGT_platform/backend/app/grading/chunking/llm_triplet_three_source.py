@@ -19,10 +19,10 @@ bytes, non-empty ``answer_key_plaintext``, and at least one non-empty student ar
 **Context size:** ``MULTIMODAL_LLM_TRIPLET_MAX_CHARS_PER_SOURCE`` (default ``1000000``) caps each
 of the three bodies before the API call; provider context limits still apply.
 
-**Client selection:** Uses **Claude** (:func:`~app.grading.llm_router.anthropic_multimodal_structure_client`)
+**Client selection:** Uses **Claude** (:func:`~app.llm.llm_router.anthropic_multimodal_structure_client`)
 when ``ANTHROPIC_API_KEY`` is set and ``MULTIMODAL_ANTHROPIC_ASSIGNMENT_PARSING`` is not ``off``,
 unless ``MULTIMODAL_LLM_TRIPLET_THREE_SOURCE_PREFER_OPENAI=on`` forces
-:class:`~app.grading.llm_router.OpenAIJsonClient` with ``OPENAI_TRIO_RAG_CHAT_MODEL``. If Claude is
+:class:`~app.llm.llm_router.OpenAIJsonClient` with ``OPENAI_TRIO_RAG_CHAT_MODEL``. If Claude is
 unavailable, falls back to OpenAI when ``OPENAI_API_KEY`` is set.
 """
 
@@ -39,10 +39,10 @@ from app.grading.parsing.artifact_plaintext import (
     bytes_with_suffix_to_plain,
     infer_modality_from_artifact_keys,
 )
-from app.grading.llm_router import OpenAIJsonClient, anthropic_multimodal_structure_client
+from app.llm.llm_router import OpenAIJsonClient, anthropic_multimodal_structure_client
 
 from .chunker import modality_from_hints, task_type_from_hints
-from .ingestion import IngestionEnvelope
+from app.grading.parsing.ingestion import IngestionEnvelope
 from app.grading.schemas import GradingChunk, Modality, TaskType
 
 _log = logging.getLogger(__name__)

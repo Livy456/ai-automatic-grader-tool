@@ -18,8 +18,8 @@ from app.audit import log_event
 from app.config import Config
 from app.deps import get_db
 from app.access import get_user_from_token
-from app.models import StandaloneAIScore, StandaloneArtifact, StandaloneSubmission, User
-from app.storage import get_object_bytes, get_presigned_url, object_exists, presigned_put_url
+from app.database.models import StandaloneAIScore, StandaloneArtifact, StandaloneSubmission, User
+from app.database.storage import get_object_bytes, get_presigned_url, object_exists, presigned_put_url
 from app.tasks import grade_standalone_submission
 
 router = APIRouter()

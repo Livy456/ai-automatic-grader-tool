@@ -65,16 +65,16 @@ from typing import Any
 
 from pydantic import BaseModel, Field, ValidationError, field_validator
 
-from app.grading.llm_router import AnthropicJsonClient
+from app.llm.llm_router import AnthropicJsonClient
 from app.grading.schemas import GradingChunk, Modality, TaskType
 
-from .artifact_plaintext import (
+from app.grading.parsing.artifact_plaintext import (
     artifacts_to_concatenated_plain,
     bytes_with_suffix_to_plain,
     infer_modality_from_artifact_keys,
 )
 from .chunker import modality_from_hints, task_type_from_hints
-from .ingestion import IngestionEnvelope
+from app.grading.parsing.ingestion import IngestionEnvelope
 
 _log = logging.getLogger(__name__)
 

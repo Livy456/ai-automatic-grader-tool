@@ -18,7 +18,7 @@ import re
 
 from app.config import Config
 
-from .ingestion import IngestionEnvelope
+from app.grading.parsing.ingestion import IngestionEnvelope
 from .notebook_chunker import (
     build_notebook_qa_chunks,
     build_notebook_question_boundary_chunks,

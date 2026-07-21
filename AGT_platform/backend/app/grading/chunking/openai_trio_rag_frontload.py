@@ -24,9 +24,9 @@ from dataclasses import replace
 from typing import Any
 
 from app.config import Config
-from app.grading.llm_router import OpenAIJsonClient
-from app.grading.parsing.submission_chunks import reflow_pdf_sections_in_plaintext
-from app.grading.parsing.chunker import modality_from_hints, task_type_from_hints
+from app.llm.llm_router import OpenAIJsonClient
+from app.grading.chunking.submission_chunks import reflow_pdf_sections_in_plaintext
+from app.grading.chunking.chunker import modality_from_hints, task_type_from_hints
 from app.grading.parsing.ingestion import IngestionEnvelope
 
 from app.grading.schemas import GradingChunk, Modality, TaskType

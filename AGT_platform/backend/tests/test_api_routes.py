@@ -26,7 +26,7 @@ class ApiRoutesTestCase(unittest.TestCase):
         from sqlalchemy import String
 
         from app.config import Config
-        from app.models import AssignmentUpload
+        from app.database.models import AssignmentUpload
 
         self._tmpdir = tempfile.TemporaryDirectory()
         db_path = Path(self._tmpdir.name) / "test.db"
@@ -51,7 +51,7 @@ class ApiRoutesTestCase(unittest.TestCase):
 
     def tearDown(self) -> None:
         from app.config import Config
-        from app.models import AssignmentUpload
+        from app.database.models import AssignmentUpload
 
         self.client.__exit__(None, None, None)
         self._tmpdir.cleanup()
@@ -162,8 +162,8 @@ class CoursesRouteTests(ApiRoutesTestCase):
         self.assertEqual(res.json(), {"error": "not found"})
 
     def test_create_assignment_requires_valid_modality(self):
-        from app.extensions import SessionLocal
-        from app.models import Course
+        from app.database.extensions import SessionLocal
+        from app.database.models import Course
 
         db = SessionLocal()
         try:

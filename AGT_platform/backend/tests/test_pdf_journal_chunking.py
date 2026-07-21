@@ -4,7 +4,7 @@ from __future__ import annotations
 
 import unittest
 
-from app.grading.parsing.submission_chunks import build_submission_chunks
+from app.grading.chunking.submission_chunks import build_submission_chunks
 from app.grading.parsing.tools import normalize_verticalized_pdf_text
 
 

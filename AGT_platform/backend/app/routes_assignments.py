@@ -12,9 +12,9 @@ from werkzeug.utils import secure_filename
 
 from .config import Config
 from .deps import get_db
-from .grading.llm_router import build_multimodal_grading_clients
-from .models import AssignmentUpload
-from .storage import upload_from_fastapi_file
+from .llm.llm_router import build_multimodal_grading_clients
+from .database.models import AssignmentUpload
+from .database.storage import upload_from_fastapi_file
 from .tasks import grade_assignment_upload
 
 _log = logging.getLogger(__name__)

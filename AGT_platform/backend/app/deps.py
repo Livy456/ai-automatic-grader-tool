@@ -12,7 +12,7 @@ from typing import Generator
 from sqlalchemy.orm import Session
 
 from .access import get_user_from_token
-from .extensions import SessionLocal
+from .database.extensions import SessionLocal
 
 
 def get_db() -> Generator[Session, None, None]:

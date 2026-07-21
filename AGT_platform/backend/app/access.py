@@ -1,7 +1,8 @@
+# this is enables guest access to the website while I work on log in capabilities!!
 from __future__ import annotations
 
-from .extensions import SessionLocal
-from .models import User
+from .database.extensions import SessionLocal
+from .database.models import User
 
 
 _GUEST_EMAIL = "guest@local.ai-grader"
