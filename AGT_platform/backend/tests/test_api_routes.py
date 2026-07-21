@@ -162,7 +162,7 @@ class CoursesRouteTests(ApiRoutesTestCase):
         self.assertEqual(res.json(), {"error": "not found"})
 
     def test_create_assignment_requires_valid_modality(self):
-        from app.database.extensions import SessionLocal
+        from app.database.init_db import SessionLocal
         from app.database.models import Course
 
         db = SessionLocal()

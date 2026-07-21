@@ -10,22 +10,23 @@ load_dotenv(BASE_DIR / ".env", override=True)
 
 def _env_str(key: str) -> str:
     """Always use empty-string default with os.getenv (never None)."""
+
     return os.getenv(key, "")
 
 
 def _env_int(key: str, *, default: int) -> int:
+    """Always use empty-string default with os.getenv (never None)."""
     v = os.getenv(key, "").strip()
     return default if not v else int(v, 10)
 
-
 def _env_float(key: str, *, default: float) -> float:
+    """Always use empty-string default with os.getenv (never None)."""
     v = os.getenv(key, "").strip()
     return default if not v else float(v)
 
-
 def _env_bool(key: str) -> bool:
+    """Always use empty-string default with os.getenv (never None)."""
     return os.getenv(key, "").strip().lower() == "true"
-
 
 def _refresh_cookie_secure() -> bool:
     """True when refresh cookies must use Secure. Mirrors session cookies unless overridden."""
@@ -36,11 +37,14 @@ def _refresh_cookie_secure() -> bool:
         return False
     return _env_bool("SESSION_COOKIE_SECURE")
 
-
 class Config:
+    """This class is used to store the configuration for the application."""
+
     SECRET_KEY = _env_str("SECRET_KEY")
     # Host port for `python -m app.main` only. Default 5000; raise if Docker/backend already binds 5000.
-    FLASK_PORT = _env_int("FLASK_PORT", default=5000)
+    FLASK_PORT = _env_int("FLASK_PORT", default=5000) # update this later to FastAPI port
+    
+    # update this later for handling jwt tokens for authentication and authorization
     # Short-lived API bearer (JWT). If JWT_ACCESS_EXPIRATION_SECONDS is unset, JWT_EXPIRATION_SECONDS is used (legacy).
     JWT_ACCESS_EXPIRATION_SECONDS = (
         _env_int("JWT_ACCESS_EXPIRATION_SECONDS", default=0)
@@ -52,50 +56,43 @@ class Config:
     JWT_REFRESH_EXPIRATION_SECONDS = _env_int(
         "JWT_REFRESH_EXPIRATION_SECONDS", default=7 * 24 * 3600
     )
+
+    # update this later so that there is no refresh tokens, might pivot from using them
     REFRESH_TOKEN_COOKIE_NAME = _env_str("REFRESH_TOKEN_COOKIE_NAME").strip() or "refresh_token"
     REFRESH_COOKIE_SECURE = _refresh_cookie_secure()
     _rss = _env_str("REFRESH_COOKIE_SAMESITE").strip().lower()
     REFRESH_COOKIE_SAMESITE = _rss if _rss in ("lax", "strict", "none") else "lax"
+    
+
+
+
     DATABASE_URL = _env_str("DATABASE_URL")
+
+
     REDIS_URL = _env_str("REDIS_URL")
     FRONTEND_BASE_URL = _env_str("FRONTEND_BASE_URL")
 
     # Browser-reachable API origin for OAuth redirect_uri (no path, no trailing slash).
-    # Local: http://localhost:5000 so Entra/Google match Azure/console registration and session
-    # cookies stay on the same host as the callback. Leave empty to use the request Host.
     PUBLIC_API_URL = _env_str("PUBLIC_API_URL").strip().rstrip("/")
 
     # OAuth (Authlib) would store CSRF state in session cookies (no OAuth router is currently
-    # registered in app.main — see app.access: authorization is intentionally disabled).
-    # Must be False when the API is reached over http:// (e.g. localhost:5000) or the browser
-    # will not store/send the session cookie and the callback returns 400 "state mismatch".
     # Set True in production when users only hit the API over HTTPS (e.g. .env.production).
     SESSION_COOKIE_SECURE = _env_bool("SESSION_COOKIE_SECURE")
 
-    # deployment_tier: web | gpu — informational; used in logs and optional guards
-    DEPLOYMENT_TIER = _env_str("DEPLOYMENT_TIER").strip().lower() or "web"
+    # no longer am separating between web and gpu deployments
+    # DEPLOYMENT_TIER = _env_str("DEPLOYMENT_TIER").strip().lower() or "web"
 
     # MinIO object storage.
-    MINIO_ENDPOINT = (
-        _env_str("MINIO_ENDPOINT").strip().rstrip("/")
-        or "http://127.0.0.1:9000"
-    )
+    MINIO_ENDPOINT = _env_str("MINIO_ENDPOINT").strip().rstrip("/")
+        
     MINIO_ACCESS_KEY = (
         _env_str("MINIO_ACCESS_KEY").strip() or "minio"
     )
-    MINIO_SECRET_KEY = (
-        _env_str("MINIO_SECRET_KEY").strip() or "minio123456"
-    )
-    MINIO_BUCKET = _env_str("MINIO_BUCKET").strip() or "ai-grader"
-    MINIO_REGION = _env_str("MINIO_REGION").strip() or "us-east-1"
-    MINIO_SECURE = (
-        _env_str("MINIO_SECURE").strip().lower() == "true"
-        if _env_str("MINIO_SECURE").strip()
-        else False
-    )
-    MINIO_ADDRESSING_STYLE = (
-        _env_str("MINIO_ADDRESSING_STYLE").strip() or "path"
-    )
+    MINIO_SECRET_KEY = _env_str("MINIO_SECRET_KEY").strip()
+    MINIO_BUCKET = _env_str("MINIO_BUCKET").strip() 
+    MINIO_REGION = _env_str("MINIO_REGION").strip()
+    MINIO_SECURE = _env_bool("MINIO_SECURE")
+    MINIO_ADDRESSING_STYLE = _env_str("MINIO_ADDRESSING_STYLE").strip()
     OBJECT_STORAGE_REGION = _env_str("OBJECT_STORAGE_REGION").strip() or MINIO_REGION
 
     # Host/port the browser uses for presigned PUT/GET URLs.
@@ -276,16 +273,10 @@ class Config:
         1,
         min(_env_int("MULTIMODAL_SAMPLES_PER_MODEL", default=5), 16),
     )
-    # Max LLM calls in flight at once (asyncio.Semaphore) for one grading run, across *all*
-    # chunks and samples — not per chunk. Per-chunk grading (one or more chat calls per chunk,
-    # per sample) is the dominant source of grading latency, so this is the main lever for
-    # reducing end-to-end grading time: MultimodalGradingPipeline grades chunks concurrently
-    # via AsyncOpenAI + asyncio.gather, bounded by this semaphore. 1 = fully sequential. Keep
-    # this at/under your Celery worker concurrency × OpenAI rate-limit budget (see
-    # CELERY_WORKER_CONCURRENCY below).
+    
     MULTIMODAL_LLM_CALL_CONCURRENCY = max(
         1,
-        min(_env_int("MULTIMODAL_LLM_CALL_CONCURRENCY", default=3), 32),
+        min(_env_int("MULTIMODAL_LLM_CALL_CONCURRENCY", default=5), 32),
     )
     # Optional absolute path for assignment-wide multimodal ``custom_rubric/*.json`` caches.
     # Empty → ``MULTIMODAL_CUSTOM_RUBRIC_OUTPUT_DIR`` env → repo ``custom_rubric/``.
@@ -479,21 +470,9 @@ class Config:
 
     WHISPER_ENABLED = _env_bool("WHISPER_ENABLED")
 
-    # Celery worker tuning. Applied directly via ``celery_app.conf.worker_concurrency`` in
-    # app/tasks.py (no need to pass --concurrency on the CLI, though an explicit CLI flag still
-    # takes precedence). Default 3: up to 3 grading tasks (course / standalone / assignment
-    # upload — all share the "gpu" queue) run in parallel per worker process. Combined with
-    # MULTIMODAL_LLM_CALL_CONCURRENCY=3 per task, that's up to 9 concurrent OpenAI calls per
-    # worker process at default settings — size both together against your rate limit.
-    CELERY_WORKER_CONCURRENCY = _env_int("CELERY_WORKER_CONCURRENCY", default=3)
+    CELERY_WORKER_CONCURRENCY = _env_int("CELERY_WORKER_CONCURRENCY", default=5)
     CELERY_WORKER_PREFETCH = _env_int("CELERY_WORKER_PREFETCH", default=1)
 
-    _cors = _env_str("CORS_ORIGINS").strip()
-    if not _cors:
-        _cors = (
-            "http://localhost:5173,http://127.0.0.1:5173,"
-            "http://localhost:5174,http://127.0.0.1:5174,"
-            "https://dia-ai-grader.com,https://www.dia-ai-grader.com,"
-            "https://api.dia-ai-grader.com"
-        )
+    # Comma-separated list of allowed origins; set CORS_ORIGINS in .env
+    _cors = _env_str("CORS_ORIGINS").strip().lower()
     CORS_ORIGINS = [o.strip() for o in _cors.split(",") if o.strip()]

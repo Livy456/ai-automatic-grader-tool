@@ -1,12 +1,10 @@
-# this is enables guest access to the website while I work on log in capabilities!!
+# this file is temporary in order to have guest access to the website while I push off working on fixing log in capabilities!!
 from __future__ import annotations
 
-from .database.extensions import SessionLocal
+from .database.init_db import SessionLocal
 from .database.models import User
 
-
 _GUEST_EMAIL = "guest@local.ai-grader"
-
 
 def _ensure_guest_user() -> User:
     db = SessionLocal()
@@ -24,7 +22,6 @@ def _ensure_guest_user() -> User:
         return user
     finally:
         db.close()
-
 
 def get_user_from_token() -> dict:
     # Authorization is intentionally disabled: always provide a default guest context so API

@@ -14,7 +14,7 @@ from fastapi import APIRouter, Body, Depends, HTTPException
 from sqlalchemy.orm import Session, selectinload
 from werkzeug.utils import secure_filename
 
-from app.audit import log_event
+from app.database.audit import log_event
 from app.config import Config
 from app.deps import get_db
 from app.access import get_user_from_token

@@ -9,7 +9,7 @@ from celery import Celery
 from sqlalchemy.orm import selectinload
 
 from .config import Config
-from .database.extensions import SessionLocal, engine, init_db
+from .database.init_db import SessionLocal, engine, init_db
 from .grading.multimodal.course_multimodal_runner import (
     run_db_submission_multimodal_pipeline,
     run_standalone_multimodal_pipeline,

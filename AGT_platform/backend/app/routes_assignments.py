@@ -19,7 +19,6 @@ from .tasks import grade_assignment_upload
 
 _log = logging.getLogger(__name__)
 
-
 router = APIRouter(prefix="/api")
 
 
@@ -28,19 +27,17 @@ router = APIRouter(prefix="/api")
 # -----------------------------
 
 def _now() -> datetime:
+    """ 
+    This function returns the current date and time.
+    """
     return datetime.now()
-
 
 def _allowed_file(filename: str) -> bool:
     """
-    Allowed upload extensions for assignment uploads.
-
-    Includes notebooks / documents / code (``.ipynb``, ``.pdf``, ``.py``), audio
-    (``.mp3``, ``.wav``, ``.m4a``), spreadsheets and Word (``.xlsx``, ``.docx``),
-    plus common image, video, and plain-text types used in courses.
+    This function checks if the file extension is allowed for assignment uploads.
     """
     allowed = {
-        # Notebooks, written PDFs, Colab / script Python
+        # Python Notebooks, written PDFs, Colab / script Python
         ".ipynb",
         ".pdf",
         ".py",
@@ -48,9 +45,11 @@ def _allowed_file(filename: str) -> bool:
         ".mp3",
         ".wav",
         ".m4a",
-        # Tabular / Office
+       
+       # Spreadsheet or Word documents (Excel, Word)
         ".xlsx",
         ".docx",
+        ".csv",
         # Other course artifacts
         ".png",
         ".jpg",
@@ -61,7 +60,8 @@ def _allowed_file(filename: str) -> bool:
         ".webm",
         ".txt",
         ".md",
-        ".csv",
+
+        # JSON files are used for rubric extraction
         ".json",
     }
     ext = os.path.splitext(filename.lower())[1]
@@ -94,7 +94,6 @@ def _assignment_to_dict(a: AssignmentUpload) -> Dict[str, Any]:
         "created_at": a.created_at.isoformat() if a.created_at else None,
         "updated_at": a.updated_at.isoformat() if a.updated_at else None,
     }
-
 
 # -----------------------------
 # Routes
@@ -164,7 +163,7 @@ def get_assignment(assignment_id: str, db: Session = Depends(get_db)):
 @router.post("/assignments/{assignment_id}/grade")
 def grade_assignment(assignment_id: str, response: Response, db: Session = Depends(get_db)):
     """
-    POST /api/assignments/<id>/grade -> enqueue multimodal grading on the Celery "gpu" queue
+    POST /api/assignments/<id>/grade -> enqueue multimodal grading on the Celery queue
     and return immediately (does not block this HTTP worker for the full pipeline duration).
 
     Poll GET /api/assignments/<id> for ``status`` (queued -> grading -> graded|error) and the

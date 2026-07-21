@@ -1,9 +1,3 @@
-"""
-MinIO object storage via boto3.
-
-Large uploads use multipart transfers (see TransferConfig). Uploads stream through a spooled
-temp file so memory stays bounded for big student/teacher files.
-"""
 from __future__ import annotations
 
 import uuid
@@ -24,8 +18,15 @@ _TRANSFER = TransferConfig(
     use_threads=True,
 )
 
+# UPDATE THIS LATER TO USE S3 STORAGE INSTEAD OF MINIO; MINIO integrates with AWS S3
 
 def _addressing_style(cfg: Config) -> str:
+    """
+    Get the addressing style for the MinIO client.
+
+    Parameters:
+        cfg: The configuration for the MinIO client.
+    """
     raw = (cfg.MINIO_ADDRESSING_STYLE or "").strip().lower()
     if raw in ("path", "virtual"):
         return raw
@@ -33,7 +34,12 @@ def _addressing_style(cfg: Config) -> str:
 
 
 def minio_client(cfg: Config):
-    """Low-level boto3 client for MinIO object storage."""
+    """
+    Low-level boto3 client for MinIO object storage.
+
+    Parameters:
+        cfg: The configuration for the MinIO client.
+    """
     kwargs: dict = {
         "region_name": cfg.OBJECT_STORAGE_REGION or cfg.MINIO_REGION or "us-east-1",
         "config": BotoClientConfig(
@@ -51,34 +57,37 @@ def minio_client(cfg: Config):
     kwargs["use_ssl"] = use_ssl
     return boto3.client("s3", **kwargs)
 
-
 def minio_client_for_presign(cfg: Config):
     """
     Boto client used only to build presigned URLs returned to browsers.
 
     The URL's host must be reachable from the user's machine (not a Docker-only hostname like
     ``minio``). Server-side object-store calls continue to use :func:`minio_client`.
+
+    Parameters:
+        cfg: The configuration for the MinIO client.
     """
-    ep = (cfg.MINIO_PRESIGN_ENDPOINT or cfg.MINIO_ENDPOINT or "").strip()
+    endpoint = (cfg.MINIO_PRESIGN_ENDPOINT or cfg.MINIO_ENDPOINT or "").strip()
+    
     kwargs: dict = {
         "region_name": cfg.OBJECT_STORAGE_REGION or cfg.MINIO_REGION or "us-east-1",
         "config": BotoClientConfig(
             signature_version="s3v4",
-            s3={"addressing_style": "path" if ep else _addressing_style(cfg)},
+            s3={"addressing_style": "path" if endpoint else _addressing_style(cfg)},
         ),
     }
+    
     if cfg.MINIO_ACCESS_KEY:
         kwargs["aws_access_key_id"] = cfg.MINIO_ACCESS_KEY
     if cfg.MINIO_SECRET_KEY:
         kwargs["aws_secret_access_key"] = cfg.MINIO_SECRET_KEY
-    if ep:
-        kwargs["endpoint_url"] = ep
-    if ep:
-        kwargs["use_ssl"] = ep.lower().startswith("https://")
+    if endpoint:
+        kwargs["endpoint_url"] = endpoint
+    if endpoint:
+        kwargs["use_ssl"] = endpoint.lower().startswith("https://")
     else:
         kwargs["use_ssl"] = cfg.MINIO_SECURE
     return boto3.client("s3", **kwargs)
-
 
 def _upload_fileobj(
     cfg: Config,
@@ -87,6 +96,17 @@ def _upload_fileobj(
     content_type: Optional[str],
     extra_args: Optional[dict] = None,
 ) -> str:
+    """
+    Upload a file object to MinIO.
+
+    Parameters:
+        cfg: The configuration for the MinIO client.
+        fileobj: The file object to upload.
+        key: The key to upload the file to.
+        content_type: The content type of the file.
+        extra_args: Extra arguments to pass to the upload.
+    """
+
     client = minio_client(cfg)
     extra = dict(extra_args or {})
     if content_type:
@@ -97,7 +117,6 @@ def _upload_fileobj(
     client.upload_fileobj(fileobj, cfg.MINIO_BUCKET, key, **upload_kw)
     return key
 
-
 def upload_from_fastapi_file(cfg: Config, upload_file, key: str) -> str:
     """
     Stream upload from a FastAPI/Starlette ``UploadFile`` into MinIO without loading the whole
@@ -105,11 +124,15 @@ def upload_from_fastapi_file(cfg: Config, upload_file, key: str) -> str:
     ``SpooledTemporaryFile`` that spills to disk once it exceeds Starlette's in-memory
     threshold) while parsing the request, so by the time a route handler runs, reading it here
     is a plain, already-bounded-memory file read — no extra spooling needed on our side.
+
+    Parameters:
+        cfg: The configuration for the MinIO client.
+        upload_file: The upload file to upload.
+        key: The key to upload the file to.
     """
     content_type = upload_file.content_type or "application/octet-stream"
     upload_file.file.seek(0)
     return _upload_fileobj(cfg, upload_file.file, key, content_type)
-
 
 def put_object(
     cfg: Config,
@@ -121,6 +144,13 @@ def put_object(
     """
     Upload from a bounded stream (e.g. BytesIO). Key: {prefix}/{uuid_hex}.
     Prefer upload_from_fastapi_file for arbitrary large uploads.
+
+    Parameters:
+        cfg: The configuration for the MinIO client.
+        data_stream: The data stream to upload.
+        length: The length of the data stream.
+        content_type: The content type of the data stream.
+        prefix: The prefix to upload the data stream to.
     """
     key = f"{prefix}/{uuid.uuid4().hex}"
     if length <= cfg.MINIO_INLINE_UPLOAD_MAX_BYTES:
@@ -134,12 +164,16 @@ def put_object(
         return key
     return _upload_fileobj(cfg, data_stream, key, content_type)
 
-
 def get_object_bytes(cfg: Config, key: str) -> bytes:
-    """Download full object (used by Celery grading)."""
+    """
+    Download full object (used by Celery grading).
+
+    Parameters:
+        cfg: The configuration for the MinIO client.
+        key: The key to download the object from.
+    """
     r = minio_client(cfg).get_object(Bucket=cfg.MINIO_BUCKET, Key=key)
     return r["Body"].read()
-
 
 def get_presigned_url(
     cfg: Config,
@@ -149,7 +183,17 @@ def get_presigned_url(
     *,
     bucket: str | None = None,
 ) -> str:
-    """Presign GET/PUT. Use ``bucket`` when the object lives in a non-default reports bucket."""
+    """
+    Presign GET/PUT. Use ``bucket`` when the object lives in a non-default reports bucket.
+
+    Parameters:
+        cfg: The configuration for the MinIO client.
+        key: The key to presign the object from.
+        method: The method to presign the object from.
+        expires: The expiration time for the presigned URL.
+        bucket: The bucket to presign the object from.
+    """
+
     b = (bucket or "").strip() or cfg.MINIO_BUCKET
     client = minio_client_for_presign(cfg)
     m = method.upper()
@@ -167,7 +211,6 @@ def get_presigned_url(
         )
     raise ValueError(f"unsupported presign method: {method}")
 
-
 def presigned_put_url(
     cfg: Config,
     key: str,
@@ -177,6 +220,12 @@ def presigned_put_url(
     """
     Browser → MinIO direct upload. Client must send the same Content-Type header on PUT.
     Keeps large files off the API host (production ingress is metadata + presign only).
+    
+    Parameters:
+        cfg: The configuration for the MinIO client.
+        key: The key to presign the object from.
+        content_type: The content type of the object.
+        expires: The expiration time for the presigned URL.
     """
     exp = expires if expires is not None else cfg.MINIO_PRESIGN_PUT_EXPIRES
     client = minio_client_for_presign(cfg)
@@ -192,9 +241,14 @@ def presigned_put_url(
         HttpMethod="PUT",
     )
 
-
 def object_exists(cfg: Config, key: str) -> bool:
-    """Return True if object is present (used to finalize direct uploads)."""
+    """
+    Return True if object is present (used to finalize direct uploads).
+
+    Parameters:
+        cfg: The configuration for the MinIO client.
+        key: The key to check if the object exists.
+    """
     try:
         minio_client(cfg).head_object(Bucket=cfg.MINIO_BUCKET, Key=key)
         return True
@@ -203,4 +257,3 @@ def object_exists(cfg: Config, key: str) -> bool:
         if code in ("404", "NoSuchKey", "NotFound", "404 Not Found"):
             return False
         raise
-

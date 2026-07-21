@@ -7,7 +7,7 @@ from sqlalchemy import text
 
 from .config import Config
 from .errors import register_error_handlers
-from .database.extensions import init_db
+from .database.init_db import init_db
 from .database.models import Base
 from .tasks import init_celery
 from .routes.health import router as health_router

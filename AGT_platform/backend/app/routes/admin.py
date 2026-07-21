@@ -6,7 +6,7 @@ from sqlalchemy import func
 from sqlalchemy.exc import IntegrityError
 from sqlalchemy.orm import Session
 
-from app.audit import log_event
+from app.database.audit import log_event
 from app.deps import get_db, require_role
 from app.database.models import Assignment, AuditLog, Course, Enrollment, IssuedJwt, User
 

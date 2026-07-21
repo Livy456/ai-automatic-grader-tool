@@ -10,9 +10,28 @@ class Base(DeclarativeBase):
     pass
 
 def now():
+    """
+    This function returns the current date and time.
+    """
     return datetime.now()
 
 class AssignmentUpload(Base):
+    """
+    This model is used to store the assignment uploads.
+
+    Parameters:
+        filename: The filename of the assignment upload.
+        storage_uri: The storage URI of the assignment upload.
+        status: The status of the assignment upload.
+        suggested_grade: The suggested grade of the assignment upload.
+        feedback: The feedback of the assignment upload.
+        created_at: The date and time the assignment upload was created.
+        updated_at: The date and time the assignment upload was last updated.
+
+    Relationships:
+        assignment: The assignment that the upload belongs to.
+    """
+
     __tablename__ = "assignment_uploads"
 
     id = Column(PG_UUID(as_uuid=True), primary_key=True, default=uuid.uuid4)
@@ -26,6 +45,25 @@ class AssignmentUpload(Base):
     updated_at = Column(DateTime, default=now, onupdate=now)
 
 class Assignment(Base):
+    """
+    This model is used to store the assignments.
+
+    Parameters:
+        course_id: The ID of the course that the assignment belongs to.
+        title: The title of the assignment.
+        description: The description of the assignment.
+        modality: The modality of the assignment.
+        rubric: The rubric of the assignment.
+        created_at: The date and time the assignment was created.
+        due_date: The date and time the assignment is due.
+        grader_rubric_text: The text of the grader rubric.
+        grader_answer_key_text: The text of the grader answer key.
+        grader_instructions: The instructions for grading the assignment.
+
+    Relationships:
+        course: The course that the assignment belongs to.
+        attachments: The attachments of the assignment.
+    """
     __tablename__ = "assignments"
 
     id = Column(Integer, primary_key=True)
@@ -47,7 +85,21 @@ class Assignment(Base):
 
 
 class AssignmentAttachment(Base):
-    """Teacher-uploaded rubric files / answer keys for a course Assignment (integer id)."""
+    """
+    This model is used to store the attachments of an assignment.
+    
+    Parameters:
+        assignment_id: The ID of the assignment that the attachment belongs to.
+        kind: The kind of attachment.
+        object_key: The object key of the attachment.
+        filename: The filename of the attachment.
+        uploaded_by_id: The ID of the user who uploaded the attachment.
+        created_at: The date and time the attachment was created.
+
+    Relationships:
+        assignment: The assignment that the attachment belongs to.
+        uploaded_by: The user who uploaded the attachment.
+    """
 
     __tablename__ = "assignment_attachments"
 
@@ -64,6 +116,23 @@ class AssignmentAttachment(Base):
 
 
 class User(Base):
+    """
+    This model is used to store the users.
+
+    Parameters:
+        email: The email of the user.
+        name: The name of the user.
+        role: The role of the user.
+        created_at: The date and time the user was created
+
+    Relationships:
+        issued_jwts: The issued JWT tokens of the user.
+        refresh_tokens: The refresh tokens of the user.
+        enrollments: The enrollments of the user.
+        submissions: The submissions of the user.
+        standalone_submissions: The standalone submissions of the user.
+        ai_scores: The AI scores of the user.
+    """
     __tablename__ = "users"
     id = Column(Integer, primary_key=True)
     email = Column(String, unique=True, nullable=False, index=True)
@@ -78,7 +147,15 @@ class User(Base):
 
 
 class IssuedJwt(Base):
-    """Server-side record for each issued access token (jti allowlist + logout/revocation)."""
+    """
+    This model is used to store the issued JWT tokens.
+
+    Parameters:
+        user_id: The ID of the user who issued the JWT token.
+        jti: The JWT token identifier.
+        expires_at: The date and time the JWT token expires.
+        revoked_at: The date and time the JWT token was revoked.
+    """
     __tablename__ = "issued_jwts"
 
     id = Column(Integer, primary_key=True)
@@ -88,7 +165,7 @@ class IssuedJwt(Base):
     revoked_at = Column(DateTime, nullable=True)
     created_at = Column(DateTime, default=datetime.utcnow)
 
-
+# I might get rid of refresh tokens later [MAYBE DELETE THIS LATER]   
 class RefreshToken(Base):
     """Opaque refresh token (hash stored); raw value is placed in an HttpOnly cookie only."""
 
@@ -103,6 +180,19 @@ class RefreshToken(Base):
 
 
 class Course(Base):
+    """
+    This model is used to store the courses.
+
+    Parameters:
+        code: The code of the course.
+        title: The title of the course.
+        description: The description of the course.
+
+    Relationships:
+        enrollments: The enrollments of the course.
+        assignments: The assignments of the course.
+    """
+
     __tablename__ = "courses"
     id = Column(Integer, primary_key=True)
     code = Column(String, nullable=False)
@@ -110,6 +200,18 @@ class Course(Base):
     description = Column(Text, nullable=True)
 
 class Enrollment(Base):
+    """
+    This model is used to store the enrollments of a course.
+
+    Parameters:
+        course_id: The ID of the course that the enrollment belongs to.
+        user_id: The ID of the user who is enrolled in the course.
+        role: The role of the user in the course.
+
+    Relationships:
+        course: The course that the enrollment belongs to.
+        user: The user who is enrolled in the course.
+    """
     __tablename__ = "enrollments"
     id = Column(Integer, primary_key=True)
     course_id = Column(Integer, ForeignKey("courses.id"), nullable=False)
@@ -122,11 +224,26 @@ class Enrollment(Base):
 Index("ix_enroll_course_user", Enrollment.course_id, Enrollment.user_id, unique=True)
 
 class Submission(Base):
+
     """
     Lifecycle (status):
       uploading → uploaded → queued → grading → graded | needs_review | error
     Direct object-store flow: create as uploading; after browser PUTs to MinIO, finalize sets uploaded,
     then atomically queued + single Celery enqueue (grading_dispatch_at set once).
+
+    Parameters:
+        assignment_id: The ID of the assignment that the submission belongs to.
+        student_id: The ID of the student who submitted the assignment.
+        status: The status of the submission.
+        created_at: The date and time the submission was created.
+        updated_at: The date and time the submission was last updated.
+        grading_dispatch_at: The date and time the submission was dispatched for grading.
+        grading_celery_task_id: The ID of the Celery task that is grading the submission.
+    
+    Relationships:
+        assignment: The assignment that the submission belongs to.
+        student: The student who submitted the assignment.
+        artifacts: The artifacts of the submission.
     """
 
     __tablename__ = "submissions"
@@ -154,6 +271,22 @@ class Submission(Base):
     artifacts = relationship("SubmissionArtifact", back_populates="submission")
 
 class SubmissionArtifact(Base):
+
+    """
+    This model is used to store the artifacts of a submission.
+    This is used for submissions that are tied to a course or assignment (not standalone submissions).
+
+    Parameters:
+        submission_id: The ID of the submission that the artifact belongs to.
+        kind: The kind of artifact.
+        object_key: The object key of the artifact.
+        sha256: The SHA-256 hash of the artifact.
+        created_at: The date and time the artifact was created.
+
+    Relationships:
+        submission: The submission that the artifact belongs to.
+    """
+
     __tablename__ = "submission_artifacts"
     id = Column(Integer, primary_key=True)
     submission_id = Column(Integer, ForeignKey("submissions.id"), nullable=False)
@@ -165,6 +298,25 @@ class SubmissionArtifact(Base):
     submission = relationship("Submission", back_populates="artifacts")
 
 class AIScore(Base):
+
+    """
+    This model is used to store the AI scores of a submission.
+    This is used for submissions that are tied to a course or assignment.
+
+    Parameters:
+        submission_id: The ID of the submission that the AI score belongs to.
+        criterion: The criterion of the AI score.
+        score: The score of the AI score.
+        confidence: The confidence of the AI score.
+        rationale: The rationale of the AI score.
+        evidence: The evidence of the AI score.
+        model: The model that was used to score the submission.
+        created_at: The date and time the AI score was created.
+
+    Relationships:
+        submission: The submission that the AI score belongs to.
+    """
+
     __tablename__ = "ai_scores"
     id = Column(Integer, primary_key=True)
     submission_id = Column(Integer, ForeignKey("submissions.id"), nullable=False)
@@ -177,6 +329,16 @@ class AIScore(Base):
     created_at = Column(DateTime, default=datetime.utcnow)
 
 class AuditLog(Base):
+    """ 
+    This model is used to log audit events for the audit log.
+    
+    Parameters:
+        actor_user_id: The ID of the user who performed the action.
+        action: The action that was performed.
+        target_type: The type of the target of the action.
+        target_id: The ID of the target of the action.
+        event_metadata: The metadata of the event.
+    """
     __tablename__ = "audit_logs"
     id = Column(Integer, primary_key=True)
     actor_user_id = Column(Integer, ForeignKey("users.id"), nullable=True)
@@ -191,6 +353,26 @@ class AuditLog(Base):
 class StandaloneSubmission(Base):
     """
     Standalone autograder submission — not tied to a course or assignment.
+
+    Parameters:
+        user_id: The ID of the user who submitted the assignment.
+        title: The title of the assignment.
+        status: The status of the assignment.
+        created_at: The date and time the assignment was created.
+        updated_at: The date and time the assignment was last updated.
+        grading_dispatch_at: The date and time the assignment was dispatched for grading.
+        grading_celery_task_id: The ID of the Celery task that is grading the assignment.
+        final_score: The final score of the assignment.
+        final_feedback: The final feedback of the assignment.
+        rubric_text: The text of the rubric.
+        answer_key_text: The text of the answer key.
+        grading_instructions: The instructions for grading the assignment.
+        grading_report_object_key: The object key of the grading report.
+
+    Relationships:
+        user: The user who submitted the assignment.
+        artifacts: The artifacts of the assignment.
+        scores: The scores of the assignment.
     """
 
     __tablename__ = "standalone_submissions"
@@ -225,6 +407,21 @@ class StandaloneSubmission(Base):
 
 
 class StandaloneArtifact(Base):
+    """
+    This model is used to store the artifacts of a standalone submission.
+    This is used for standalone submissions that are not tied to a course or assignment.
+    
+    Parameters:
+        submission_id: The ID of the submission that the artifact belongs to.
+        kind: The kind of artifact.
+        object_key: The object key of the artifact.
+        filename: The filename of the artifact.
+        sha256: The SHA-256 hash of the artifact.
+        created_at: The date and time the artifact was created.
+    
+    Relationships:
+        submission: The submission that the artifact belongs to.
+    """
     __tablename__ = "standalone_artifacts"
 
     id = Column(Integer, primary_key=True)
@@ -239,6 +436,23 @@ class StandaloneArtifact(Base):
 
 
 class StandaloneAIScore(Base):
+
+    """
+    This model is used to store the AI scores of a standalone submission.
+
+    Parameters:
+        submission_id: The ID of the submission that the AI score belongs to.
+        criterion: The criterion of the AI score.
+        score: The score of the AI score.
+        confidence: The confidence of the AI score.
+        rationale: The rationale of the AI score.
+        evidence: The evidence of the AI score.
+        model: The model that was used to score the submission.
+        created_at: The date and time the AI score was created.
+
+    Relationships:
+        submission: The submission that the AI score belongs to.
+    """
     __tablename__ = "standalone_ai_scores"
 
     id = Column(Integer, primary_key=True)
