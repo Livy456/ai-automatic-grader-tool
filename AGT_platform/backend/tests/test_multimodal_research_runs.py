@@ -87,7 +87,7 @@ from app.grading.rubric_routing.generic_rubric_loader import (
     merge_four_generics_to_sections_document,
 )
 from app.grading.parsing.ingestion import ingest_raw_submission
-from app.grading.schemas import RubricType
+from app.grading.grading_dataclasses import RubricType
 from app.grading.parsing.answer_key_resolve import resolve_answer_key_plaintext
 from app.grading.grading_output.output_schema import validate_grading_output
 from app.grading.parsing.submission_text import submission_text_from_artifacts

@@ -13,7 +13,7 @@ from typing import Any
 
 from .entropy import semantic_entropy_from_cluster_counts
 from .semantic_clusterer import assign_cluster
-from app.grading.schemas import ParsedChunkGrade
+from app.grading.grading_dataclasses import ParsedChunkGrade
 
 
 def cluster_assignment(

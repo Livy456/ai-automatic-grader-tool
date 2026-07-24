@@ -41,7 +41,7 @@ from .pipeline import (
     default_answer_key_dir,
     default_rubric_dir,
 )
-from app.grading.schemas import MultimodalGradingConfig, RubricType
+from app.grading.grading_dataclasses import MultimodalGradingConfig, RubricType
 
 _log = logging.getLogger(__name__)
 

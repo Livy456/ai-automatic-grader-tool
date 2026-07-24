@@ -73,7 +73,7 @@ from app.grading.parsing.ingestion import IngestionEnvelope
 from app.grading.chunking.notebook_chunker import build_notebook_qa_chunks
 from app.grading.chunking.template_aligned_notebook_chunks import try_build_blank_template_aligned_chunks
 
-from app.grading.schemas import GradingChunk, Modality, TaskType
+from app.grading.grading_dataclasses import GradingChunk, Modality, TaskType
 
 _log = logging.getLogger(__name__)
 

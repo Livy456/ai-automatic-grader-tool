@@ -29,7 +29,7 @@ from app.llm.llm_router import (
     build_multimodal_grading_clients,
 )
 
-from app.grading.schemas import GradingChunk, SampledChunkGrade
+from app.grading.grading_dataclasses import GradingChunk, SampledChunkGrade
 
 _log = logging.getLogger(__name__)
 

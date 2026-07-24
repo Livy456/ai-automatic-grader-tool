@@ -24,7 +24,7 @@ from .notebook_chunker import (
     build_notebook_question_boundary_chunks,
     try_build_notebook_scaffold_aligned_chunks,
 )
-from app.grading.schemas import GradingChunk, Modality, TaskType
+from app.grading.grading_dataclasses import GradingChunk, Modality, TaskType
 from .chunker import modality_from_hints, task_type_from_hints
 
 _log = logging.getLogger(__name__)

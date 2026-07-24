@@ -489,12 +489,12 @@ def _resync_assignment_overall_from_question_grades(data: dict[str, Any]) -> Non
     When present, also align ``rubric_points_earned`` with the sum of per-question earned
     points so the headline fraction is not numerically inconsistent with chunk rows.
     """
-    qg = data.get("question_grades")
-    if not isinstance(qg, list) or not qg:
+    question_grades = data.get("question_grades")
+    if not isinstance(question_grades, list) or not question_grades:
         return
     scores: list[float] = []
     earned_sum = 0.0
-    for row in qg:
+    for row in question_grades:
         if not isinstance(row, dict):
             continue
         ov = row.get("overall")
@@ -612,19 +612,26 @@ def validate_grading_output(
     if ent is not None and not isinstance(ent, dict):
         raise GradingOutputValidationError("_entropy_meta must be a dict or omitted")
 
-    qg = data.get("question_grades")
-    if qg is not None:
-        if not isinstance(qg, list):
+    question_grades = data.get("question_grades")
+   
+    if question_grades is not None:
+   
+        if not isinstance(question_grades, list):
             raise GradingOutputValidationError("question_grades must be a list or omitted")
-        for i, row in enumerate(qg):
+        
+        for i, row in enumerate(question_grades):
             if not isinstance(row, dict):
                 raise GradingOutputValidationError(f"question_grades[{i}] must be a dict")
+            
             qc_norm: list[dict[str, Any]] = []
+            
             for j, crit in enumerate(row.get("criteria") or []):
                 if isinstance(crit, dict):
                     qc_norm.append(_normalize_one_criterion_dict(crit, index=f"{i}.{j}"))
+            
             row["criteria"] = qc_norm
             _sync_question_grade_overall_from_criteria(row)
+
             qov = row.get("overall")
             if isinstance(qov, dict):
                 if "score" in qov:
@@ -642,7 +649,7 @@ def validate_grading_output(
                     qov["entropy_max_reference_nats"] = float(
                         qov["entropy_max_reference_nats"]
                     )
-        data["question_grades"] = qg
+        data["question_grades"] = question_grades
 
     mod = data.get("_modality")
     if mod is not None:
@@ -666,6 +673,7 @@ def validate_grading_output(
                     "_modality.extracted_text_chars must be an int or omitted"
                 ) from e
         sig = mod.get("signals")
+        
         if sig is not None and not isinstance(sig, dict):
             raise GradingOutputValidationError(
                 "_modality.signals must be a dict or omitted"
@@ -690,9 +698,9 @@ def validate_grading_output(
             tag = f"rubric_allowlist:{msg}"
             if tag not in fl:
                 fl.append(tag)
-        qg = data.get("question_grades")
-        if isinstance(qg, list):
-            for row in qg:
+        question_grades = data.get("question_grades")
+        if isinstance(question_grades, list):
+            for row in question_grades:
                 if not isinstance(row, dict):
                     continue
                 cid = str(row.get("chunk_id") or "question_grade")

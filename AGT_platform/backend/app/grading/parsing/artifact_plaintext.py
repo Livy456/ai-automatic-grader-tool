@@ -218,7 +218,7 @@ def artifacts_to_concatenated_plain(artifacts: dict[str, bytes]) -> str:
 
 
 def infer_modality_from_artifact_keys(artifacts: dict[str, bytes]) -> str:
-    """Return a :class:`~app.grading.schemas.Modality` value string for hints."""
+    """Return a :class:`~app.grading.grading_dataclasses.Modality` value string for hints."""
     if not isinstance(artifacts, dict) or not artifacts:
         return "unknown"
     keys = {k.lower() for k, v in artifacts.items() if isinstance(v, (bytes, bytearray)) and v}

@@ -16,7 +16,7 @@ from app.grading.chunking.rag_embeddings import (
     _optional_positive_int_env,
     sanitize_evidence_for_grading_prompt,
 )
-from app.grading.schemas import GradingChunk, RubricType, TaskType
+from app.grading.grading_dataclasses import GradingChunk, RubricType, TaskType
 
 
 SYSTEM_CHUNK_GRADER = """\
@@ -106,7 +106,6 @@ PROGRAMMING / SCAFFOLDED RUBRIC — **MANDATORY** WHEN ``exact_scaffolded_code_m
 Ignore other questions; grade **only** this chunk.
 
 Return **only** one JSON object (no markdown fences, no prose outside JSON)."""
-
 
 SYSTEM_CHUNK_GRADER_ORAL_INTERVIEW_SUPPLEMENT = """\
 

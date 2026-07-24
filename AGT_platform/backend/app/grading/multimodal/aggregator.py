@@ -13,7 +13,7 @@ from app.grading.confidence_calculation.semantic_confidence import (
     summarize_chunk_confidence_from_counts,
 )
 
-from app.grading.schemas import (
+from app.grading.grading_dataclasses import (
     AssignmentGradeResult,
     ChunkGradeOutcome,
     MultimodalGradingConfig,

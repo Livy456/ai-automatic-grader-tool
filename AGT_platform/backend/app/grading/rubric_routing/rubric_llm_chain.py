@@ -15,7 +15,7 @@ from typing import Any
 from app.config import Config
 
 from app.grading.chunking.rag_embeddings import _multimodal_structure_chat_client
-from app.grading.schemas import GradingChunk, RubricType
+from app.grading.grading_dataclasses import GradingChunk, RubricType
 from app.grading.parsing.ingestion import IngestionEnvelope
 
 _log = logging.getLogger(__name__)

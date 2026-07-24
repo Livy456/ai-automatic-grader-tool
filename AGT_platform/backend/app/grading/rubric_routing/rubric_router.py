@@ -13,7 +13,7 @@ import re
 from dataclasses import dataclass
 from typing import Callable
 
-from app.grading.schemas import GradingChunk, Modality, RubricType, TaskType
+from app.grading.grading_dataclasses import GradingChunk, Modality, RubricType, TaskType
 
 
 @dataclass

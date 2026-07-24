@@ -43,7 +43,7 @@ from app.llm.llm_router import OpenAIJsonClient, anthropic_multimodal_structure_
 
 from .chunker import modality_from_hints, task_type_from_hints
 from app.grading.parsing.ingestion import IngestionEnvelope
-from app.grading.schemas import GradingChunk, Modality, TaskType
+from app.grading.grading_dataclasses import GradingChunk, Modality, TaskType
 
 _log = logging.getLogger(__name__)
 

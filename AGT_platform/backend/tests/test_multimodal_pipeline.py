@@ -65,7 +65,7 @@ from app.grading.multimodal import (
     multimodal_assignment_to_grading_dict,
 )
 from app.grading.parsing.ingestion import ingest_raw_submission
-from app.grading.schemas import (
+from app.grading.grading_dataclasses import (
     CriterionScore,
     GradingChunk,
     ParsedChunkGrade,
@@ -1271,7 +1271,7 @@ class ClaudeParsingAgentTests(unittest.TestCase):
 
     def test_modality_guidance_differs_for_code_vs_written_vs_oral(self) -> None:
         from app.grading.chunking.claude_parsing_agent import _modality_guidance
-        from app.grading.schemas import Modality as _Modality
+        from app.grading.grading_dataclasses import Modality as _Modality
 
         code_note = _modality_guidance(_Modality.CODE, {})
         written_note = _modality_guidance(_Modality.WRITTEN, {})
@@ -1312,8 +1312,8 @@ class ClaudeParsingAgentTests(unittest.TestCase):
         (``build_multimodal_grading_chunks``) is never reached.
         """
         from app.grading.multimodal import pipeline as pipeline_mod
-        from app.grading.schemas import Modality as _Modality
-        from app.grading.schemas import TaskType as _TaskType
+        from app.grading.grading_dataclasses import Modality as _Modality
+        from app.grading.grading_dataclasses import TaskType as _TaskType
 
         agent_chunk = GradingChunk(
             chunk_id="a1:s1:claude_parsing_agent:0:q1",
@@ -2734,7 +2734,7 @@ class MultiModelChunkRunnerJsonTests(unittest.TestCase):
 
         from app.config import Config
         from app.grading.multimodal.model_runner import MultiModelChunkRunner
-        from app.grading.schemas import (
+        from app.grading.grading_dataclasses import (
             GradingChunk,
             Modality,
             RubricType,
@@ -3264,7 +3264,7 @@ class MultimodalHuggingFaceRoutingTests(unittest.TestCase):
             SYSTEM_CHUNK_GRADER,
             chunk_multimodal_grading_system_prompt,
         )
-        from app.grading.schemas import (
+        from app.grading.grading_dataclasses import (
             GradingChunk,
             Modality,
             RubricType,

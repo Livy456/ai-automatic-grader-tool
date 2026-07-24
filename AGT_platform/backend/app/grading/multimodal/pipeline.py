@@ -137,7 +137,7 @@ from app.grading.chunking.rag_embeddings import (
     multimodal_rag_embed_units_enabled,
     refine_chunks_trio_with_structure_llm,
 )
-from app.grading.schemas import (
+from app.grading.grading_dataclasses import (
     AssignmentGradeResult,
     ChunkGradeOutcome,
     GradingChunk,

@@ -45,7 +45,7 @@ celery_app.conf.task_routes = {
 }
 # Bound prefetch so one worker does not hoard many large grading tasks in memory.
 celery_app.conf.worker_prefetch_multiplier = max(1, _cfg.CELERY_WORKER_PREFETCH)
-# Default worker process concurrency: 3 grading tasks in parallel (see Config docstring). A
+# Default worker process concurrency: 5 grading tasks in parallel (see Config docstring). A
 # worker started with an explicit ``--concurrency=N`` CLI flag still overrides this default.
 celery_app.conf.worker_concurrency = max(1, _cfg.CELERY_WORKER_CONCURRENCY)
 celery_app.conf.task_acks_late = True
@@ -58,6 +58,8 @@ def init_celery(cfg: Config | None = None) -> None:
     ``celery_app`` is already configured at import time from ``Config()`` above; call this
     at app-startup only if you need to refresh it against a differently-sourced ``Config``
     instance (e.g. in tests).
+    Parameters:
+        cfg: The configuration for the Celery app.
     """
     c = cfg or Config()
     celery_app.conf.broker_url = c.REDIS_URL
@@ -65,6 +67,13 @@ def init_celery(cfg: Config | None = None) -> None:
 
 
 def _evidence_for_db(ev):
+    """
+    Convert evidence to a dictionary format for database storage.
+    Parameters:
+        ev: string or dictionary format of the evidence to convert.
+    Returns:
+        A dictionary format for database storage.
+    """
     if ev is None:
         return {}
     if isinstance(ev, dict):
@@ -73,6 +82,13 @@ def _evidence_for_db(ev):
 
 
 def _rationale_for_db(c: dict) -> str:
+    """
+    Convert rationale to a string format for database storage.
+    Parameters:
+        c: The criterion to convert.
+    Returns:
+        A string format for database storage.
+    """
     return (c.get("rationale") or c.get("justification") or "").strip() or ""
 
 
@@ -106,22 +122,33 @@ def _parse_uploaded_rubric_column(filename: str, data: bytes):
 
 
 def _question_text_from_chunking_row(row: dict[str, Any]) -> str:
+    """
+    Extract the question text from a chunking row.
+    Parameters:
+        row: A dictionary containing the chunking row data.
+    Returns:
+        A string containing the question text from the chunking row.
+    """
     q = str(row.get("question_text") or "").strip()
     if q:
         return q
     unit = row.get("unit")
+
     if isinstance(unit, dict):
         q = str(unit.get("question_text") or "").strip()
         if q:
             return q
     trio = row.get("trio")
+
     if isinstance(trio, dict):
         q = str(trio.get("question") or "").strip()
         if q:
             return q
     ev = row.get("evidence")
+
     if isinstance(ev, dict):
         q = str(ev.get("question_text") or "").strip()
+
         if q:
             return q
         ev_unit = ev.get("unit")
@@ -142,6 +169,13 @@ def _question_text_from_chunking_row(row: dict[str, Any]) -> str:
 
 
 def _student_response_from_chunking_row(row: dict[str, Any]) -> str:
+    """
+    Extract the student response from a chunking row.
+    Parameters:
+        row: A dictionary containing the chunking row data.
+    Returns:
+        A string containing the student response from the chunking row.
+    """
     ev = row.get("evidence")
     if isinstance(ev, dict):
         ev_trio = ev.get("trio")
@@ -186,6 +220,13 @@ def _student_response_from_chunking_row(row: dict[str, Any]) -> str:
 
 
 def _load_chunk_rows_from_export_path(path_value: object) -> list[dict[str, Any]]:
+    """
+    Load chunk rows from a export path.
+    Parameters:
+        path_value: A string containing the path value to load the chunk rows from.
+    Returns:
+        A list of dictionaries containing the chunk rows.
+    """
     path_text = str(path_value or "").strip()
     if not path_text:
         return []

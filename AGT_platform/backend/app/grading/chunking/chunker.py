@@ -18,7 +18,7 @@ from app.grading.chunking.submission_chunks import (
     reflow_pdf_sections_in_plaintext,
 )
 from app.grading.parsing.ingestion import IngestionEnvelope
-from app.grading.schemas import GradingChunk, Modality, TaskType
+from app.grading.grading_dataclasses import GradingChunk, Modality, TaskType
 
 
 class GradingChunker(Protocol):

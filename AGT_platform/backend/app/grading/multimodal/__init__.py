@@ -3,8 +3,8 @@ Multimodal grading pipeline: ingestion → chunking → rubric routing → per-c
 uncertainty → aggregation → output.
 
 **Scope:** This package owns the core multimodal orchestration only (:mod:`pipeline`,
-:mod:`pipeline_runner`, :mod:`model_runner`, ``schemas``, :mod:`aggregator`,
-:mod:`review_router`). Submission parsing, chunking, LLM routing/prompts, output-shape
+:mod:`pipeline_runner`, :mod:`model_runner`, :mod:`app.grading.grading_dataclasses`,
+:mod:`aggregator`, :mod:`review_router`). Submission parsing, chunking, LLM routing/prompts, output-shape
 validation, AI-confidence math, and rubric routing live in their own sibling/top-level
 packages (:mod:`app.grading.parsing`, :mod:`app.grading.chunking`, :mod:`app.llm`,
 :mod:`app.grading.grading_output`, :mod:`app.grading.confidence_calculation`,
@@ -78,16 +78,16 @@ _ATTR_SOURCES = {
     "create_multimodal_pipeline_from_app_config": ".pipeline",
     "default_rubric_dir": ".pipeline",
     "run_multimodal_grading": ".pipeline_runner",
-    "AssignmentGradeResult": "app.grading.schemas",
-    "ChunkGradeOutcome": "app.grading.schemas",
-    "GradingChunk": "app.grading.schemas",
-    "Modality": "app.grading.schemas",
-    "MultimodalGradingConfig": "app.grading.schemas",
-    "ParsedChunkGrade": "app.grading.schemas",
-    "ReviewStatus": "app.grading.schemas",
-    "RubricType": "app.grading.schemas",
-    "SampledChunkGrade": "app.grading.schemas",
-    "TaskType": "app.grading.schemas",
+    "AssignmentGradeResult": "app.grading.grading_dataclasses",
+    "ChunkGradeOutcome": "app.grading.grading_dataclasses",
+    "GradingChunk": "app.grading.grading_dataclasses",
+    "Modality": "app.grading.grading_dataclasses",
+    "MultimodalGradingConfig": "app.grading.grading_dataclasses",
+    "ParsedChunkGrade": "app.grading.grading_dataclasses",
+    "ReviewStatus": "app.grading.grading_dataclasses",
+    "RubricType": "app.grading.grading_dataclasses",
+    "SampledChunkGrade": "app.grading.grading_dataclasses",
+    "TaskType": "app.grading.grading_dataclasses",
 }
 
 

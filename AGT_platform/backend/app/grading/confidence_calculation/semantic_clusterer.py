@@ -6,7 +6,7 @@ Minimum viable: cluster key from normalized total bin + rounded criterion scores
 
 from __future__ import annotations
 
-from app.grading.schemas import ParsedChunkGrade
+from app.grading.grading_dataclasses import ParsedChunkGrade
 
 
 def cluster_key_score_only(normalized: float, ndigits: int = 2) -> str:

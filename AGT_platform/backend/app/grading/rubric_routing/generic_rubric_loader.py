@@ -14,7 +14,7 @@ import logging
 from pathlib import Path
 from typing import Any
 
-from app.grading.schemas import RubricType
+from app.grading.grading_dataclasses import RubricType
 
 _log = logging.getLogger(__name__)
 

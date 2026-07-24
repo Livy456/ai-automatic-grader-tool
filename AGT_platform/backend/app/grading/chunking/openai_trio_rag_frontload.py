@@ -29,7 +29,7 @@ from app.grading.chunking.submission_chunks import reflow_pdf_sections_in_plaint
 from app.grading.chunking.chunker import modality_from_hints, task_type_from_hints
 from app.grading.parsing.ingestion import IngestionEnvelope
 
-from app.grading.schemas import GradingChunk, Modality, TaskType
+from app.grading.grading_dataclasses import GradingChunk, Modality, TaskType
 
 _log = logging.getLogger(__name__)
 

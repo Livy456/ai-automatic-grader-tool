@@ -21,7 +21,7 @@ from app.grading.rubric_routing.rubric_calibration import (
     validate_raw_score_increment,
 )
 
-from app.grading.schemas import CriterionScore, ParsedChunkGrade, RubricType
+from app.grading.grading_dataclasses import CriterionScore, ParsedChunkGrade, RubricType
 
 _log = logging.getLogger(__name__)
 

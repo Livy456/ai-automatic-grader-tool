@@ -66,7 +66,7 @@ from typing import Any
 from pydantic import BaseModel, Field, ValidationError, field_validator
 
 from app.llm.llm_router import AnthropicJsonClient
-from app.grading.schemas import GradingChunk, Modality, TaskType
+from app.grading.grading_dataclasses import GradingChunk, Modality, TaskType
 
 from app.grading.parsing.artifact_plaintext import (
     artifacts_to_concatenated_plain,

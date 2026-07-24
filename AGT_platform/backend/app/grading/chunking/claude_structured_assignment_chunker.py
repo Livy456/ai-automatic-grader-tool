@@ -1,6 +1,6 @@
 """
 Claude-only **structured** assignment chunking: one Messages call returns JSON ``units``
-that map directly to :class:`~app.grading.schemas.GradingChunk` with
+that map directly to :class:`~app.grading.grading_dataclasses.GradingChunk` with
 ``evidence["trio"]`` in the same shape as OpenAI trio frontload / downstream graders.
 
 This path does **not** use notebook cell-order chunking, QA-segment prompts, or heuristic
@@ -27,7 +27,7 @@ from app.llm.llm_router import AnthropicJsonClient
 
 from .chunker import modality_from_hints, task_type_from_hints
 from app.grading.parsing.ingestion import IngestionEnvelope
-from app.grading.schemas import GradingChunk, Modality, TaskType
+from app.grading.grading_dataclasses import GradingChunk, Modality, TaskType
 
 _log = logging.getLogger(__name__)
 

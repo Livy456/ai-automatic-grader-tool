@@ -16,7 +16,7 @@ from app.grading.grading_output.output_schema import finalize_criterion_grading_
 from app.grading.rubric_routing.rubric_allowlist import filter_criteria_dicts_to_allowlist
 from app.grading.rubric_routing.rubric_calibration import snap_half_nearest_display
 
-from app.grading.schemas import AssignmentGradeResult, ChunkGradeOutcome
+from app.grading.grading_dataclasses import AssignmentGradeResult, ChunkGradeOutcome
 
 
 def _mean_criterion_score_fractions(rows: list[dict[str, Any]]) -> float:

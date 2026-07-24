@@ -25,7 +25,7 @@ from typing import Any
 from app.grading.rag_embeddings import compute_submission_embedding
 
 from .notebook_chunker import strip_assignment_placeholder_lines
-from app.grading.schemas import GradingChunk
+from app.grading.grading_dataclasses import GradingChunk
 
 _log = logging.getLogger(__name__)
 

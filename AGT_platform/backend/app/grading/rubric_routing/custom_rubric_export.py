@@ -24,7 +24,7 @@ from app.grading.rag_embeddings import compute_submission_embedding
 
 from . import rubric_llm_chain as _rubric_llm_chain
 from .rubric_router import _MEDIUM_EDA_SIGNAL, _STRONG_EDA_SIGNAL
-from app.grading.schemas import GradingChunk, Modality, RubricType, TaskType
+from app.grading.grading_dataclasses import GradingChunk, Modality, RubricType, TaskType
 from app.grading.parsing.ingestion import IngestionEnvelope
 
 _log = logging.getLogger(__name__)

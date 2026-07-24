@@ -22,7 +22,7 @@ import logging
 import re
 from typing import Any
 
-from app.grading.schemas import GradingChunk, Modality, TaskType
+from app.grading.grading_dataclasses import GradingChunk, Modality, TaskType
 
 _log = logging.getLogger(__name__)
 

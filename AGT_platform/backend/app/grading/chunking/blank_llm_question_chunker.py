@@ -25,7 +25,7 @@ from .notebook_chunker import (
     build_notebook_qa_chunks,
     ipynb_to_plaintext_for_structure_llm,
 )
-from app.grading.schemas import GradingChunk, Modality, TaskType
+from app.grading.grading_dataclasses import GradingChunk, Modality, TaskType
 from .chunker import modality_from_hints, task_type_from_hints
 from .answer_key_chunk_enrich import _chunk_query_text, _cosine
 
