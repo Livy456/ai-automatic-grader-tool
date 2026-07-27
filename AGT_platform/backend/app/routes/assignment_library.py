@@ -1,32 +1,45 @@
 """
-Assignment creation ("Assignment Library"): teacher/admin uploads a blank assignment
+Assignment creation ("Assignment Library"): a teacher/admin uploads a blank assignment
 template, an answer key, and a rubric to create a reusable, course-independent
 ``Assignment`` row (``course_id`` is ``NULL``), plus one ``AssignmentAttachment`` row per
 uploaded file.
 
 Mirrors the standalone autograder's upload-context flow (see ``app/routes/standalone.py``):
 presigned MinIO PUT URLs are handed back from ``start``, the browser PUTs file bytes directly
-to object storage, then ``finalize`` verifies every object landed and marks the assignment
-ready. Unlike the standalone autograder, nothing is queued for grading here — this endpoint
-only persists assignment metadata + context files for later use.
+to object storage, then ``finalize`` verifies every object landed. Unlike the standalone
+autograder, nothing is queued for grading here. Instead, ``finalize`` runs two small agents so
+teachers land on an editable question bank instead of a blank page:
+
+1. :mod:`app.grading.parsing.assignment_context_parser` ("parsing agent") — deterministically
+   extracts plain text from the uploaded blank template + answer key bytes.
+2. :mod:`app.grading.chunking.assignment_qa_chunker` ("chunking agent") — one LLM call that
+   pairs each question in the blank template with its answer-key reference, isolated from
+   every other question.
+
+The resulting pairs are persisted as editable ``AssignmentQuestionChunk`` rows; teachers can
+edit/add/remove them on the review page and re-save via ``PUT .../chunks``, and revisit any
+past assignment from the history list (``GET /api/assignment-library``).
 """
 from __future__ import annotations
 
 import json
 import uuid
 from datetime import datetime
+from typing import Any
 
-from flask import Blueprint, jsonify, request
+from fastapi import APIRouter, Body, Depends, HTTPException
+from sqlalchemy.orm import Session, selectinload
 from werkzeug.utils import secure_filename
 
-from app.audit import log_event
 from app.config import Config
-from app.extensions import SessionLocal
-from app.models import Assignment, AssignmentAttachment
-from app.access import require_role
-from app.storage import get_object_bytes, object_exists, presigned_put_url
+from app.database.audit import log_event
+from app.database.models import Assignment, AssignmentAttachment, AssignmentQuestionChunk
+from app.deps import get_db, require_role
+from app.database.storage import get_object_bytes, object_exists, presigned_put_url
+from app.grading.chunking.assignment_qa_chunker import try_chunk_assignment_qa_pairs
+from app.grading.parsing.assignment_context_parser import parse_assignment_context
 
-bp = Blueprint("assignment_library", __name__)
+router = APIRouter()
 
 _MODALITIES = frozenset({"code", "written", "notebook", "video", "image"})
 _ATTACHMENT_KINDS = ("blank_assignment", "answer_key", "rubric")
@@ -39,7 +52,7 @@ _MAX_FILES = 10
 _MAX_TITLE_LEN = 255
 
 
-def _normalize_rubric(raw):
+def _normalize_rubric(raw: Any) -> list[dict[str, Any]] | None:
     """Same shape as ``routes/courses.py``: ``[{"criterion": str, "max_score": float}, ...]``."""
     if not isinstance(raw, list):
         return None
@@ -59,7 +72,7 @@ def _normalize_rubric(raw):
     return out
 
 
-def _serialize_library_assignment(a: Assignment) -> dict:
+def _serialize_assignment(a: Assignment) -> dict[str, Any]:
     return {
         "id": a.id,
         "title": a.title,
@@ -70,25 +83,43 @@ def _serialize_library_assignment(a: Assignment) -> dict:
     }
 
 
-@bp.post("/api/assignment-library/start")
-@require_role("teacher", "admin")
-def start_assignment_library_entry():
-    """Create the ``Assignment`` (+ ``AssignmentAttachment`` rows) and return presigned PUT URLs."""
-    user = request.user
-    body = request.get_json(silent=True) or {}
+def _serialize_chunk(c: AssignmentQuestionChunk) -> dict[str, Any]:
+    return {
+        "id": c.id,
+        "question_id": c.question_id,
+        "order_index": c.order_index,
+        "question_text": c.question_text,
+        "answer_text": c.answer_text,
+        "is_edited": c.is_edited,
+    }
 
+
+def _get_library_assignment(db: Session, assignment_id: int) -> Assignment:
+    a = db.query(Assignment).filter_by(id=assignment_id, course_id=None).one_or_none()
+    if not a:
+        raise HTTPException(404, "not found")
+    return a
+
+
+@router.post("/api/assignment-library/start")
+def start_assignment_library_entry(
+    body: dict[str, Any] = Body(default={}),
+    db: Session = Depends(get_db),
+    user: dict = Depends(require_role("teacher", "admin")),
+):
+    """Create the ``Assignment`` (+ ``AssignmentAttachment`` rows) and return presigned PUT URLs."""
     title = (body.get("title") or "").strip()
     if not title:
-        return jsonify({"error": "title is required"}), 400
+        raise HTTPException(400, "title is required")
     if len(title) > _MAX_TITLE_LEN:
-        return jsonify({"error": "title too long"}), 400
+        raise HTTPException(400, "title too long")
 
     description = body.get("description")
     description = description.strip() if isinstance(description, str) else ""
 
     modality = (body.get("modality") or "written").strip().lower()
     if modality not in _MODALITIES:
-        return jsonify({"error": "invalid modality"}), 400
+        raise HTTPException(400, "invalid modality")
 
     rubric_text = (body.get("rubric_text") or "").strip() or None
     answer_key_text = (body.get("answer_key_text") or "").strip() or None
@@ -96,180 +127,290 @@ def start_assignment_library_entry():
 
     files = body.get("files")
     if not files or not isinstance(files, list):
-        return jsonify({"error": "files[] required"}), 400
+        raise HTTPException(400, "files[] required")
     if len(files) > _MAX_FILES:
-        return jsonify({"error": f"at most {_MAX_FILES} files"}), 400
+        raise HTTPException(400, f"at most {_MAX_FILES} files")
 
     cfg = Config()
-    db = SessionLocal()
-    try:
-        a = Assignment(
-            course_id=None,
-            title=title,
-            description=description,
-            modality=modality,
-            rubric=[],
-            created_at=datetime.utcnow(),
-            grader_rubric_text=rubric_text,
-            grader_answer_key_text=answer_key_text,
-            grader_instructions=grading_instructions,
-        )
-        db.add(a)
-        db.flush()
+    a = Assignment(
+        course_id=None,
+        title=title,
+        description=description,
+        modality=modality,
+        rubric=[],
+        created_at=datetime.utcnow(),
+        grader_rubric_text=rubric_text,
+        grader_answer_key_text=answer_key_text,
+        grader_instructions=grading_instructions,
+    )
+    db.add(a)
+    db.flush()
 
-        uploads_out = []
-        for spec in files:
-            raw_kind = (spec.get("artifact_kind") or spec.get("kind") or "").strip().lower()
-            if raw_kind not in _ATTACHMENT_KINDS:
-                db.rollback()
-                return (
-                    jsonify(
-                        {
-                            "error": (
-                                "each file must set artifact_kind to one of: "
-                                + ", ".join(_ATTACHMENT_KINDS)
-                            )
-                        }
-                    ),
-                    400,
-                )
-            raw_name = (spec.get("filename") or "").strip()
-            filename = secure_filename(raw_name)
-            if not filename:
-                continue
-            content_type = (spec.get("content_type") or "application/octet-stream").strip()
-            key = (
-                f"assignments/by-id/{a.id}/materials/{_SAFE_KIND_DIR[raw_kind]}/"
-                f"{uuid.uuid4().hex}_{filename}"
+    uploads_out = []
+    for spec in files:
+        raw_kind = (spec.get("artifact_kind") or spec.get("kind") or "").strip().lower()
+        if raw_kind not in _ATTACHMENT_KINDS:
+            db.rollback()
+            raise HTTPException(
+                400,
+                "each file must set artifact_kind to one of: " + ", ".join(_ATTACHMENT_KINDS),
             )
-            row = AssignmentAttachment(
+        raw_name = (spec.get("filename") or "").strip()
+        filename = secure_filename(raw_name)
+        if not filename:
+            continue
+        content_type = (spec.get("content_type") or "application/octet-stream").strip()
+        key = (
+            f"assignments/by-id/{a.id}/materials/{_SAFE_KIND_DIR[raw_kind]}/"
+            f"{uuid.uuid4().hex}_{filename}"
+        )
+        row = AssignmentAttachment(
+            assignment_id=a.id,
+            kind=raw_kind,
+            object_key=key,
+            filename=filename,
+            uploaded_by_id=user.get("id"),
+        )
+        db.add(row)
+        db.flush()
+        url = presigned_put_url(cfg, key, content_type)
+        uploads_out.append(
+            {
+                "artifact_id": row.id,
+                "object_key": key,
+                "upload_url": url,
+                "content_type": content_type,
+                "kind": raw_kind,
+            }
+        )
+
+    if not uploads_out:
+        db.rollback()
+        raise HTTPException(400, "no valid files")
+
+    db.commit()
+    db.refresh(a)
+    log_event(
+        user["id"],
+        "CREATE_ASSIGNMENT_LIBRARY_ENTRY",
+        "Assignment",
+        a.id,
+        {"n_files": len(uploads_out), "title": a.title},
+    )
+    return {
+        "assignment_id": a.id,
+        "status": "uploading",
+        "uploads": uploads_out,
+    }
+
+
+@router.post("/api/assignment-library/{assignment_id}/finalize")
+def finalize_assignment_library_entry(
+    assignment_id: int,
+    db: Session = Depends(get_db),
+    user: dict = Depends(require_role("teacher", "admin")),
+):
+    """
+    Verify every uploaded object landed in MinIO, best-effort parse a JSON rubric file into
+    ``Assignment.rubric``, then run the parsing + chunking agents to seed an editable question
+    bank (``AssignmentQuestionChunk`` rows) from the blank template + answer key.
+    """
+    cfg = Config()
+    a = (
+        db.query(Assignment)
+        .filter_by(id=assignment_id, course_id=None)
+        .with_for_update()
+        .one_or_none()
+    )
+    if not a:
+        raise HTTPException(404, "not found")
+
+    attachments = db.query(AssignmentAttachment).filter_by(assignment_id=assignment_id).all()
+    kinds = {att.kind for att in attachments}
+    missing = [k for k in _ATTACHMENT_KINDS if k not in kinds]
+    if missing:
+        raise HTTPException(
+            400,
+            {
+                "error": "missing required context",
+                "detail": (
+                    "Assignment creation requires a blank assignment template, an answer "
+                    "key, and a rubric before it can be finalized."
+                ),
+                "missing": missing,
+            },
+        )
+
+    for att in attachments:
+        if not object_exists(cfg, att.object_key):
+            raise HTTPException(400, f"missing object: {att.object_key}")
+
+    by_kind = {att.kind: att for att in attachments}
+    rubric_att = by_kind.get("rubric")
+    if rubric_att and rubric_att.filename.lower().endswith(".json"):
+        try:
+            raw = get_object_bytes(cfg, rubric_att.object_key)
+            normalized = _normalize_rubric(json.loads(raw.decode("utf-8")))
+            if normalized:
+                a.rubric = normalized
+        except Exception:
+            pass  # Keep a.rubric == [] and rely on the stored file if it doesn't parse.
+
+    chunking_status = "skipped"
+    blank_att = by_kind.get("blank_assignment")
+    answer_key_att = by_kind.get("answer_key")
+    if blank_att is not None:
+        try:
+            blank_bytes = get_object_bytes(cfg, blank_att.object_key)
+        except Exception:
+            blank_bytes = None
+        answer_key_bytes = None
+        if answer_key_att is not None:
+            try:
+                answer_key_bytes = get_object_bytes(cfg, answer_key_att.object_key)
+            except Exception:
+                answer_key_bytes = None
+
+        parsed_context = parse_assignment_context(
+            blank_bytes=blank_bytes,
+            blank_filename=blank_att.filename,
+            answer_key_bytes=answer_key_bytes,
+            answer_key_filename=answer_key_att.filename if answer_key_att else "",
+        )
+        answer_key_text = parsed_context.answer_key_text or (a.grader_answer_key_text or "")
+        pairs = try_chunk_assignment_qa_pairs(
+            blank_text=parsed_context.blank_text,
+            answer_key_text=answer_key_text,
+            cfg=cfg,
+        )
+        if pairs:
+            for i, pair in enumerate(pairs):
+                db.add(
+                    AssignmentQuestionChunk(
+                        assignment_id=a.id,
+                        question_id=pair["question_id"],
+                        order_index=i,
+                        question_text=pair["question"],
+                        answer_text=pair["answer"],
+                        is_edited=False,
+                    )
+                )
+            chunking_status = "ok"
+        else:
+            chunking_status = "no_pairs"
+
+    db.commit()
+    log_event(user["id"], "FINALIZE_ASSIGNMENT_LIBRARY_ENTRY", "Assignment", a.id, {})
+    return _serialize_assignment(a) | {"status": "created", "chunking_status": chunking_status}
+
+
+@router.get("/api/assignment-library")
+def list_assignment_library_entries(
+    db: Session = Depends(get_db),
+    user: dict = Depends(require_role("teacher", "admin")),
+):
+    """History: most recent course-independent assignments created via this flow."""
+    items = (
+        db.query(Assignment)
+        .filter(Assignment.course_id.is_(None))
+        .order_by(Assignment.created_at.desc())
+        .limit(50)
+        .all()
+    )
+    return [_serialize_assignment(a) for a in items]
+
+
+@router.get("/api/assignment-library/{assignment_id}")
+def get_assignment_library_entry(
+    assignment_id: int,
+    db: Session = Depends(get_db),
+    user: dict = Depends(require_role("teacher", "admin")),
+):
+    """Assignment detail + its (possibly teacher-edited) question/answer chunks, in order."""
+    a = (
+        db.query(Assignment)
+        .options(selectinload(Assignment.question_chunks))
+        .filter_by(id=assignment_id, course_id=None)
+        .one_or_none()
+    )
+    if not a:
+        raise HTTPException(404, "not found")
+    chunks = sorted(a.question_chunks, key=lambda c: c.order_index)
+    return _serialize_assignment(a) | {"chunks": [_serialize_chunk(c) for c in chunks]}
+
+
+@router.put("/api/assignment-library/{assignment_id}/chunks")
+def save_assignment_library_chunks(
+    assignment_id: int,
+    body: dict[str, Any] = Body(default={}),
+    db: Session = Depends(get_db),
+    user: dict = Depends(require_role("teacher", "admin")),
+):
+    """
+    Replace this assignment's question/answer chunks with the given (teacher-edited) list —
+    the review page always sends its full current set, so this is a straightforward
+    update-existing / insert-new / delete-missing sync rather than a partial patch.
+    """
+    a = _get_library_assignment(db, assignment_id)
+
+    raw_chunks = body.get("chunks")
+    if not isinstance(raw_chunks, list):
+        raise HTTPException(400, "chunks[] required")
+
+    existing_by_id = {c.id: c for c in db.query(AssignmentQuestionChunk).filter_by(assignment_id=a.id).all()}
+    keep_ids: set[int] = set()
+
+    for i, item in enumerate(raw_chunks):
+        if not isinstance(item, dict):
+            raise HTTPException(400, f"invalid chunk at index {i}")
+        question_text = str(item.get("question_text") or "").strip()
+        answer_text = str(item.get("answer_text") or "").strip()
+        question_id = str(item.get("question_id") or "").strip() or f"q{i + 1}"
+        chunk_id = item.get("id")
+
+        if isinstance(chunk_id, int) and chunk_id in existing_by_id:
+            row = existing_by_id[chunk_id]
+            changed = (
+                row.question_id != question_id
+                or row.question_text != question_text
+                or row.answer_text != answer_text
+            )
+            row.question_id = question_id[:120]
+            row.order_index = i
+            row.question_text = question_text
+            row.answer_text = answer_text
+            if changed:
+                row.is_edited = True
+            keep_ids.add(row.id)
+        else:
+            row = AssignmentQuestionChunk(
                 assignment_id=a.id,
-                kind=raw_kind,
-                object_key=key,
-                filename=filename,
-                uploaded_by_id=user.get("id"),
+                question_id=question_id[:120],
+                order_index=i,
+                question_text=question_text,
+                answer_text=answer_text,
+                is_edited=True,
             )
             db.add(row)
             db.flush()
-            url = presigned_put_url(cfg, key, content_type)
-            uploads_out.append(
-                {
-                    "artifact_id": row.id,
-                    "object_key": key,
-                    "upload_url": url,
-                    "content_type": content_type,
-                    "kind": raw_kind,
-                }
-            )
+            keep_ids.add(row.id)
 
-        if not uploads_out:
-            db.rollback()
-            return jsonify({"error": "no valid files"}), 400
+    for cid, row in existing_by_id.items():
+        if cid not in keep_ids:
+            db.delete(row)
 
-        db.commit()
-        db.refresh(a)
-        log_event(
-            user["id"],
-            "CREATE_ASSIGNMENT_LIBRARY_ENTRY",
-            "Assignment",
-            a.id,
-            {"n_files": len(uploads_out), "title": a.title},
-        )
-        return jsonify(
-            {
-                "assignment_id": a.id,
-                "status": "uploading",
-                "uploads": uploads_out,
-            }
-        )
-    except Exception:
-        db.rollback()
-        raise
-    finally:
-        db.close()
-
-
-@bp.post("/api/assignment-library/<int:assignment_id>/finalize")
-@require_role("teacher", "admin")
-def finalize_assignment_library_entry(assignment_id: int):
-    """Verify every uploaded object landed in MinIO; best-effort parse a JSON rubric file."""
-    user = request.user
-    cfg = Config()
-    db = SessionLocal()
-    try:
-        a = (
-            db.query(Assignment)
-            .filter_by(id=assignment_id, course_id=None)
-            .with_for_update()
-            .one_or_none()
-        )
-        if not a:
-            return jsonify({"error": "not found"}), 404
-
-        attachments = (
-            db.query(AssignmentAttachment).filter_by(assignment_id=assignment_id).all()
-        )
-        kinds = {att.kind for att in attachments}
-        missing = [k for k in _ATTACHMENT_KINDS if k not in kinds]
-        if missing:
-            return (
-                jsonify(
-                    {
-                        "error": "missing required context",
-                        "detail": (
-                            "Assignment creation requires a blank assignment template, an "
-                            "answer key, and a rubric before it can be finalized."
-                        ),
-                        "missing": missing,
-                    }
-                ),
-                400,
-            )
-
-        for att in attachments:
-            if not object_exists(cfg, att.object_key):
-                return jsonify({"error": f"missing object: {att.object_key}"}), 400
-
-        rubric_att = next((att for att in attachments if att.kind == "rubric"), None)
-        if rubric_att and rubric_att.filename.lower().endswith(".json"):
-            try:
-                raw = get_object_bytes(cfg, rubric_att.object_key)
-                parsed = json.loads(raw.decode("utf-8"))
-                normalized = _normalize_rubric(parsed)
-                if normalized:
-                    a.rubric = normalized
-            except Exception:
-                pass  # Keep a.rubric == [] and rely on the stored file if it doesn't parse.
-
-        db.commit()
-        log_event(
-            user["id"],
-            "FINALIZE_ASSIGNMENT_LIBRARY_ENTRY",
-            "Assignment",
-            a.id,
-            {},
-        )
-        return jsonify(_serialize_library_assignment(a) | {"status": "created"})
-    except Exception:
-        db.rollback()
-        raise
-    finally:
-        db.close()
-
-
-@bp.get("/api/assignment-library")
-@require_role("teacher", "admin")
-def list_assignment_library_entries():
-    """Most recent course-independent assignments (created via this creation flow)."""
-    db = SessionLocal()
-    try:
-        items = (
-            db.query(Assignment)
-            .filter(Assignment.course_id.is_(None))
-            .order_by(Assignment.created_at.desc())
-            .limit(50)
-            .all()
-        )
-        return jsonify([_serialize_library_assignment(a) for a in items])
-    finally:
-        db.close()
+    db.commit()
+    log_event(
+        user["id"],
+        "SAVE_ASSIGNMENT_LIBRARY_CHUNKS",
+        "Assignment",
+        a.id,
+        {"n_chunks": len(raw_chunks)},
+    )
+    chunks = (
+        db.query(AssignmentQuestionChunk)
+        .filter_by(assignment_id=a.id)
+        .order_by(AssignmentQuestionChunk.order_index)
+        .all()
+    )
+    return {"assignment_id": a.id, "chunks": [_serialize_chunk(c) for c in chunks]}

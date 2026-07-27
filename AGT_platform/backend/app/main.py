@@ -17,6 +17,7 @@ from .routes.courses import router as courses_router
 from .routes.standalone import router as standalone_router
 from .routes_assignments import router as assignments_router
 from .routes.assignment_materials import router as assignment_materials_router
+from .routes.assignment_library import router as assignment_library_router
 
 _log = logging.getLogger(__name__)
 
@@ -81,6 +82,7 @@ def create_app() -> FastAPI:
     app.include_router(health_router)
     app.include_router(assignments_router)
     app.include_router(assignment_materials_router)
+    app.include_router(assignment_library_router)
     app.include_router(submissions_router)
     app.include_router(admin_router)
     app.include_router(courses_router)
