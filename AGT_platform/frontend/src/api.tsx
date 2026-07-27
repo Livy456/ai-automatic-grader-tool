@@ -159,6 +159,19 @@ export const api = {
     return text ? JSON.parse(text) : null;
   },
 
+  async put(path: string, body: object) {
+    const headers = withAuthHeaders();
+    headers.set("Content-Type", "application/json");
+    const res = await fetchWithAuthRetry(path, {
+      method: "PUT",
+      body: JSON.stringify(body),
+      headers,
+      credentials: "include",
+    });
+    const text = await handleResponse(res, `PUT ${path}`);
+    return text ? JSON.parse(text) : null;
+  },
+
   async delete(path: string) {
     const res = await fetchWithAuthRetry(path, {
       method: "DELETE",
@@ -283,6 +296,101 @@ export function adminEnrollUser(payload: CreateEnrollmentPayload): Promise<{ id:
 
 export function adminRemoveEnrollment(enrollmentId: number): Promise<{ ok: boolean }> {
   return api.delete(`/api/admin/enrollments/${enrollmentId}`);
+}
+
+// ── Assignment Creation ("Assignment Library") ─────────────────────────────
+// Upload-context flow mirrors the standalone autograder (start → PUT to MinIO → finalize),
+// but instead of grading, finalize runs the parsing + chunking agents and returns an editable
+// question/answer bank for the review page.
+
+export type AssignmentLibraryFileSpec = {
+  filename: string;
+  content_type: string;
+  artifact_kind: "blank_assignment" | "answer_key" | "rubric";
+};
+
+export type AssignmentLibraryEntry = {
+  id: number;
+  title: string;
+  description: string;
+  modality: string;
+  rubric: RubricCriterion[];
+  created_at: string | null;
+};
+
+export type AssignmentQuestionChunk = {
+  id: number;
+  question_id: string;
+  order_index: number;
+  question_text: string;
+  answer_text: string;
+  is_edited: boolean;
+};
+
+export type AssignmentLibraryStartResponse = {
+  assignment_id: number;
+  status: string;
+  uploads: DirectUploadStartResponse["uploads"];
+};
+
+export async function startAssignmentLibraryEntry(payload: {
+  title: string;
+  description?: string;
+  modality?: string;
+  files: AssignmentLibraryFileSpec[];
+  rubric_text?: string;
+  answer_key_text?: string;
+}): Promise<AssignmentLibraryStartResponse> {
+  return api.post("/api/assignment-library/start", payload);
+}
+
+export async function finalizeAssignmentLibraryEntry(
+  assignmentId: number
+): Promise<AssignmentLibraryEntry & { status: string; chunking_status: string }> {
+  return api.post(`/api/assignment-library/${assignmentId}/finalize`, {});
+}
+
+/** Presigned flow: start → PUT each file to MinIO → finalize (runs the parse + chunk agents). */
+export async function createAssignmentLibraryEntryDirect(
+  payload: {
+    title: string;
+    description?: string;
+    modality?: string;
+    rubric_text?: string;
+    answer_key_text?: string;
+  },
+  files: File[],
+  fileSpecs: AssignmentLibraryFileSpec[],
+  onProgress?: (fileIndex: number, fraction: number) => void
+): Promise<AssignmentLibraryEntry & { status: string; chunking_status: string }> {
+  const start = await startAssignmentLibraryEntry({ ...payload, files: fileSpecs });
+  for (let i = 0; i < start.uploads.length; i++) {
+    const u = start.uploads[i];
+    const file = files[i];
+    if (!file) continue;
+    await putToPresignedUrl(u.upload_url, file, u.content_type);
+    onProgress?.(i, 1);
+  }
+  return finalizeAssignmentLibraryEntry(start.assignment_id);
+}
+
+export function listAssignmentLibraryEntries(): Promise<AssignmentLibraryEntry[]> {
+  return api.get("/api/assignment-library");
+}
+
+export function getAssignmentLibraryEntry(
+  assignmentId: number
+): Promise<AssignmentLibraryEntry & { chunks: AssignmentQuestionChunk[] }> {
+  return api.get(`/api/assignment-library/${assignmentId}`);
+}
+
+export function saveAssignmentLibraryChunks(
+  assignmentId: number,
+  chunks: Array<Pick<AssignmentQuestionChunk, "question_id" | "question_text" | "answer_text"> & {
+    id?: number;
+  }>
+): Promise<{ assignment_id: number; chunks: AssignmentQuestionChunk[] }> {
+  return api.put(`/api/assignment-library/${assignmentId}/chunks`, { chunks });
 }
 
 // ── Standalone autograder (public API; optional Bearer when logged in) ────

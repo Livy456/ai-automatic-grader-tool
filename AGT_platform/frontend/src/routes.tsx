@@ -14,6 +14,8 @@ import MyGrades from "./pages/MyGrades";
 import SubmissionsList from "./pages/SubmissionsList";
 import StandaloneAutograder from "./pages/StandaloneAutograder";
 import StandaloneResult from "./pages/StandaloneResult";
+import AssignmentCreation from "./pages/AssignmentCreation";
+import AssignmentChunkReview from "./pages/AssignmentChunkReview";
 
 const router = createBrowserRouter(
   createRoutesFromElements(
@@ -24,6 +26,8 @@ const router = createBrowserRouter(
       <Route path="teacher" element={<Navigate to="/autograder" replace />} />
       <Route path="grades" element={<MyGrades />} />
       <Route path="assignments" element={<AssignmentsBrowse />} />
+      <Route path="assignment-creation" element={<AssignmentCreation />} />
+      <Route path="assignment-creation/:id/review" element={<AssignmentChunkReview />} />
       <Route path="assignments/:id" element={<AssignmentDetail />} />
       <Route path="assignments/:id/submit" element={<SubmitAssignment />} />
       <Route path="submissions" element={<SubmissionsList />} />

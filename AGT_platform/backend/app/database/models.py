@@ -82,6 +82,12 @@ class Assignment(Base):
 
     course = relationship("Course")
     attachments = relationship("AssignmentAttachment", back_populates="assignment")
+    question_chunks = relationship(
+        "AssignmentQuestionChunk",
+        back_populates="assignment",
+        cascade="all, delete-orphan",
+        order_by="AssignmentQuestionChunk.order_index",
+    )
 
 
 class AssignmentAttachment(Base):
@@ -105,7 +111,7 @@ class AssignmentAttachment(Base):
 
     id = Column(Integer, primary_key=True)
     assignment_id = Column(Integer, ForeignKey("assignments.id"), nullable=False)
-    kind = Column(String(32), nullable=False)  # rubric | answer_key
+    kind = Column(String(32), nullable=False)  # rubric | answer_key | blank_assignment
     object_key = Column("s3_key", String(1024), nullable=False)
     filename = Column(String(512), nullable=False)
     uploaded_by_id = Column(Integer, ForeignKey("users.id"), nullable=True)
@@ -113,6 +119,43 @@ class AssignmentAttachment(Base):
 
     assignment = relationship("Assignment", back_populates="attachments")
     uploaded_by = relationship("User")
+
+
+class AssignmentQuestionChunk(Base):
+    """
+    One question/answer pair parsed (and optionally teacher-edited) from an Assignment's
+    uploaded blank template + answer key. Produced by the Assignment Creation flow's parsing
+    + chunking agents (see ``app.grading.parsing.assignment_context_parser`` and
+    ``app.grading.chunking.assignment_qa_chunker``); teachers can edit and re-save these via
+    ``app.routes.assignment_library``.
+
+    Parameters:
+        assignment_id: The ID of the assignment this chunk belongs to.
+        question_id: Stable per-assignment label for this question (e.g. "1", "2a", "q3").
+        order_index: Display / grading order among the assignment's chunks.
+        question_text: The isolated question/prompt text.
+        answer_text: The reference/expected answer text for this question.
+        is_edited: Whether a teacher has manually created or edited this chunk since parsing.
+        created_at: The date and time the chunk was first created.
+        updated_at: The date and time the chunk was last updated.
+
+    Relationships:
+        assignment: The assignment this chunk belongs to.
+    """
+
+    __tablename__ = "assignment_question_chunks"
+
+    id = Column(Integer, primary_key=True)
+    assignment_id = Column(Integer, ForeignKey("assignments.id"), nullable=False)
+    question_id = Column(String(120), nullable=False, default="")
+    order_index = Column(Integer, nullable=False, default=0)
+    question_text = Column(Text, nullable=False, default="")
+    answer_text = Column(Text, nullable=False, default="")
+    is_edited = Column(Boolean, nullable=False, default=False)
+    created_at = Column(DateTime, default=datetime.utcnow)
+    updated_at = Column(DateTime, default=datetime.utcnow, onupdate=datetime.utcnow)
+
+    assignment = relationship("Assignment", back_populates="question_chunks")
 
 
 class User(Base):

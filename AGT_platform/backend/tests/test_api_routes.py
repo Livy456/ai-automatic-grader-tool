@@ -232,5 +232,113 @@ class StandaloneRouteTests(ApiRoutesTestCase):
         self.assertEqual(body["uploads"][0]["upload_url"], "https://minio.example/fake-presigned-url")
 
 
+class AssignmentLibraryRouteTests(ApiRoutesTestCase):
+    """Assignment Creation flow: upload-context (start/finalize) + editable Q&A chunks."""
+
+    def _start(self):
+        with patch(
+            "app.routes.assignment_library.presigned_put_url",
+            return_value="https://minio.example/fake-presigned-url",
+        ):
+            return self.client.post(
+                "/api/assignment-library/start",
+                json={
+                    "title": "Problem Set 3",
+                    "modality": "written",
+                    "files": [
+                        {"filename": "blank.pdf", "content_type": "application/pdf", "artifact_kind": "blank_assignment"},
+                        {"filename": "key.pdf", "content_type": "application/pdf", "artifact_kind": "answer_key"},
+                        {"filename": "rubric.json", "content_type": "application/json", "artifact_kind": "rubric"},
+                    ],
+                },
+            )
+
+    def test_start_requires_title_and_files(self):
+        res = self.client.post("/api/assignment-library/start", json={})
+        self.assertEqual(res.status_code, 400)
+        self.assertEqual(res.json(), {"error": "title is required"})
+
+    def test_start_returns_presigned_uploads_for_each_kind(self):
+        res = self._start()
+        self.assertEqual(res.status_code, 200, res.text)
+        body = res.json()
+        self.assertEqual(body["status"], "uploading")
+        self.assertEqual(
+            sorted(u["kind"] for u in body["uploads"]),
+            ["answer_key", "blank_assignment", "rubric"],
+        )
+        for u in body["uploads"]:
+            self.assertEqual(u["upload_url"], "https://minio.example/fake-presigned-url")
+
+    def test_finalize_requires_all_three_context_kinds(self):
+        with patch(
+            "app.routes.assignment_library.presigned_put_url",
+            return_value="https://minio.example/fake-presigned-url",
+        ):
+            start = self.client.post(
+                "/api/assignment-library/start",
+                json={
+                    "title": "Missing pieces",
+                    "files": [
+                        {"filename": "blank.pdf", "content_type": "application/pdf", "artifact_kind": "blank_assignment"},
+                    ],
+                },
+            )
+        assignment_id = start.json()["assignment_id"]
+
+        res = self.client.post(f"/api/assignment-library/{assignment_id}/finalize")
+        self.assertEqual(res.status_code, 400)
+        self.assertEqual(res.json()["error"], "missing required context")
+        self.assertEqual(sorted(res.json()["missing"]), ["answer_key", "rubric"])
+
+    def test_finalize_seeds_chunks_then_review_edit_and_history_round_trip(self):
+        start = self._start()
+        assignment_id = start.json()["assignment_id"]
+
+        with (
+            patch("app.routes.assignment_library.object_exists", return_value=True),
+            patch("app.routes.assignment_library.get_object_bytes", return_value=b"n/a"),
+            patch(
+                "app.routes.assignment_library.parse_assignment_context",
+                return_value=type(
+                    "P", (), {"blank_text": "1) What is 2+2?", "answer_key_text": "1) 4"}
+                )(),
+            ),
+            patch(
+                "app.routes.assignment_library.try_chunk_assignment_qa_pairs",
+                return_value=[{"question_id": "1", "question": "What is 2+2?", "answer": "4"}],
+            ),
+        ):
+            fin = self.client.post(f"/api/assignment-library/{assignment_id}/finalize")
+        self.assertEqual(fin.status_code, 200, fin.text)
+        self.assertEqual(fin.json()["chunking_status"], "ok")
+
+        detail = self.client.get(f"/api/assignment-library/{assignment_id}")
+        self.assertEqual(detail.status_code, 200)
+        chunks = detail.json()["chunks"]
+        self.assertEqual(len(chunks), 1)
+        self.assertEqual(chunks[0]["question_text"], "What is 2+2?")
+        self.assertFalse(chunks[0]["is_edited"])
+
+        history = self.client.get("/api/assignment-library")
+        self.assertEqual(history.status_code, 200)
+        self.assertIn(assignment_id, [a["id"] for a in history.json()])
+
+        edited = self.client.put(
+            f"/api/assignment-library/{assignment_id}/chunks",
+            json={
+                "chunks": [
+                    {"id": chunks[0]["id"], "question_id": "1", "question_text": "What is 2+2?", "answer_text": "four"},
+                    {"question_id": "2", "question_text": "What is 3+3?", "answer_text": "6"},
+                ]
+            },
+        )
+        self.assertEqual(edited.status_code, 200, edited.text)
+        saved = edited.json()["chunks"]
+        self.assertEqual(len(saved), 2)
+        self.assertTrue(all(c["is_edited"] for c in saved))
+        self.assertEqual({c["answer_text"] for c in saved}, {"four", "6"})
+
+
 if __name__ == "__main__":
     unittest.main()

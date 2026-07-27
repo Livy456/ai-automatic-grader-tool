@@ -26,6 +26,7 @@ import MenuIcon from "@mui/icons-material/Menu";
 import AssignmentTurnedInOutlined from "@mui/icons-material/AssignmentTurnedInOutlined";
 import AdminPanelSettingsOutlined from "@mui/icons-material/AdminPanelSettingsOutlined";
 import AutoFixHighOutlined from "@mui/icons-material/AutoFixHighOutlined";
+import NoteAddOutlined from "@mui/icons-material/NoteAddOutlined";
 
 const DISPLAY_USER = {
   email: "guest@local",
@@ -42,7 +43,9 @@ function pageTitle(pathname: string): string {
   if (pathname === "/autograder/results") return "Autograder Results";
   if (pathname === "/admin") return "Admin Panel";
   if (pathname === "/teacher") return "Teacher";
+  if (pathname === "/assignment-creation") return "Assignment Creation";
   if (/^\/autograder\/\d+$/.test(pathname)) return "Autograder Result";
+  if (/^\/assignment-creation\/\d+\/review$/.test(pathname)) return "Review Assignment";
   const submit = pathname.match(/^\/assignments\/(\d+)\/submit$/);
   if (submit) return "Submit Assignment";
   const sub = pathname.match(/^\/submissions\/(\d+)$/);
@@ -68,6 +71,11 @@ const NAV_ITEMS: NavItem[] = [
     label: "Autograder Results",
     to: "/autograder/results",
     icon: <AssignmentTurnedInOutlined />,
+  },
+  {
+    label: "Assignment Creation",
+    to: "/assignment-creation",
+    icon: <NoteAddOutlined />,
   },
   {
     label: "Admin Panel",
