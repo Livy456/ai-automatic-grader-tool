@@ -4,6 +4,12 @@ Shared multimodal grading entry used by Celery tasks, HTTP routes, and local tes
 Mirrors the flow in ``tests/test_grading_pipeline_local_files.py``:
 resolve rubric → build envelope + modality hints → :class:`MultimodalGradingPipeline`
 → :func:`multimodal_assignment_to_grading_dict` → validate.
+
+:func:`build_multimodal_grading_context` and :func:`finalize_multimodal_grading_output` factor
+that setup/finish work out of :func:`run_multimodal_grading` so
+:mod:`app.grading.multimodal.course_evidence_grading_pipeline` (the course/library
+submission-review Evidence Agent + Grading Agent pipeline) can reuse the identical envelope/rubric
+resolution and output validation/schema, differing only in *which chunks* get graded.
 """
 
 from __future__ import annotations
@@ -454,7 +460,7 @@ def resolve_rubric_for_pipeline(
     return rubric_rows_by_type, flat, rubric_text
 
 
-def _compose_task_description(
+def compose_task_description(
     assignment: Any,
     rubric_text: str | None,
     answer_key_text: str | None,
@@ -476,7 +482,31 @@ def _compose_task_description(
     return "\n\n".join(parts) if parts else "Grade this submission."
 
 
-def run_multimodal_grading(
+class MultimodalGradingContext:
+    """
+    Everything :func:`run_multimodal_grading` and
+    :func:`app.grading.multimodal.course_evidence_grading_pipeline
+    .run_course_submission_evidence_grading_pipeline` need to turn a built ``envelope`` into a
+    validated grading dict, but computed once so both entry points share one envelope/rubric/
+    pipeline-construction implementation instead of two.
+    """
+
+    __slots__ = ("envelope", "pipeline", "flat_rubric", "profile")
+
+    def __init__(
+        self,
+        envelope: Any,
+        pipeline: Any,
+        flat_rubric: list[dict],
+        profile: dict[str, Any],
+    ) -> None:
+        self.envelope = envelope
+        self.pipeline = pipeline
+        self.flat_rubric = flat_rubric
+        self.profile = profile
+
+
+def build_multimodal_grading_context(
     cfg: Config,
     *,
     assignment: Any,
@@ -491,13 +521,16 @@ def run_multimodal_grading(
     answer_key_dir: Path | None = None,
     require_answer_key: bool = False,
     modality_hints_extra: dict[str, Any] | None = None,
-    validate_output: bool = True,
-) -> dict[str, Any]:
+) -> MultimodalGradingContext:
     """
-    Run one multimodal grading pass (same structure as local integration tests).
-
-    Returns a grading dict after :func:`coerce_grading_output_shape` (and optional
-    :func:`validate_grading_output`).
+    Resolve rubric + modality hints, build the ingestion envelope, and construct the
+    :class:`~app.grading.multimodal.pipeline.MultimodalGradingPipeline` grading engine — the
+    shared setup step for both :func:`run_multimodal_grading` (the standalone autograder's own
+    chunker waterfall) and the course/library submission-review pipeline's Evidence Agent entry
+    point. Callers turn the returned context into an ``AssignmentGradeResult`` via
+    ``context.pipeline.run(context.envelope)`` or
+    ``context.pipeline.grade_prebuilt_chunks(context.envelope, chunks, chunker_mode=...)``, then
+    pass that result to :func:`finalize_multimodal_grading_output`.
     """
     rubric_dir = rubric_dir or default_rubric_dir()
     answer_key_dir = answer_key_dir or default_answer_key_dir()
@@ -521,7 +554,7 @@ def run_multimodal_grading(
     )
 
     task_description = augment_prompt_for_modality_profile(
-        _compose_task_description(assignment, rubric_text, answer_key_text, rubric_prose),
+        compose_task_description(assignment, rubric_text, answer_key_text, rubric_prose),
         profile,
     )
 
@@ -566,7 +599,24 @@ def run_multimodal_grading(
         classifier=None,
         task_description=task_description,
     )
-    mm_result = pipeline.run(envelope)
+    return MultimodalGradingContext(
+        envelope=envelope, pipeline=pipeline, flat_rubric=flat_rubric, profile=profile
+    )
+
+
+def finalize_multimodal_grading_output(
+    mm_result: Any,
+    *,
+    flat_rubric: list[dict],
+    profile: dict[str, Any],
+    validate_output: bool = True,
+) -> dict[str, Any]:
+    """
+    Shared tail: an ``AssignmentGradeResult`` (from either ``pipeline.run(...)`` or
+    ``pipeline.grade_prebuilt_chunks(...)``) -> the same validated grading-JSON dict shape for
+    every multimodal grading entry point (standalone autograder and course/library submission
+    review alike).
+    """
     out = multimodal_assignment_to_grading_dict(
         mm_result,
         rubric=flat_rubric,
@@ -584,3 +634,51 @@ def run_multimodal_grading(
     if validate_output:
         validate_grading_output(shaped)
     return shaped
+
+
+def run_multimodal_grading(
+    cfg: Config,
+    *,
+    assignment: Any,
+    artifacts_bytes: dict[str, bytes],
+    assignment_id: str,
+    student_id: str,
+    rubric_column: Any = None,
+    rubric_text: str | None = None,
+    answer_key_text: str | None = None,
+    assignment_stem: str | None = None,
+    rubric_dir: Path | None = None,
+    answer_key_dir: Path | None = None,
+    require_answer_key: bool = False,
+    modality_hints_extra: dict[str, Any] | None = None,
+    validate_output: bool = True,
+) -> dict[str, Any]:
+    """
+    Run one multimodal grading pass (same structure as local integration tests): the standalone
+    autograder's full chunker waterfall (see :meth:`MultimodalGradingPipeline.run`).
+
+    Returns a grading dict after :func:`coerce_grading_output_shape` (and optional
+    :func:`validate_grading_output`).
+    """
+    context = build_multimodal_grading_context(
+        cfg,
+        assignment=assignment,
+        artifacts_bytes=artifacts_bytes,
+        assignment_id=assignment_id,
+        student_id=student_id,
+        rubric_column=rubric_column,
+        rubric_text=rubric_text,
+        answer_key_text=answer_key_text,
+        assignment_stem=assignment_stem,
+        rubric_dir=rubric_dir,
+        answer_key_dir=answer_key_dir,
+        require_answer_key=require_answer_key,
+        modality_hints_extra=modality_hints_extra,
+    )
+    mm_result = context.pipeline.run(context.envelope)
+    return finalize_multimodal_grading_output(
+        mm_result,
+        flat_rubric=context.flat_rubric,
+        profile=context.profile,
+        validate_output=validate_output,
+    )

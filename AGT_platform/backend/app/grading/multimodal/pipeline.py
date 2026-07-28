@@ -966,6 +966,133 @@ class MultimodalGradingPipeline:
         art.append("output", {"score": assign.assignment_normalized_score})
         return assign
 
+    def grade_prebuilt_chunks(
+        self,
+        envelope: IngestionEnvelope,
+        chunks: list[GradingChunk],
+        *,
+        chunker_mode: str,
+        artifacts: PipelineArtifactStore | None = None,
+    ) -> AssignmentGradeResult:
+        """
+        Rubric-route, grade, and aggregate chunks an upstream agent has already built — e.g. the
+        Evidence Agent in
+        :func:`app.grading.multimodal.course_evidence_grading_pipeline
+        .run_course_submission_evidence_grading_pipeline`, which pairs a course/library
+        submission's response text against the assignment's saved question/answer chunk bank —
+        skipping :meth:`run`'s own chunk-building waterfall (cache lookup, Claude parsing agent,
+        OpenAI trio+RAG frontload, notebook/heuristic chunkers) entirely.
+
+        Everything downstream of chunk-building — placeholder stripping, per-chunk rubric routing
+        (the **Grading Agent**'s rubric context), multi-sample LLM grading, semantic-entropy
+        confidence, and assignment aggregation — is the *exact* code :meth:`run` uses for every
+        other chunk source, so output shape, schema validation
+        (:mod:`app.grading.grading_output.output_schema`), and confidence-score calculation
+        (:mod:`app.grading.confidence_calculation.semantic_confidence`) are identical to the
+        standalone autograder's pipeline.
+        """
+        art = artifacts or PipelineArtifactStore()
+        workflow: list[dict[str, Any]] = []
+
+        def wf(phase: str, **extra: Any) -> None:
+            row: dict[str, Any] = {"phase": phase}
+            row.update(extra)
+            workflow.append(row)
+
+        wf(
+            "ingest",
+            assignment_id=envelope.assignment_id,
+            student_id=envelope.student_id,
+            artifact_keys=sorted(envelope.artifacts.keys()),
+        )
+        wf(
+            "chunk_and_embed",
+            chunker_mode=chunker_mode,
+            cache_path=None,
+            n_chunks=len(chunks),
+            reused_embeddings=False,
+        )
+
+        if chunks:
+            sanitize_grading_chunks_placeholders(chunks)
+            wf("chunk_text_strip_assignment_placeholders", n_chunks=len(chunks))
+
+        art.append(
+            "chunking",
+            {
+                "chunk_ids": [c.chunk_id for c in chunks],
+                "chunker_mode": chunker_mode,
+                "rag_unit_embeddings": False,
+                "reused_cached_embeddings": False,
+            },
+        )
+
+        wf(
+            "route_rubric_and_grade",
+            description=(
+                "Per chunk: modality-aware rubric routing, multi-model JSON sampling, "
+                "parse + semantic entropy → confidence and normalized scores."
+            ),
+            n_chunks=len(chunks),
+        )
+        for chunk in chunks:
+            route_rubric(
+                chunk,
+                classifier=self.classifier,
+                rubric_rows_by_type=self.rubric_rows_by_type,
+            )
+            art.append(
+                "rubric_routing",
+                {
+                    "chunk_id": chunk.chunk_id,
+                    "rubric_type": chunk.rubric_type.value
+                    if chunk.rubric_type
+                    else None,
+                    "reason": chunk.routing_reason,
+                },
+            )
+
+        hints = envelope.modality_hints or {}
+        answer_key_plain = str(hints.get("answer_key_plaintext") or "").strip()
+        ak_cap = int(os.getenv("MULTIMODAL_ANSWER_KEY_PROMPT_MAX_CHARS", "18000") or 18000)
+        ak_cap = max(4000, min(ak_cap, 100_000))
+        answer_key_for_prompt = answer_key_plain[:ak_cap]
+        dataset_plain = str(hints.get("dataset_context_plaintext") or "").strip()
+
+        embed_cfg = self._resolve_app_config() or Config()
+        concurrency = max(
+            1,
+            int(getattr(embed_cfg, "MULTIMODAL_LLM_CALL_CONCURRENCY", 3) or 3),
+        )
+        graded = asyncio.run(
+            self._grade_all_chunks_async(
+                chunks,
+                concurrency=concurrency,
+                answer_key_for_prompt=answer_key_for_prompt,
+                dataset_plain=dataset_plain,
+            )
+        )
+
+        chunk_outcomes: list[ChunkGradeOutcome] = []
+        for outcome, grading_audit in graded:
+            art.append("grading", grading_audit)
+            chunk_outcomes.append(outcome)
+
+        assign = aggregate_assignment(
+            envelope.assignment_id,
+            envelope.student_id,
+            chunk_outcomes,
+        )
+        wf(
+            "aggregate",
+            assignment_normalized_score=assign.assignment_normalized_score,
+            review_status=assign.review_status.value,
+        )
+        assign.stage_artifacts["pipeline_audit"] = art.stages
+        assign.stage_artifacts["agentic_workflow"] = workflow
+        art.append("output", {"score": assign.assignment_normalized_score})
+        return assign
+
 
 # Public re-export helper
 def build_envelope_from_plaintext(
