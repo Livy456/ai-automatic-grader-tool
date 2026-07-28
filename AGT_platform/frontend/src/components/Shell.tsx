@@ -41,8 +41,8 @@ function pageTitle(pathname: string): string {
   if (pathname === "/grades") return "My Grades";
   if (pathname === "/assignments") return "Submit Assignment";
   if (pathname === "/submissions") return "View Submissions";
-  if (pathname === "/autograder") return "Autograder";
-  if (pathname === "/autograder/results") return "Autograder Results";
+  // if (pathname === "/autograder") return "Autograder";
+  // if (pathname === "/autograder/results") return "Autograder Results";
   if (pathname === "/admin") return "Admin Panel";
   if (pathname === "/teacher") return "Teacher";
   if (pathname === "/assignment-creation") return "Assignment Creation";
@@ -64,16 +64,16 @@ type NavItem = {
 };
 
 const NAV_ITEMS: NavItem[] = [
-  {
-    label: "Autograder",
-    to: "/autograder",
-    icon: <AutoFixHighOutlined />,
-  },
-  {
-    label: "Autograder Results",
-    to: "/autograder/results",
-    icon: <AssignmentTurnedInOutlined />,
-  },
+  // {
+  //   label: "Autograder",
+  //   to: "/autograder",
+  //   icon: <AutoFixHighOutlined />,
+  // },
+  // {
+  //   label: "Autograder Results",
+  //   to: "/autograder/results",
+  //   icon: <AssignmentTurnedInOutlined />,
+  // },
   {
     label: "Assignment Creation",
     to: "/assignment-creation",
