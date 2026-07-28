@@ -222,6 +222,25 @@ def _coerce_flat_rubric_rows(raw_list: list[dict[str, Any]]) -> list[dict[str, A
     return out
 
 
+def _broadcast_flat_rows_to_all_types(
+    rows: list[dict[str, Any]],
+) -> dict[RubricType, list[dict[str, Any]]]:
+    """
+    Apply one flat, teacher-authored criteria list to every :class:`RubricType`.
+
+    A single uploaded rubric (e.g. Assignment Creation's ``Assignment.rubric``) has no notion of
+    "scaffolded coding" vs. "free response" vs. "EDA" vs. "oral" sections — it's just the
+    criteria for *this* assignment's questions. ``route_rubric`` / ``grade_prebuilt_chunks`` route
+    each chunk to a ``RubricType`` based on modality/task-type and then look up
+    ``rubric_rows_by_type[that_type]``; if only ``FREE_RESPONSE`` were populated, any chunk routed
+    to a different type (e.g. a coding-modality question) would silently receive an empty rubric
+    and fall back to a generic template instead of the rubric the teacher actually uploaded.
+    Broadcasting the same rows to every type guarantees the uploaded rubric is what gets used no
+    matter which type a given question chunk resolves to.
+    """
+    return {rt: [dict(r) for r in rows] for rt in RubricType}
+
+
 def rubric_column_to_by_type_and_flat(
     rubric_column: Any,
 ) -> tuple[dict[RubricType, list[dict[str, Any]]], list[dict[str, Any]]]:
@@ -231,7 +250,7 @@ def rubric_column_to_by_type_and_flat(
     """
     default_flat = [dict(x) for x in DEFAULT_STANDALONE_RUBRIC]
     if rubric_column is None:
-        return {RubricType.FREE_RESPONSE: _coerce_flat_rubric_rows(default_flat)}, default_flat
+        return _broadcast_flat_rows_to_all_types(_coerce_flat_rubric_rows(default_flat)), default_flat
 
     if isinstance(rubric_column, dict) and isinstance(rubric_column.get("sections"), list):
         by_typed = _build_rubric_rows_by_type_from_sections_doc(rubric_column)
@@ -242,7 +261,7 @@ def rubric_column_to_by_type_and_flat(
         if flat_sec:
             rows = _coerce_flat_rubric_rows(flat_sec)
             if rows:
-                return {RubricType.FREE_RESPONSE: rows}, rows
+                return _broadcast_flat_rows_to_all_types(rows), rows
 
     raw_list: list[dict[str, Any]] = []
     if isinstance(rubric_column, list):
@@ -255,12 +274,12 @@ def rubric_column_to_by_type_and_flat(
                 break
 
     if not raw_list:
-        return {RubricType.FREE_RESPONSE: _coerce_flat_rubric_rows(default_flat)}, default_flat
+        return _broadcast_flat_rows_to_all_types(_coerce_flat_rubric_rows(default_flat)), default_flat
 
     rows = _coerce_flat_rubric_rows(raw_list)
     if not rows:
-        return {RubricType.FREE_RESPONSE: _coerce_flat_rubric_rows(default_flat)}, default_flat
-    return {RubricType.FREE_RESPONSE: rows}, rows
+        return _broadcast_flat_rows_to_all_types(_coerce_flat_rubric_rows(default_flat)), default_flat
+    return _broadcast_flat_rows_to_all_types(rows), rows
 
 
 def build_rubric_rows_by_type(rubric_json: dict[str, Any]) -> dict[RubricType, list[dict]]:
