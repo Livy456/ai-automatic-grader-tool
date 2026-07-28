@@ -1,4 +1,4 @@
-import { useCallback, useState } from "react";
+import { useState } from "react";
 import { useParams, useNavigate } from "react-router-dom";
 import {
   Alert,
@@ -11,7 +11,6 @@ import {
   Step,
   StepLabel,
   Stepper,
-  TextField,
   Typography,
 } from "@mui/material";
 import CloudUploadOutlined from "@mui/icons-material/CloudUploadOutlined";
@@ -19,7 +18,7 @@ import InsertDriveFileOutlined from "@mui/icons-material/InsertDriveFileOutlined
 import CloseOutlined from "@mui/icons-material/CloseOutlined";
 import { submitAssignmentDirect } from "../api";
 
-const STEPS = ["Upload Files", "Add Context", "Review & Submit"];
+const STEPS = ["Upload Files", "Review & Submit"];
 
 function formatBytes(n: number): string {
   if (n < 1024) return `${n} B`;
@@ -32,10 +31,6 @@ export default function SubmitAssignment() {
   const navigate = useNavigate();
   const [activeStep, setActiveStep] = useState(0);
   const [mainFiles, setMainFiles] = useState<File[]>([]);
-  const [keyFile, setKeyFile] = useState<File | null>(null);
-  const [rubricFile, setRubricFile] = useState<File | null>(null);
-  const [keyText, setKeyText] = useState("");
-  const [rubricText, setRubricText] = useState("");
   const [busy, setBusy] = useState(false);
   const [progress, setProgress] = useState(0);
   const [err, setErr] = useState<string | null>(null);
@@ -43,19 +38,6 @@ export default function SubmitAssignment() {
 
   const assignmentId = id ? parseInt(id, 10) : NaN;
   const assignmentLabel = Number.isFinite(assignmentId) ? `Assignment #${assignmentId}` : "Assignment";
-
-  const optionalBlobs = useCallback((): File[] => {
-    const out: File[] = [];
-    if (keyFile) out.push(keyFile);
-    if (rubricFile) out.push(rubricFile);
-    if (keyText.trim()) {
-      out.push(new File([keyText], "answer-key.txt", { type: "text/plain" }));
-    }
-    if (rubricText.trim()) {
-      out.push(new File([rubricText], "rubric.txt", { type: "text/plain" }));
-    }
-    return out;
-  }, [keyFile, rubricFile, keyText, rubricText]);
 
   const onDropMain = (e: React.DragEvent) => {
     e.preventDefault();
@@ -69,10 +51,9 @@ export default function SubmitAssignment() {
     setErr(null);
     setBusy(true);
     setProgress(0);
-    const allFiles = [...mainFiles, ...optionalBlobs()];
-    const n = allFiles.length || 1;
+    const n = mainFiles.length || 1;
     try {
-      const result = await submitAssignmentDirect(assignmentId, allFiles, (fileIndex, frac) => {
+      const result = await submitAssignmentDirect(assignmentId, mainFiles, (fileIndex, frac) => {
         setProgress(((fileIndex + frac) / n) * 100);
       });
       setProgress(100);
@@ -85,7 +66,6 @@ export default function SubmitAssignment() {
   };
 
   const canNextStep0 = mainFiles.length > 0;
-  const summaryFiles = [...mainFiles, ...optionalBlobs()];
 
   return (
     <Box>
@@ -176,7 +156,7 @@ export default function SubmitAssignment() {
                 variant="contained"
                 disabled={!canNextStep0}
                 onClick={() => setActiveStep(1)}
-                aria-label="Go to add context step"
+                aria-label="Go to review step"
               >
                 Next
               </Button>
@@ -188,85 +168,6 @@ export default function SubmitAssignment() {
       {activeStep === 1 && (
         <Card>
           <CardContent>
-            <Typography variant="subtitle1" gutterBottom>
-              Answer Key / Sample Response (optional)
-            </Typography>
-            <Button variant="outlined" component="label" size="small" sx={{ mb: 1 }} aria-label="Upload answer key file">
-              Upload file
-              <input
-                type="file"
-                hidden
-                onChange={(e) => setKeyFile(e.target.files?.[0] ?? null)}
-              />
-            </Button>
-            {keyFile && (
-              <Typography variant="caption" display="block" color="text.secondary" sx={{ mb: 1 }}>
-                {keyFile.name}{" "}
-                <Button size="small" onClick={() => setKeyFile(null)} aria-label="Remove answer key file">
-                  Remove
-                </Button>
-              </Typography>
-            )}
-            <TextField
-              fullWidth
-              multiline
-              minRows={3}
-              label="Or paste text"
-              value={keyText}
-              onChange={(e) => setKeyText(e.target.value)}
-              sx={{ mb: 3 }}
-              aria-label="Paste answer key or sample response"
-            />
-
-            <Typography variant="subtitle1" gutterBottom>
-              Rubric (optional)
-            </Typography>
-            <Typography variant="caption" color="text.secondary" display="block" sx={{ mb: 1 }}>
-              Optional context for the grader. Full LTI rubric sync is not wired here —{" "}
-              {/* TODO: POST /api/course-assignments/:id/materials when student uploads are allowed */}
-              files are bundled with your submission upload for now.
-            </Typography>
-            <Button variant="outlined" component="label" size="small" sx={{ mb: 1 }} aria-label="Upload rubric file">
-              Upload file
-              <input
-                type="file"
-                hidden
-                onChange={(e) => setRubricFile(e.target.files?.[0] ?? null)}
-              />
-            </Button>
-            {rubricFile && (
-              <Typography variant="caption" display="block" color="text.secondary" sx={{ mb: 1 }}>
-                {rubricFile.name}{" "}
-                <Button size="small" onClick={() => setRubricFile(null)} aria-label="Remove rubric file">
-                  Remove
-                </Button>
-              </Typography>
-            )}
-            <TextField
-              fullWidth
-              multiline
-              minRows={3}
-              label="Or paste rubric text"
-              value={rubricText}
-              onChange={(e) => setRubricText(e.target.value)}
-              aria-label="Paste rubric text"
-            />
-
-            <Box sx={{ display: "flex", justifyContent: "space-between", mt: 2 }}>
-              <Button onClick={() => setActiveStep(0)} aria-label="Back to upload step">
-                Back
-              </Button>
-              <Button variant="contained" onClick={() => setActiveStep(2)} aria-label="Go to review step">
-                Next
-              </Button>
-            </Box>
-          </CardContent>
-        </Card>
-      )}
-
-      {activeStep === 2 && (
-        <Card>
-          <CardContent>
             <Typography variant="h3" sx={{ mb: 2 }}>
               Review &amp; Submit
             </Typography>
@@ -274,12 +175,15 @@ export default function SubmitAssignment() {
               Assignment: {assignmentLabel}
             </Typography>
             <Typography variant="body2" sx={{ mt: 1 }}>
-              Files ({summaryFiles.length}):{" "}
-              {summaryFiles.map((f) => f.name).join(", ") || "—"}
+              Files ({mainFiles.length}): {mainFiles.map((f) => f.name).join(", ") || "—"}
             </Typography>
             <Typography variant="caption" color="text.secondary" display="block" sx={{ mt: 1 }}>
-              Total size ~ {formatBytes(summaryFiles.reduce((s, f) => s + f.size, 0))}
+              Total size ~ {formatBytes(mainFiles.reduce((s, f) => s + f.size, 0))}
             </Typography>
+            {/* <Alert severity="info" sx={{ mt: 2 }}>
+              The blank assignment and answer key on file for this assignment will be used
+              automatically as grading context — no need to upload them again.
+            </Alert> */}
             {busy && <LinearProgress variant="determinate" value={progress} sx={{ mt: 2 }} aria-label="Upload progress" />}
             <Button
               variant="contained"
@@ -294,7 +198,7 @@ export default function SubmitAssignment() {
               {busy ? <CircularProgress size={22} color="inherit" aria-label="Submitting" /> : "Submit for Grading"}
             </Button>
             <Box sx={{ display: "flex", justifyContent: "flex-start", mt: 2 }}>
-              <Button onClick={() => setActiveStep(1)} disabled={busy} aria-label="Back to context step">
+              <Button onClick={() => setActiveStep(0)} disabled={busy} aria-label="Back to upload step">
                 Back
               </Button>
             </Box>

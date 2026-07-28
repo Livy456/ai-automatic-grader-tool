@@ -35,14 +35,16 @@ from app.config import Config
 from app.database.audit import log_event
 from app.database.models import Assignment, AssignmentAttachment, AssignmentQuestionChunk
 from app.deps import get_db, require_role
-from app.database.storage import get_object_bytes, object_exists, presigned_put_url
+from app.database.storage import get_object_bytes, get_presigned_url, object_exists, presigned_put_url
 from app.grading.chunking.assignment_qa_chunker import try_chunk_assignment_qa_pairs
 from app.grading.parsing.assignment_context_parser import parse_assignment_context
+from app.grading.parsing.original_view import build_original_view
 
 router = APIRouter()
 
 _MODALITIES = frozenset({"code", "written", "notebook", "video", "image"})
 _ATTACHMENT_KINDS = ("blank_assignment", "answer_key", "rubric")
+_VIEWABLE_KINDS = ("blank_assignment", "answer_key")
 _SAFE_KIND_DIR = {
     "blank_assignment": "blank-templates",
     "answer_key": "answer-keys",
@@ -80,6 +82,8 @@ def _serialize_assignment(a: Assignment) -> dict[str, Any]:
         "modality": a.modality,
         "rubric": a.rubric if a.rubric is not None else [],
         "created_at": a.created_at.isoformat() if a.created_at else None,
+        "blank_assignment_text": a.blank_assignment_text or "",
+        "answer_key_text": a.grader_answer_key_text or "",
     }
 
 
@@ -278,6 +282,13 @@ def finalize_assignment_library_entry(
             answer_key_filename=answer_key_att.filename if answer_key_att else "",
         )
         answer_key_text = parsed_context.answer_key_text or (a.grader_answer_key_text or "")
+        # Persist the extracted plaintext so the review page can show the full original
+        # documents, and so later grading (see app.tasks) has the answer key text even when it
+        # was only supplied as a file (not pasted at creation time).
+        if parsed_context.blank_text:
+            a.blank_assignment_text = parsed_context.blank_text
+        if parsed_context.answer_key_text:
+            a.grader_answer_key_text = parsed_context.answer_key_text
         pairs = try_chunk_assignment_qa_pairs(
             blank_text=parsed_context.blank_text,
             answer_key_text=answer_key_text,
@@ -337,6 +348,41 @@ def get_assignment_library_entry(
         raise HTTPException(404, "not found")
     chunks = sorted(a.question_chunks, key=lambda c: c.order_index)
     return _serialize_assignment(a) | {"chunks": [_serialize_chunk(c) for c in chunks]}
+
+
+@router.get("/api/assignment-library/{assignment_id}/materials/{kind}/view")
+def get_assignment_material_view(
+    assignment_id: int,
+    kind: str,
+    db: Session = Depends(get_db),
+    user: dict = Depends(require_role("teacher", "admin")),
+):
+    """
+    Original-form view of the uploaded blank template / answer key, for the review page's
+    "Blank Assignment" / "Answer Key" tabs — see :func:`app.grading.parsing.original_view.build_original_view`
+    for the notebook / spreadsheet / PDF / plaintext shapes this can return.
+    """
+    if kind not in _VIEWABLE_KINDS:
+        raise HTTPException(400, "kind must be one of: " + ", ".join(_VIEWABLE_KINDS))
+    a = _get_library_assignment(db, assignment_id)
+
+    att = (
+        db.query(AssignmentAttachment)
+        .filter_by(assignment_id=a.id, kind=kind)
+        .order_by(AssignmentAttachment.created_at.desc())
+        .first()
+    )
+    if not att:
+        raise HTTPException(404, f"no {kind} uploaded for this assignment")
+
+    cfg = Config()
+    download_url = get_presigned_url(cfg, att.object_key, method="GET", expires=3600)
+    try:
+        data = get_object_bytes(cfg, att.object_key)
+    except Exception:
+        data = b""
+    view = build_original_view(data, att.filename) if data else {"type": "unsupported"}
+    return {"filename": att.filename, "download_url": download_url, "view": view}
 
 
 @router.put("/api/assignment-library/{assignment_id}/chunks")

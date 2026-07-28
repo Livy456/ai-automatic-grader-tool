@@ -342,19 +342,44 @@ def grade_submission(self, submission_id: int):
             submission_parts.append((fn_hint or art.kind, data))
 
         is_public_autograder = assignment.course_id is None
-        if not is_public_autograder:
-            for att in (
-                db.query(AssignmentAttachment)
-                .filter_by(assignment_id=assignment.id)
-                .order_by(AssignmentAttachment.created_at.desc())
-                .all()
-            ):
-                data = get_object_bytes(cfg, att.object_key)
-                ex = excerpt_attachment_bytes(att.filename, data)
-                if att.kind == "rubric":
-                    rubric_ex = (rubric_ex + "\n\n" + ex).strip() if rubric_ex else ex
-                elif att.kind == "answer_key":
-                    answer_ex = (answer_ex + "\n\n" + ex).strip() if answer_ex else ex
+        modality_hints_extra: dict[str, Any] | None = None
+        for att in (
+            db.query(AssignmentAttachment)
+            .filter_by(assignment_id=assignment.id)
+            .order_by(AssignmentAttachment.created_at.desc())
+            .all()
+        ):
+            if att.kind == "blank_assignment":
+                # Seeds the parsing/chunking agents with the instructor's own template (see
+                # app.grading.chunking.claude_parsing_agent._blank_template_text) so grading can
+                # isolate each question the same way Assignment Creation's review page does,
+                # without the student having to re-upload it at submission time.
+                if modality_hints_extra is None:
+                    try:
+                        blank_bytes = get_object_bytes(cfg, att.object_key)
+                    except Exception:
+                        blank_bytes = None
+                    if blank_bytes:
+                        suffix = Path(att.filename or "").suffix.lower()
+                        modality_hints_extra = {
+                            "blank_assignment_template_bytes": blank_bytes,
+                            "blank_assignment_template_suffix": suffix,
+                            "blank_assignment_matched_file": att.filename or "",
+                        }
+                        if suffix == ".ipynb":
+                            modality_hints_extra["blank_assignment_ipynb_bytes"] = blank_bytes
+                continue
+            if is_public_autograder:
+                # Library assignments already carry rubric/answer-key text on the Assignment row
+                # itself (assignment.grader_rubric_text / grader_answer_key_text, set at Assignment
+                # Creation finalize) — re-parsing the same attachment here would just duplicate it.
+                continue
+            data = get_object_bytes(cfg, att.object_key)
+            ex = excerpt_attachment_bytes(att.filename, data)
+            if att.kind == "rubric":
+                rubric_ex = (rubric_ex + "\n\n" + ex).strip() if rubric_ex else ex
+            elif att.kind == "answer_key":
+                answer_ex = (answer_ex + "\n\n" + ex).strip() if answer_ex else ex
 
         artifacts = build_submission_artifacts(submission_parts)
         if is_public_autograder:
@@ -413,6 +438,7 @@ def grade_submission(self, submission_id: int):
             student_id=sub.student_id,
             rubric_text=merged_rubric,
             answer_key_text=merged_ak,
+            modality_hints_extra=modality_hints_extra,
         )
         _default_ml = f"openai:{(cfg.OPENAI_MODEL or 'gpt-4o-mini').strip()}"
         model_used = (result.pop("_model_used", None) or _default_ml)[:200]

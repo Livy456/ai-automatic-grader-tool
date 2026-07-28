@@ -46,7 +46,6 @@ export default function AssignmentCreation() {
   const [modality, setModality] = useState<string>("written");
   const [blankFile, setBlankFile] = useState<File | null>(null);
   const [keyFile, setKeyFile] = useState<File | null>(null);
-  const [keyText, setKeyText] = useState("");
   const [rubricFile, setRubricFile] = useState<File | null>(null);
   const [rubricText, setRubricText] = useState("");
 
@@ -74,7 +73,7 @@ export default function AssignmentCreation() {
   }, [tab, loadHistory]);
 
   const hasBlank = Boolean(blankFile);
-  const hasAnswerKey = Boolean(keyFile || keyText.trim());
+  const hasAnswerKey = Boolean(keyFile);
   const hasRubric = Boolean(rubricFile || rubricText.trim());
   const canSubmit = Boolean(title.trim()) && hasBlank && hasAnswerKey && hasRubric;
 
@@ -105,7 +104,6 @@ export default function AssignmentCreation() {
           description: description.trim() || undefined,
           modality,
           rubric_text: rubricText.trim() || undefined,
-          answer_key_text: keyText.trim() || undefined,
         },
         files,
         specs,
@@ -260,23 +258,14 @@ export default function AssignmentCreation() {
               <input type="file" hidden onChange={(e) => setKeyFile(e.target.files?.[0] ?? null)} />
             </Button>
             {keyFile && (
-              <Typography variant="caption" display="block" color="text.secondary" sx={{ mb: 1 }}>
+              <Typography variant="caption" display="block" color="text.secondary" sx={{ mb: 3 }}>
                 {keyFile.name}{" "}
                 <Button size="small" onClick={() => setKeyFile(null)} aria-label="Remove answer key file">
                   Remove
                 </Button>
               </Typography>
             )}
-            <TextField
-              fullWidth
-              multiline
-              minRows={3}
-              label="Or paste the answer key"
-              value={keyText}
-              onChange={(e) => setKeyText(e.target.value)}
-              sx={{ mb: 3 }}
-              aria-label="Paste answer key"
-            />
+            {!keyFile && <Box sx={{ mb: 2 }} />}
 
             <Typography variant="subtitle1" gutterBottom>
               Rubric (required)

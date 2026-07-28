@@ -166,7 +166,7 @@ export default function SubmissionReview() {
   const busy = POLL_STATUSES.has(status);
   const scoreNum = sub.final_score != null ? Number(sub.final_score) : null;
   const assignmentTitle = sub.assignment_title ?? `Submission #${sub.id}`;
-  const submittedAt = sub.grading_dispatch_at ?? sub.created_at ?? "—";
+  // const submittedAt = sub.grading_dispatch_at ?? sub.created_at ?? "—";
 
   return (
     <Box>
@@ -183,10 +183,11 @@ export default function SubmissionReview() {
         </Typography>
         <StatusChip status={status} size="medium" />
       </Box>
-      <Typography variant="body2" color="text.secondary" sx={{ mb: 2 }}>
-        Student: {sub.student_name ?? "—"} · Submitted: {submittedAt}
+      {/* <Typography variant="body2" color="text.secondary" sx={{ mb: 2 }}>
+        Student: {sub.student_name ?? "—"} · 
+        Submitted: {submittedAt}
         {busy ? " · Status updates every few seconds while grading runs." : ""}
-      </Typography>
+      </Typography> */}
       {busy && <LinearProgress sx={{ mb: 2 }} aria-label="Grading in progress" />}
 
       <Box
