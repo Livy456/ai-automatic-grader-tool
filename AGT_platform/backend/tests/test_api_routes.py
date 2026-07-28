@@ -339,6 +339,183 @@ class GradeSubmissionContextTests(ApiRoutesTestCase):
         # Library assignments already carry the answer key text on the Assignment row itself.
         self.assertIn("1) 4", captured.get("answer_key_text") or "")
 
+    def test_question_chunks_become_prechunked_qa_pairs_hint(self):
+        """
+        Assignment Creation's teacher-reviewed ``AssignmentQuestionChunk`` rows should be threaded
+        through as ``modality_hints_extra["prechunked_qa_pairs"]`` so the multimodal pipeline can
+        pair a student's response against them instead of re-decomposing the assignment from
+        scratch (see ``app.grading.chunking.prechunked_response_pairing_agent``).
+        """
+        from app import tasks
+        from app.database.init_db import SessionLocal
+        from app.database.models import (
+            Assignment,
+            AssignmentQuestionChunk,
+            Submission,
+            SubmissionArtifact,
+        )
+
+        db = SessionLocal()
+        try:
+            assignment = Assignment(
+                course_id=None,
+                title="Library assignment",
+                modality="written",
+                rubric=[],
+                created_at=None,
+            )
+            db.add(assignment)
+            db.flush()
+            db.add(
+                AssignmentQuestionChunk(
+                    assignment_id=assignment.id,
+                    question_id="q1",
+                    order_index=0,
+                    question_text="What is 2+2?",
+                    answer_text="4",
+                )
+            )
+            db.add(
+                AssignmentQuestionChunk(
+                    assignment_id=assignment.id,
+                    question_id="q2",
+                    order_index=1,
+                    question_text="What is 3+3?",
+                    answer_text="6",
+                )
+            )
+            sub = Submission(assignment_id=assignment.id, student_id=None, status="queued")
+            db.add(sub)
+            db.flush()
+            db.add(SubmissionArtifact(submission_id=sub.id, kind="txt", object_key="work.txt"))
+            db.commit()
+            sub_id = sub.id
+        finally:
+            db.close()
+
+        captured: dict = {}
+
+        def _fake_pipeline(cfg, assign_for_prompt, artifacts, **kwargs):
+            captured.update(kwargs)
+            return {"overall": {}, "criteria": [], "question_grades": []}
+
+        with (
+            patch("app.tasks.get_object_bytes", return_value=b"four\nsix\n"),
+            patch("app.tasks.run_db_submission_multimodal_pipeline", side_effect=_fake_pipeline),
+            patch("app.tasks.minio_client"),
+        ):
+            tasks.grade_submission.run(sub_id)
+
+        hints = captured.get("modality_hints_extra")
+        self.assertIsNotNone(hints)
+        pairs = hints["prechunked_qa_pairs"]
+        self.assertEqual(len(pairs), 2)
+        self.assertEqual(pairs[0], {"question_id": "q1", "question_text": "What is 2+2?", "answer_text": "4"})
+        self.assertEqual(pairs[1], {"question_id": "q2", "question_text": "What is 3+3?", "answer_text": "6"})
+
+
+class CourseSubmissionResultsRouteTests(ApiRoutesTestCase):
+    """
+    ``GET /api/submissions/{id}`` + ``GET /api/submissions/{id}/report`` — course/library
+    submission-review parity with the standalone autograder's results endpoints (see
+    ``app.routes.standalone.standalone_get`` / ``standalone_get_report``).
+    """
+
+    def _make_graded_submission(self, *, with_report: bool):
+        from app.database.init_db import SessionLocal
+        from app.database.models import AIScore, Assignment, Submission
+
+        db = SessionLocal()
+        try:
+            assignment = Assignment(
+                course_id=None, title="PSet 1", modality="written", rubric=[], created_at=None
+            )
+            db.add(assignment)
+            db.flush()
+            sub = Submission(
+                assignment_id=assignment.id,
+                student_id=None,
+                status="graded",
+                final_score=0.5,
+                final_feedback="Nice work overall.",
+                grading_report_object_key=(
+                    "grading-reports/course/1/1_report.json" if with_report else None
+                ),
+            )
+            db.add(sub)
+            db.flush()
+            db.add(
+                AIScore(
+                    submission_id=sub.id,
+                    criterion="Correctness",
+                    score=5,
+                    confidence=0.9,
+                    rationale="Looks right.",
+                    evidence={"trio": {"question": "What is 2+2?", "student_response": "4"}},
+                    model="anthropic:claude-opus-4-7",
+                )
+            )
+            db.commit()
+            sub_id = sub.id
+        finally:
+            db.close()
+        return sub_id
+
+    def test_get_submission_falls_back_to_flat_ai_scores_without_report(self):
+        sub_id = self._make_graded_submission(with_report=False)
+        res = self.client.get(f"/api/submissions/{sub_id}")
+        self.assertEqual(res.status_code, 200, res.text)
+        body = res.json()
+        self.assertEqual(body["assignment_title"], "PSet 1")
+        self.assertEqual(body["question_grades"], [])
+        self.assertEqual(len(body["ai_scores"]), 1)
+        score_row = body["ai_scores"][0]
+        self.assertEqual(score_row["question"], "What is 2+2?")
+        self.assertEqual(score_row["student_evidence"], "4")
+        self.assertIsNone(body["grading_report_object_key"])
+        # final_score 0.5 (a 0..1 fraction) is normalized to a percentage like standalone does.
+        self.assertEqual(body["final_score"], 50.0)
+
+    def test_get_submission_enriches_with_question_grades_from_report(self):
+        sub_id = self._make_graded_submission(with_report=True)
+        report = {
+            "question_grades": [
+                {
+                    "chunk_id": "chunk-1",
+                    "overall": {"score": 1.0, "max_points": 10, "rubric_points_earned": 8, "confidence": 0.9},
+                    "question_payload": {"question": "What is 2+2?", "student_response": "4"},
+                    "criteria": [{"criterion": "Correctness", "score": 8, "max_points": 10}],
+                }
+            ]
+        }
+        with patch(
+            "app.grading.multimodal.grading_report_view.get_object_bytes",
+            return_value=json.dumps(report).encode("utf-8"),
+        ):
+            res = self.client.get(f"/api/submissions/{sub_id}")
+        self.assertEqual(res.status_code, 200, res.text)
+        body = res.json()
+        self.assertEqual(len(body["question_grades"]), 1)
+        self.assertEqual(body["max_points"], 10.0)
+        self.assertEqual(body["rubric_points_earned"], 8.0)
+        self.assertEqual(body["final_score"], 80.0)
+
+    def test_get_submission_report_returns_presigned_url(self):
+        sub_id = self._make_graded_submission(with_report=True)
+        with patch(
+            "app.routes.submissions.get_presigned_url",
+            return_value="https://minio.example/report.json",
+        ) as mock_url:
+            res = self.client.get(f"/api/submissions/{sub_id}/report")
+        self.assertEqual(res.status_code, 200, res.text)
+        self.assertEqual(res.json()["download_url"], "https://minio.example/report.json")
+        mock_url.assert_called_once()
+
+    def test_get_submission_report_404_without_report(self):
+        sub_id = self._make_graded_submission(with_report=False)
+        res = self.client.get(f"/api/submissions/{sub_id}/report")
+        self.assertEqual(res.status_code, 404)
+
 
 class AssignmentLibraryRouteTests(ApiRoutesTestCase):
     """Assignment Creation flow: upload-context (start/finalize) + editable Q&A chunks."""

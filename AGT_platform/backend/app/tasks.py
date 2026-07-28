@@ -19,10 +19,18 @@ from .grading.multimodal.pipeline_runner import (
     excerpt_attachment_bytes,
     run_multimodal_grading,
 )
+from .grading.multimodal.grading_report import (
+    evidence_for_db as _evidence_for_db,
+    rationale_for_db as _rationale_for_db,
+    report_criteria_rows,
+    report_question_grades_rows,
+    rubric_totals_and_score_fraction,
+)
 from .database.models import (
     AIScore,
     Assignment,
     AssignmentAttachment,
+    AssignmentQuestionChunk,
     AssignmentUpload,
     StandaloneAIScore,
     StandaloneArtifact,
@@ -62,33 +70,6 @@ def init_celery(cfg: Config | None = None) -> None:
     c = cfg or Config()
     celery_app.conf.broker_url = c.REDIS_URL
     celery_app.conf.result_backend = c.REDIS_URL
-
-
-def _evidence_for_db(ev):
-    if ev is None:
-        return {}
-    if isinstance(ev, dict):
-        return ev
-    return {"text": str(ev)}
-
-
-def _rationale_for_db(c: dict) -> str:
-    return (c.get("rationale") or c.get("justification") or "").strip() or ""
-
-
-def _student_evidence_from_criterion(c: dict) -> str:
-    ev = c.get("evidence")
-    if isinstance(ev, dict):
-        trio = ev.get("trio")
-        if isinstance(trio, dict):
-            s = str(trio.get("student_response") or "").strip()
-            if s:
-                return s
-        txt = str(ev.get("text") or "").strip()
-        return txt
-    if isinstance(ev, str):
-        return ev.strip()
-    return ""
 
 
 def _parse_uploaded_rubric_column(filename: str, data: bytes):
@@ -342,7 +323,28 @@ def grade_submission(self, submission_id: int):
             submission_parts.append((fn_hint or art.kind, data))
 
         is_public_autograder = assignment.course_id is None
-        modality_hints_extra: dict[str, Any] | None = None
+        modality_hints_extra: dict[str, Any] = {}
+        question_chunks = (
+            db.query(AssignmentQuestionChunk)
+            .filter_by(assignment_id=assignment.id)
+            .order_by(AssignmentQuestionChunk.order_index)
+            .all()
+        )
+        if question_chunks:
+            # Assignment Creation's teacher-reviewed question/answer chunk bank — when present,
+            # app.grading.chunking.prechunked_response_pairing_agent pairs this submission's own
+            # response text against these fixed chunks instead of re-decomposing the
+            # question/answer text from scratch for every submission (see that module's docstring
+            # for why: stable chunk boundaries across students, less redundant LLM work).
+            modality_hints_extra["prechunked_qa_pairs"] = [
+                {
+                    "question_id": qc.question_id or f"q{i + 1}",
+                    "question_text": qc.question_text or "",
+                    "answer_text": qc.answer_text or "",
+                }
+                for i, qc in enumerate(question_chunks)
+            ]
+        blank_bytes_seeded = False
         for att in (
             db.query(AssignmentAttachment)
             .filter_by(assignment_id=assignment.id)
@@ -354,20 +356,19 @@ def grade_submission(self, submission_id: int):
                 # app.grading.chunking.claude_parsing_agent._blank_template_text) so grading can
                 # isolate each question the same way Assignment Creation's review page does,
                 # without the student having to re-upload it at submission time.
-                if modality_hints_extra is None:
+                if not blank_bytes_seeded:
                     try:
                         blank_bytes = get_object_bytes(cfg, att.object_key)
                     except Exception:
                         blank_bytes = None
                     if blank_bytes:
                         suffix = Path(att.filename or "").suffix.lower()
-                        modality_hints_extra = {
-                            "blank_assignment_template_bytes": blank_bytes,
-                            "blank_assignment_template_suffix": suffix,
-                            "blank_assignment_matched_file": att.filename or "",
-                        }
+                        modality_hints_extra["blank_assignment_template_bytes"] = blank_bytes
+                        modality_hints_extra["blank_assignment_template_suffix"] = suffix
+                        modality_hints_extra["blank_assignment_matched_file"] = att.filename or ""
                         if suffix == ".ipynb":
                             modality_hints_extra["blank_assignment_ipynb_bytes"] = blank_bytes
+                        blank_bytes_seeded = True
                 continue
             if is_public_autograder:
                 # Library assignments already carry rubric/answer-key text on the Assignment row
@@ -438,7 +439,7 @@ def grade_submission(self, submission_id: int):
             student_id=sub.student_id,
             rubric_text=merged_rubric,
             answer_key_text=merged_ak,
-            modality_hints_extra=modality_hints_extra,
+            modality_hints_extra=modality_hints_extra or None,
         )
         _default_ml = f"openai:{(cfg.OPENAI_MODEL or 'gpt-4o-mini').strip()}"
         model_used = (result.pop("_model_used", None) or _default_ml)[:200]
@@ -449,6 +450,13 @@ def grade_submission(self, submission_id: int):
 
         criteria = result.get("criteria", [])
         overall = result.get("overall", {})
+        question_grades = result.get("question_grades", [])
+        source_chunk_payload = _build_source_chunk_payload_map(result)
+        total_rubric_points, total_rubric_points_earned, _score_fraction = (
+            rubric_totals_and_score_fraction(
+                overall=overall, criteria=criteria, question_grades=question_grades
+            )
+        )
         flags = set(result.get("flags", []))
         mm_review = str(result.get("_assignment_review_status", "") or "").lower()
         multimodal_needs_review = mm_review in ("caution", "flagged", "escalation")
@@ -497,20 +505,17 @@ def grade_submission(self, submission_id: int):
                     if sub_ref.final_score is not None
                     else None,
                     "final_feedback": sub_ref.final_feedback,
+                    "max_points": round(total_rubric_points, 4),
+                    "rubric_points_earned": round(total_rubric_points_earned, 4),
                     "model_used": model_used,
                     "models_used": models_used,
                     "graded_at": sub_ref.updated_at.isoformat()
                     if sub_ref.updated_at
                     else None,
-                    "criteria": [
-                        {
-                            "criterion": c.get("name", ""),
-                            "score": c.get("score", 0),
-                            "confidence": c.get("confidence", 0.5),
-                            "rationale": _rationale_for_db(c),
-                        }
-                        for c in criteria
-                    ],
+                    "criteria": report_criteria_rows(criteria),
+                    "question_grades": report_question_grades_rows(
+                        question_grades, source_chunk_payload
+                    ),
                 }
                 if entropy_meta is not None:
                     grading_report["entropy_meta"] = entropy_meta
@@ -632,62 +637,11 @@ def grade_standalone_submission(self, submission_id: int):
         overall = result.get("overall", {})
         question_grades = result.get("question_grades", [])
         source_chunk_payload = _build_source_chunk_payload_map(result)
-        total_rubric_points = 0.0
-        total_rubric_points_earned = 0.0
-        try:
-            if overall.get("max_points") is not None:
-                total_rubric_points = float(overall.get("max_points") or 0.0)
-            if overall.get("rubric_points_earned") is not None:
-                total_rubric_points_earned = float(overall.get("rubric_points_earned") or 0.0)
-        except (TypeError, ValueError):
-            total_rubric_points = 0.0
-            total_rubric_points_earned = 0.0
-        if total_rubric_points <= 0.0 or total_rubric_points_earned <= 0.0:
-            qp_max = 0.0
-            qp_earned = 0.0
-            for qg in question_grades:
-                if not isinstance(qg, dict):
-                    continue
-                ov = qg.get("overall") or {}
-                try:
-                    qp_max += float(ov.get("max_points") or 0.0)
-                except (TypeError, ValueError):
-                    pass
-                try:
-                    qp_earned += float(ov.get("rubric_points_earned") or 0.0)
-                except (TypeError, ValueError):
-                    pass
-            if total_rubric_points <= 0.0:
-                total_rubric_points = qp_max
-            if total_rubric_points_earned <= 0.0:
-                total_rubric_points_earned = qp_earned
-        if total_rubric_points <= 0.0:
-            for c in criteria:
-                if not isinstance(c, dict):
-                    continue
-                try:
-                    total_rubric_points += float(c.get("max_points", 0.0))
-                except (TypeError, ValueError):
-                    continue
-        if total_rubric_points_earned <= 0.0:
-            for c in criteria:
-                if not isinstance(c, dict):
-                    continue
-                try:
-                    total_rubric_points_earned += float(c.get("score", 0.0))
-                except (TypeError, ValueError):
-                    continue
-        score_fraction = 0.0
-        if total_rubric_points > 0.0:
-            score_fraction = total_rubric_points_earned / total_rubric_points
-        else:
-            try:
-                score_fraction = float(overall.get("score") or 0.0)
-            except (TypeError, ValueError):
-                score_fraction = 0.0
-            if score_fraction > 1.0:
-                score_fraction /= 100.0
-        score_fraction = max(0.0, min(1.0, score_fraction))
+        total_rubric_points, total_rubric_points_earned, score_fraction = (
+            rubric_totals_and_score_fraction(
+                overall=overall, criteria=criteria, question_grades=question_grades
+            )
+        )
         flags = set(result.get("flags", []))
         mm_review = str(result.get("_assignment_review_status", "") or "").lower()
         multimodal_needs_review = mm_review in ("caution", "flagged", "escalation")
@@ -743,74 +697,10 @@ def grade_standalone_submission(self, submission_id: int):
                     "graded_at": sub_ref.updated_at.isoformat()
                     if sub_ref.updated_at
                     else None,
-                    "criteria": [
-                        {
-                            "criterion": c.get("name", ""),
-                            "score": c.get("score", 0),
-                            "max_points": c.get("max_points"),
-                            "rubric_points_earned": c.get("score", 0),
-                            "confidence": c.get("confidence", 0.5),
-                            "justification": _rationale_for_db(c),
-                            "rationale": _rationale_for_db(c),
-                            "student_evidence": _student_evidence_from_criterion(c),
-                            "evidence": _evidence_for_db(c.get("evidence")),
-                        }
-                        for c in criteria
-                    ],
-                    "question_grades": [
-                        {
-                            "chunk_id": qg.get("chunk_id"),
-                            "source_chunk_id": qg.get("_source_chunk_id"),
-                            "overall": {
-                                "score": (qg.get("overall") or {}).get("score"),
-                                "max_points": (qg.get("overall") or {}).get("max_points"),
-                                "rubric_points_earned": (qg.get("overall") or {}).get("rubric_points_earned"),
-                                "confidence": (qg.get("overall") or {}).get("confidence"),
-                            },
-                            "question_payload": {
-                                "question": (
-                                    source_chunk_payload.get(
-                                        str(qg.get("_source_chunk_id") or "").strip(), {}
-                                    ).get("question")
-                                    or str(qg.get("chunk_id") or "").strip()
-                                ),
-                                "question_chunk_text": (
-                                    source_chunk_payload.get(
-                                        str(qg.get("_source_chunk_id") or "").strip(), {}
-                                    ).get("question_chunk_text")
-                                    or ""
-                                ),
-                                "student_response": (
-                                    source_chunk_payload.get(
-                                        str(qg.get("_source_chunk_id") or "").strip(), {}
-                                    ).get("student_response")
-                                    or ""
-                                ),
-                                "response_text": (
-                                    source_chunk_payload.get(
-                                        str(qg.get("_source_chunk_id") or "").strip(), {}
-                                    ).get("response_text")
-                                    or ""
-                                ),
-                            },
-                            "criteria": [
-                                {
-                                    "criterion": qc.get("name", ""),
-                                    "score": qc.get("score", 0),
-                                    "max_points": qc.get("max_points"),
-                                    "rubric_points_earned": qc.get("score", 0),
-                                    "confidence": qc.get("confidence", 0.5),
-                                    "justification": str(qc.get("justification") or "").strip(),
-                                    "student_evidence": str(qc.get("evidence") or "").strip(),
-                                    "evidence": _evidence_for_db(qc.get("evidence")),
-                                }
-                                for qc in (qg.get("criteria") or [])
-                                if isinstance(qc, dict)
-                            ],
-                        }
-                        for qg in question_grades
-                        if isinstance(qg, dict)
-                    ],
+                    "criteria": report_criteria_rows(criteria),
+                    "question_grades": report_question_grades_rows(
+                        question_grades, source_chunk_payload
+                    ),
                 }
                 if entropy_meta is not None:
                     grading_report["entropy_meta"] = entropy_meta

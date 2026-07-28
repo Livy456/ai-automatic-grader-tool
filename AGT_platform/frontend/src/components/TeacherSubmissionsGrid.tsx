@@ -18,6 +18,20 @@ export type TeacherSubmissionRow = {
   final_score?: number | null;
 };
 
+function pad2(n: number): string {
+  return String(n).padStart(2, "0");
+}
+
+/** "2026-07-27T21:36:00Z" -> "07-27-2026 21:36:00" (local time). */
+function formatSubmittedAt(raw: string | undefined): string {
+  if (!raw || raw === "—") return "—";
+  const d = new Date(raw);
+  if (Number.isNaN(d.getTime())) return raw;
+  const date = `${pad2(d.getMonth() + 1)}-${pad2(d.getDate())}-${d.getFullYear()}`;
+  const time = `${pad2(d.getHours())}:${pad2(d.getMinutes())}:${pad2(d.getSeconds())}`;
+  return `${date} ${time}`;
+}
+
 function NoRows() {
   return (
     <Box
@@ -84,7 +98,13 @@ export default function TeacherSubmissionsGrid() {
     { field: "student", headerName: "Student", flex: 1, minWidth: 120 },
     { field: "assignment", headerName: "Assignment", flex: 1, minWidth: 140 },
     { field: "course", headerName: "Course", flex: 0.8, minWidth: 100 },
-    { field: "submitted", headerName: "Submitted", flex: 1, minWidth: 160 },
+    {
+      field: "submitted",
+      headerName: "Submitted",
+      flex: 1,
+      minWidth: 160,
+      valueFormatter: (v) => formatSubmittedAt(v as string | undefined),
+    },
     {
       field: "status",
       headerName: "Status",

@@ -118,6 +118,9 @@ from app.grading.chunking.notebook_chunker import sanitize_grading_chunks_placeh
 from app.grading.chunking.llm_triplet_three_source import multimodal_llm_triplet_three_source_enabled
 from app.grading.chunking.template_aligned_notebook_chunks import blank_template_chunking_requested
 from app.grading.chunking.claude_parsing_agent import try_build_claude_parsing_agent_chunks
+from app.grading.chunking.prechunked_response_pairing_agent import (
+    try_build_prechunked_pairing_chunks,
+)
 
 from .aggregator import aggregate_assignment, aggregate_chunk_samples
 from .model_runner import ChunkModelRunner, MultiModelChunkRunner
@@ -678,23 +681,43 @@ class MultimodalGradingPipeline:
 
                 maybe_prepare_audio_half_split(envelope, app_cfg)
 
+            # When the assignment already has a teacher-reviewed question/answer chunk bank
+            # (``AssignmentQuestionChunk`` rows from the Assignment Creation flow, threaded
+            # through as ``modality_hints["prechunked_qa_pairs"]`` by
+            # ``app.tasks.grade_submission``), pair this submission's response text against that
+            # fixed chunk bank instead of re-decomposing the question/answer text from scratch
+            # for every submission — keeps question/answer chunk boundaries stable across
+            # students and skips straight to the one submission-specific step (finding the
+            # matching student response). No-ops (returns ``None``) for assignments without a
+            # chunk bank, so every fallback below is unaffected.
+            prechunked_result = (
+                try_build_prechunked_pairing_chunks(
+                    envelope, app_cfg, answer_key_plaintext=answer_key_for_prompt
+                )
+                if app_cfg is not None
+                else None
+            )
             # Claude parsing agent (Pydantic-validated question/response/answer decomposition)
-            # is tried first, ahead of the OpenAI trio frontload and every heuristic chunker
+            # is tried next, ahead of the OpenAI trio frontload and every heuristic chunker
             # below — both this pipeline's callers (course multimodal grading *and* the
             # standalone autograder) share this one ``run()``, so enabling it here covers both.
             # Isolating one question from the next (and from instructor test/setup code) is
             # Claude's job here, not a set of cell-classification regexes, so it returns ``None``
             # (never raises) on any failure and every existing fallback below still applies.
             claude_agent_result = (
-                try_build_claude_parsing_agent_chunks(
-                    envelope, app_cfg, answer_key_plaintext=answer_key_for_prompt
+                prechunked_result
+                if prechunked_result is not None
+                else (
+                    try_build_claude_parsing_agent_chunks(
+                        envelope, app_cfg, answer_key_plaintext=answer_key_for_prompt
+                    )
+                    if app_cfg is not None
+                    else None
                 )
-                if app_cfg is not None
-                else None
             )
             if claude_agent_result is not None:
                 chunks, chunker_mode = claude_agent_result
-                art.append("claude_parsing_agent", {"n_chunks": len(chunks)})
+                art.append(chunker_mode, {"n_chunks": len(chunks)})
             else:
                 raw_tpl = hints.get("blank_assignment_template_bytes")
                 raw_nb = hints.get("blank_assignment_ipynb_bytes")

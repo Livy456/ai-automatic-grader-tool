@@ -17,7 +17,20 @@ from app.database.audit import log_event
 from app.config import Config
 from app.deps import get_current_user, get_db
 from app.database.models import AIScore, Assignment, Enrollment, Submission, SubmissionArtifact, User
-from app.database.storage import object_exists, presigned_put_url, upload_from_fastapi_file
+from app.database.storage import (
+    get_presigned_url,
+    object_exists,
+    presigned_put_url,
+    upload_from_fastapi_file,
+)
+from app.grading.multimodal.grading_report_view import (
+    question_from_evidence as _question_from_evidence,
+    rubric_totals_from_report as _rubric_totals_from_report,
+    safe_report_json as _safe_report_json,
+    score_pct_from_rubric_totals as _score_pct_from_rubric_totals,
+    score_to_100 as _score_to_100,
+    student_evidence_from_payload as _student_evidence_from_payload,
+)
 from app.tasks import grade_submission
 
 router = APIRouter()
@@ -297,7 +310,20 @@ def get_submission(
     db: Session = Depends(get_db),
     user: dict = Depends(get_current_user),
 ):
-    sub = db.query(Submission).get(submission_id)
+    """
+    Course/library submission results — same response shape as the standalone autograder's
+    ``GET /api/standalone/submissions/{id}`` (see ``app.routes.standalone.standalone_get``) so
+    both results pages can share one frontend view: rubric totals + a per-question breakdown are
+    read back from the MinIO grading report (built by ``app.tasks.grade_submission`` via
+    :mod:`app.grading.multimodal.grading_report`), falling back to the flat ``ai_scores`` list
+    when no report/question breakdown is available yet.
+    """
+    sub = (
+        db.query(Submission)
+        .options(selectinload(Submission.assignment))
+        .filter_by(id=submission_id)
+        .first()
+    )
     if not sub:
         raise HTTPException(404, "not found")
 
@@ -308,23 +334,101 @@ def get_submission(
     ):
         raise HTTPException(403, "forbidden")
 
+    cfg = Config()
+    report = _safe_report_json(cfg, sub.grading_report_object_key)
     scores = db.query(AIScore).filter_by(submission_id=sub.id).all()
     log_event(user["id"], "VIEW_SUBMISSION", "Submission", sub.id, {})
+
+    final_score = _score_to_100(sub.final_score)
+    if final_score is None and report.get("final_score") is not None:
+        final_score = _score_to_100(report.get("final_score"))
+    question_grades = report.get("question_grades")
+    if not isinstance(question_grades, list):
+        question_grades = []
+    rubric_points_earned, rubric_points_max = _rubric_totals_from_report(report)
+    if (rubric_points_earned or 0.0) <= 0.0:
+        d_earned = 0.0
+        for s in scores:
+            try:
+                d_earned += float(s.score or 0.0)
+            except (TypeError, ValueError):
+                pass
+        rubric_points_earned = d_earned
+    if (rubric_points_max or 0.0) <= 0.0:
+        d_max = 0.0
+        for qg in question_grades:
+            if not isinstance(qg, dict):
+                continue
+            for qc in qg.get("criteria") or []:
+                if not isinstance(qc, dict):
+                    continue
+                try:
+                    d_max += float(qc.get("max_points") or 0.0)
+                except (TypeError, ValueError):
+                    pass
+        rubric_points_max = d_max
+    rubric_based_score = _score_pct_from_rubric_totals(rubric_points_earned, rubric_points_max)
+    if rubric_based_score is not None:
+        final_score = rubric_based_score
+
     return {
         "id": sub.id,
         "status": sub.status,
-        "final_score": float(sub.final_score) if sub.final_score is not None else None,
+        "assignment_title": sub.assignment.title if sub.assignment else None,
+        "student_id": sub.student_id,
+        "final_score": final_score,
         "final_feedback": sub.final_feedback,
+        "max_points": round(float(rubric_points_max), 4) if rubric_points_max is not None else None,
+        "rubric_points_earned": (
+            round(float(rubric_points_earned), 4) if rubric_points_earned is not None else None
+        ),
         "grading_dispatch_at": sub.grading_dispatch_at.isoformat()
         if sub.grading_dispatch_at
         else None,
+        "created_at": sub.created_at.isoformat() if sub.created_at else None,
+        "grading_report_object_key": sub.grading_report_object_key,
+        "question_grades": question_grades,
         "ai_scores": [
             {
                 "criterion": s.criterion,
-                "score": float(s.score),
+                "score": float(s.score) if s.score is not None else 0.0,
                 "confidence": float(s.confidence),
+                "justification": s.rationale,
                 "rationale": s.rationale,
+                "question": _question_from_evidence(s.evidence),
+                "student_evidence": _student_evidence_from_payload(s.evidence),
+                "evidence": s.evidence if isinstance(s.evidence, dict) else {},
             }
             for s in scores
         ],
     }
+
+
+@router.get("/api/submissions/{submission_id}/report")
+def get_submission_report(
+    submission_id: int,
+    db: Session = Depends(get_db),
+    user: dict = Depends(get_current_user),
+):
+    """Presigned GET URL for the grading report JSON in MinIO (mirrors the standalone autograder's
+    ``GET /api/standalone/submissions/{id}/report``)."""
+    cfg = Config()
+    sub = db.query(Submission).get(submission_id)
+    if not sub:
+        raise HTTPException(404, "not found")
+    if (
+        user["role"] == "student"
+        and sub.student_id is not None
+        and sub.student_id != user["id"]
+    ):
+        raise HTTPException(403, "forbidden")
+    if not sub.grading_report_object_key:
+        raise HTTPException(404, "report not available yet")
+    url = get_presigned_url(
+        cfg,
+        sub.grading_report_object_key,
+        method="GET",
+        expires=3600,
+        bucket=cfg.MINIO_GRADING_REPORTS_BUCKET,
+    )
+    return {"download_url": url, "object_key": sub.grading_report_object_key}
