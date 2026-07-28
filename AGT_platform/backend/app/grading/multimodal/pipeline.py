@@ -1017,6 +1017,14 @@ class MultimodalGradingPipeline:
             sanitize_grading_chunks_placeholders(chunks)
             wf("chunk_text_strip_assignment_placeholders", n_chunks=len(chunks))
 
+        # Same export ``run()`` writes after chunking (``{assignment}_{student}_chunking.json`` /
+        # ``{assignment}_trio_chunks.json``) — ``app.tasks._build_source_chunk_payload_map`` reads
+        # these files back to recover each question's text and student-response evidence for the
+        # grading report / review UI, so this pipeline must produce them too, not just ``run()``.
+        hints = envelope.modality_hints or {}
+        _try_persist_trio_chunks_json(envelope, chunks, hints, wf)
+        _try_persist_assignment_chunking_json(envelope, chunks, hints, chunker_mode, wf)
+
         art.append(
             "chunking",
             {
@@ -1052,7 +1060,6 @@ class MultimodalGradingPipeline:
                 },
             )
 
-        hints = envelope.modality_hints or {}
         answer_key_plain = str(hints.get("answer_key_plaintext") or "").strip()
         ak_cap = int(os.getenv("MULTIMODAL_ANSWER_KEY_PROMPT_MAX_CHARS", "18000") or 18000)
         ak_cap = max(4000, min(ak_cap, 100_000))
