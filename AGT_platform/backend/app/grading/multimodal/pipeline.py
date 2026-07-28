@@ -186,9 +186,14 @@ def _chunk_student_response_text(chunk: GradingChunk) -> str:
     """
     Best-effort student-response text for evidence backfill (see
     :func:`app.grading.multimodal.aggregator._backfill_evidence_from_student_response`).
-    Mirrors the same trio → response_preview → extracted_text fallback chain used when
-    building the ``student_response`` shown to graders elsewhere in this codebase (e.g.
-    ``app.tasks._student_response_from_chunking_row``).
+
+    Only ever returns text a chunker attributed specifically to the *student*
+    (``evidence.trio.student_response`` / ``evidence.response_preview``, the same fields
+    ``app.tasks._student_response_from_chunking_row`` reads) — deliberately **never**
+    ``chunk.extracted_text``, which for every chunker is the raw ``question`` (+ answer-key
+    context, for some chunkers) *combined with* the response, e.g. ``f"{question}\\n\\n{
+    student_response}"``. Falling back to it here would leak question/answer-key text into the
+    "evidence" shown to justify a grade whenever a chunk has no isolated student-response text.
     """
     ev = chunk.evidence or {}
     trio = ev.get("trio")
@@ -196,10 +201,7 @@ def _chunk_student_response_text(chunk: GradingChunk) -> str:
         sr = str(trio.get("student_response") or "").strip()
         if sr:
             return sr
-    rp = str(ev.get("response_preview") or "").strip()
-    if rp:
-        return rp
-    return str(chunk.extracted_text or "").strip()
+    return str(ev.get("response_preview") or "").strip()
 
 
 def _safe_trio_export_stem(assignment_id: str) -> str:

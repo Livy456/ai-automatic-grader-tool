@@ -100,18 +100,15 @@ function criterionChipColor(fraction: number): "success" | "warning" | "error" {
   return "error";
 }
 
+// Deliberately surfaces only the student's own words: the grading decision's "evidence" must
+// never be (or fall back to) the question or answer-key text, so this never reads
+// `trio.answer_key_segment` or `trio.question`, even as a fallback.
 function summarizeEvidence(ev: unknown): string {
   if (!ev || typeof ev !== "object") return "";
   const obj = ev as Record<string, unknown>;
   const trio = (obj.trio ?? {}) as Record<string, unknown>;
-  const bits: string[] = [];
   const student = String(trio.student_response ?? "").trim();
-  const key = String(trio.answer_key_segment ?? "").trim();
-  const source = String((obj.chunker as string) || "").trim();
-  if (student) bits.push(`Student: ${student.slice(0, 220)}`);
-  if (key) bits.push(`Key: ${key.slice(0, 220)}`);
-  if (source) bits.push(`Chunker: ${source}`);
-  return bits.join("\n");
+  return student ? student.slice(0, 450) : "";
 }
 
 function studentEvidenceSnippet(row: GradingResultAiScore): string {

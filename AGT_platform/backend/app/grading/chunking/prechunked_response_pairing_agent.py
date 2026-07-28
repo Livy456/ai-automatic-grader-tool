@@ -32,6 +32,7 @@ from __future__ import annotations
 
 import json
 import logging
+import re
 from typing import Any
 
 from pydantic import BaseModel, Field, ValidationError, field_validator
@@ -82,6 +83,13 @@ class PairedStudentResponses(BaseModel):
 
 def _response_schema_json() -> str:
     return json.dumps(PairedStudentResponses.model_json_schema(), indent=2)
+
+
+def _normalize_qid(raw: object) -> str:
+    """Whitespace/case-insensitive key for matching a model-echoed ``question_id`` back to the
+    input question it belongs to (see ``try_build_prechunked_pairing_chunks``'s positional
+    fallback for when this normalized match still misses)."""
+    return re.sub(r"\s+", " ", str(raw or "").strip()).lower()
 
 
 def _questions_block(qa_pairs: list[dict[str, str]]) -> str:
@@ -288,7 +296,7 @@ def try_build_prechunked_pairing_chunks(
         return None
 
     response_by_qid = {
-        str(p.question_id).strip(): p.student_response
+        _normalize_qid(p.question_id): p.student_response
         for p in paired.pairs
         if str(p.question_id).strip()
     }
@@ -296,7 +304,13 @@ def try_build_prechunked_pairing_chunks(
     chunks: list[GradingChunk] = []
     for i, qa_pair in enumerate(qa_pairs):
         qid = str(qa_pair.get("question_id") or "").strip() or f"q{i + 1}"
-        sr = response_by_qid.get(qid, "")
+        sr = response_by_qid.get(_normalize_qid(qid), "")
+        if not sr and i < len(paired.pairs):
+            # The model didn't echo back a ``question_id`` matching this question (whitespace
+            # or casing drift, or it slightly reworded the id) even though the system prompt
+            # guarantees "same count, same order, same ids" — fall back to positional
+            # alignment instead of silently treating this student's response as missing.
+            sr = paired.pairs[i].student_response
         ch = _grading_chunk_from_pair(
             qa_pair,
             sr,
