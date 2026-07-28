@@ -413,6 +413,106 @@ class GradeSubmissionContextTests(ApiRoutesTestCase):
         self.assertEqual(pairs[0], {"question_id": "q1", "question_text": "What is 2+2?", "answer_text": "4"})
         self.assertEqual(pairs[1], {"question_id": "q2", "question_text": "What is 3+3?", "answer_text": "6"})
 
+    def test_grading_report_question_text_prefers_stored_assignment_chunk(self):
+        """
+        The MinIO grading report's ``question_grades[].question_payload.question`` should show
+        the exact ``AssignmentQuestionChunk.question_text`` saved during Assignment Creation, even
+        when this submission's own chunking pass produced different (e.g. re-labeled) text for the
+        same ``question_id`` — see ``app.grading.multimodal.grading_report.report_question_grades_rows``.
+        """
+        from app import tasks
+        from app.database.init_db import SessionLocal
+        from app.database.models import (
+            Assignment,
+            AssignmentQuestionChunk,
+            Submission,
+            SubmissionArtifact,
+        )
+
+        db = SessionLocal()
+        try:
+            assignment = Assignment(
+                course_id=None, title="Library assignment", modality="written", rubric=[], created_at=None
+            )
+            db.add(assignment)
+            db.flush()
+            db.add(
+                AssignmentQuestionChunk(
+                    assignment_id=assignment.id,
+                    question_id="q1",
+                    order_index=0,
+                    question_text="What is 2+2?",
+                    answer_text="4",
+                )
+            )
+            sub = Submission(assignment_id=assignment.id, student_id=None, status="queued")
+            db.add(sub)
+            db.flush()
+            db.add(SubmissionArtifact(submission_id=sub.id, kind="txt", object_key="work.txt"))
+            db.commit()
+            sub_id = sub.id
+        finally:
+            db.close()
+
+        fake_chunk_id = "s1:a1:prechunked_qa_pairing:0:q1"
+        fake_result = {
+            "overall": {"score": 1.0, "max_points": 10, "rubric_points_earned": 10},
+            "criteria": [],
+            "question_grades": [
+                {
+                    "chunk_id": "pair_1",
+                    "_source_chunk_id": fake_chunk_id,
+                    "overall": {"score": 1.0, "max_points": 10, "rubric_points_earned": 10, "confidence": 0.9},
+                    "criteria": [],
+                }
+            ],
+            "_multimodal_pipeline_audit": {
+                "pipeline_audit": {
+                    "chunking": [
+                        {
+                            "chunks": [
+                                {
+                                    "chunk_id": fake_chunk_id,
+                                    "question_id": "q1",
+                                    "extracted_text": "four",
+                                    "evidence": {
+                                        "trio": {
+                                            # Deliberately different from the stored assignment
+                                            # question text, to prove the override wins.
+                                            "question": "Re-derived (possibly drifted) text",
+                                            "student_response": "four",
+                                        }
+                                    },
+                                }
+                            ]
+                        }
+                    ]
+                }
+            },
+        }
+
+        captured_report: dict = {}
+
+        class _FakeMinioClient:
+            def put_object(self, **kwargs):
+                captured_report.update(json.loads(kwargs["Body"].decode("utf-8")))
+
+        with (
+            patch("app.tasks.get_object_bytes", return_value=b"four\n"),
+            patch(
+                "app.tasks.run_db_submission_multimodal_pipeline",
+                return_value=dict(fake_result),
+            ),
+            patch("app.tasks.minio_client", return_value=_FakeMinioClient()),
+        ):
+            tasks.grade_submission.run(sub_id)
+
+        self.assertEqual(len(captured_report["question_grades"]), 1)
+        self.assertEqual(
+            captured_report["question_grades"][0]["question_payload"]["question"],
+            "What is 2+2?",
+        )
+
 
 class CourseSubmissionResultsRouteTests(ApiRoutesTestCase):
     """

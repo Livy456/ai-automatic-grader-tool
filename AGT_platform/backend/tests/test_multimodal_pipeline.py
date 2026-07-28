@@ -3488,5 +3488,63 @@ class MultimodalHuggingFaceRoutingTests(unittest.TestCase):
         self.assertEqual(chunk_multimodal_grading_system_prompt(ch2), SYSTEM_CHUNK_GRADER)
 
 
+class ReportQuestionGradesRowsAssignmentTextOverrideTests(unittest.TestCase):
+    """
+    ``report_question_grades_rows``'s ``assignment_question_text_by_id`` should always win over
+    whatever question text this submission's own chunking/trio-refine pass produced, so each
+    question tab in the review UI shows the exact, teacher-saved ``AssignmentQuestionChunk`` text
+    from the Assignment Creation flow (see ``app.tasks.grade_submission``).
+    """
+
+    def test_stored_assignment_question_text_overrides_chunk_derived_text(self) -> None:
+        from app.grading.multimodal.grading_report import report_question_grades_rows
+
+        question_grades = [
+            {
+                "chunk_id": "s1:a1:pair_1",
+                "_source_chunk_id": "s1:a1:prechunked_qa_pairing:0:q1",
+                "overall": {"score": 1.0, "max_points": 10, "rubric_points_earned": 10, "confidence": 0.9},
+                "criteria": [],
+            }
+        ]
+        source_chunk_payload = {
+            "s1:a1:prechunked_qa_pairing:0:q1": {
+                "question": "Re-derived (possibly drifted) question text",
+                "question_chunk_text": "chunk body text",
+                "student_response": "four",
+                "response_text": "four",
+                "question_id": "q1",
+            }
+        }
+        assignment_question_text_by_id = {"q1": "What is 2+2?"}
+
+        rows = report_question_grades_rows(
+            question_grades, source_chunk_payload, assignment_question_text_by_id
+        )
+        self.assertEqual(len(rows), 1)
+        self.assertEqual(rows[0]["question_payload"]["question"], "What is 2+2?")
+
+    def test_falls_back_to_chunk_derived_text_without_a_matching_stored_question(self) -> None:
+        from app.grading.multimodal.grading_report import report_question_grades_rows
+
+        question_grades = [
+            {
+                "chunk_id": "s1:a1:pair_1",
+                "_source_chunk_id": "chunk-1",
+                "overall": {},
+                "criteria": [],
+            }
+        ]
+        source_chunk_payload = {
+            "chunk-1": {"question": "What is 2+2?", "question_id": "q1"},
+        }
+
+        rows = report_question_grades_rows(question_grades, source_chunk_payload, {})
+        self.assertEqual(rows[0]["question_payload"]["question"], "What is 2+2?")
+
+        rows_no_override = report_question_grades_rows(question_grades, source_chunk_payload)
+        self.assertEqual(rows_no_override[0]["question_payload"]["question"], "What is 2+2?")
+
+
 if __name__ == "__main__":
     unittest.main()

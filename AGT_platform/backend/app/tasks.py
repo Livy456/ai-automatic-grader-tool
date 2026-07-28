@@ -192,6 +192,7 @@ def _upsert_source_chunk_payload(
     question = _question_text_from_chunking_row(row)
     extracted = str(row.get("extracted_text") or "").strip()
     student_response = _student_response_from_chunking_row(row)
+    question_id = str(row.get("question_id") or "").strip()
     existing = out.get(cid, {})
     out[cid] = {
         "question": question or str(existing.get("question") or "").strip(),
@@ -202,6 +203,12 @@ def _upsert_source_chunk_payload(
         or str(existing.get("response_text") or "").strip(),
         "student_response": student_response
         or str(existing.get("student_response") or "").strip(),
+        # The chunk's own ``question_id`` (e.g. ``AssignmentQuestionChunk.question_id`` when this
+        # chunk came from prechunked_response_pairing_agent) — lets callers look up the exact,
+        # teacher-saved question text from the Assignment Creation chunk bank instead of trusting
+        # whatever text this submission's chunking/trio-refine pass produced. See
+        # ``report_question_grades_rows``'s ``assignment_question_text_by_id`` parameter.
+        "question_id": question_id or str(existing.get("question_id") or "").strip(),
     }
 
 
@@ -452,6 +459,14 @@ def grade_submission(self, submission_id: int):
         overall = result.get("overall", {})
         question_grades = result.get("question_grades", [])
         source_chunk_payload = _build_source_chunk_payload_map(result)
+        # The Assignment Creation flow's own saved question text, keyed by
+        # ``AssignmentQuestionChunk.question_id`` — passed to ``report_question_grades_rows`` so
+        # the review UI always shows this exact stored text for each question tab, regardless of
+        # what this submission's own chunking/trio-refine pass happened to (re)produce.
+        assignment_question_text_by_id = {
+            (qc.question_id or f"q{i + 1}"): (qc.question_text or "")
+            for i, qc in enumerate(question_chunks)
+        }
         total_rubric_points, total_rubric_points_earned, _score_fraction = (
             rubric_totals_and_score_fraction(
                 overall=overall, criteria=criteria, question_grades=question_grades
@@ -514,7 +529,9 @@ def grade_submission(self, submission_id: int):
                     else None,
                     "criteria": report_criteria_rows(criteria),
                     "question_grades": report_question_grades_rows(
-                        question_grades, source_chunk_payload
+                        question_grades,
+                        source_chunk_payload,
+                        assignment_question_text_by_id,
                     ),
                 }
                 if entropy_meta is not None:

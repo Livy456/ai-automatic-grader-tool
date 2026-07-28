@@ -135,8 +135,19 @@ def report_criteria_rows(criteria: list[dict[str, Any]]) -> list[dict[str, Any]]
 def report_question_grades_rows(
     question_grades: list[dict[str, Any]],
     source_chunk_payload: dict[str, dict[str, str]],
+    assignment_question_text_by_id: dict[str, str] | None = None,
 ) -> list[dict[str, Any]]:
-    """Per-question-grade rows (question/response text + per-criterion breakdown) for the report."""
+    """
+    Per-question-grade rows (question/response text + per-criterion breakdown) for the report.
+
+    ``assignment_question_text_by_id`` (optional, ``{AssignmentQuestionChunk.question_id:
+    question_text}``) takes precedence over whatever question text this submission's own
+    chunking/trio-refine pass produced — it's the exact, teacher-reviewed text saved during
+    Assignment Creation (see ``app.tasks.grade_submission``), so course/library submissions with a
+    saved question/answer chunk bank always show that stored text rather than a per-submission
+    re-derivation of it. Standalone submissions (no chunk bank) simply omit this argument.
+    """
+    question_text_by_id = assignment_question_text_by_id or {}
     rows: list[dict[str, Any]] = []
     for qg in question_grades:
         if not isinstance(qg, dict):
@@ -144,6 +155,7 @@ def report_question_grades_rows(
         source_id = str(qg.get("_source_chunk_id") or "").strip()
         payload = source_chunk_payload.get(source_id, {})
         overall = qg.get("overall") or {}
+        stored_question = question_text_by_id.get(str(payload.get("question_id") or "").strip())
         rows.append(
             {
                 "chunk_id": qg.get("chunk_id"),
@@ -155,7 +167,11 @@ def report_question_grades_rows(
                     "confidence": overall.get("confidence"),
                 },
                 "question_payload": {
-                    "question": payload.get("question") or str(qg.get("chunk_id") or "").strip(),
+                    "question": (
+                        stored_question
+                        or payload.get("question")
+                        or str(qg.get("chunk_id") or "").strip()
+                    ),
                     "question_chunk_text": payload.get("question_chunk_text") or "",
                     "student_response": payload.get("student_response") or "",
                     "response_text": payload.get("response_text") or "",
