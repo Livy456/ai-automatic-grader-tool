@@ -37,6 +37,7 @@ from app.database.models import Assignment, AssignmentAttachment, AssignmentQues
 from app.deps import get_db, require_role
 from app.database.storage import get_object_bytes, get_presigned_url, object_exists, presigned_put_url
 from app.grading.chunking.assignment_qa_chunker import try_chunk_assignment_qa_pairs
+from app.grading.multimodal.pipeline_runner import excerpt_attachment_bytes
 from app.grading.parsing.assignment_context_parser import parse_assignment_context
 from app.grading.parsing.original_view import build_original_view
 
@@ -54,24 +55,23 @@ _MAX_FILES = 10
 _MAX_TITLE_LEN = 255
 
 
-def _normalize_rubric(raw: Any) -> list[dict[str, Any]] | None:
-    """Same shape as ``routes/courses.py``: ``[{"criterion": str, "max_score": float}, ...]``."""
-    if not isinstance(raw, list):
-        return None
-    out = []
-    for item in raw:
-        if not isinstance(item, dict):
-            return None
-        crit = item.get("criterion")
-        mx = item.get("max_score")
-        if not isinstance(crit, str) or not crit.strip():
-            return None
-        try:
-            mx_num = float(mx)
-        except (TypeError, ValueError):
-            return None
-        out.append({"criterion": crit.strip(), "max_score": mx_num})
-    return out
+def _normalize_rubric(raw: Any) -> Any:
+    """
+    Best-effort structured rubric from an uploaded JSON file, stored on ``Assignment.rubric``.
+
+    Mirrors ``app.tasks._parse_uploaded_rubric_column`` (the standalone-autograder rubric
+    upload path): keep any valid JSON list or dict as-is instead of requiring the narrow
+    ``[{"criterion": str, "max_score": float}, ...]`` shape. The multimodal grading pipeline's
+    ``rubric_column_to_by_type_and_flat`` (see
+    ``app.grading.multimodal.pipeline_runner``) already knows how to turn richer shapes (e.g.
+    ``{"sections": [...]}`` or ``{"criteria": [...]}``) into the per-question grading criteria
+    used by ``route_rubric`` / ``apply_custom_rubric_plan_to_chunks`` — rejecting them here just
+    meant real rubric uploads were silently discarded and grading fell back to a generic rubric
+    template instead of the one the teacher actually uploaded.
+    """
+    if isinstance(raw, (list, dict)):
+        return raw
+    return None
 
 
 def _serialize_assignment(a: Assignment) -> dict[str, Any]:
@@ -251,14 +251,32 @@ def finalize_assignment_library_entry(
 
     by_kind = {att.kind: att for att in attachments}
     rubric_att = by_kind.get("rubric")
-    if rubric_att and rubric_att.filename.lower().endswith(".json"):
+    if rubric_att is not None:
         try:
-            raw = get_object_bytes(cfg, rubric_att.object_key)
-            normalized = _normalize_rubric(json.loads(raw.decode("utf-8")))
-            if normalized:
-                a.rubric = normalized
+            rubric_bytes = get_object_bytes(cfg, rubric_att.object_key)
         except Exception:
-            pass  # Keep a.rubric == [] and rely on the stored file if it doesn't parse.
+            rubric_bytes = None
+        if rubric_bytes:
+            if rubric_att.filename.lower().endswith(".json"):
+                try:
+                    normalized = _normalize_rubric(json.loads(rubric_bytes.decode("utf-8")))
+                except Exception:
+                    normalized = None
+                if normalized:
+                    a.rubric = normalized
+            # Always keep the uploaded rubric's own text available to grading (see
+            # app.tasks.grade_submission's use of Assignment.grader_rubric_text), even when it
+            # can't be parsed into structured per-criterion rows (e.g. a PDF/DOCX narrative
+            # rubric, or JSON that failed to parse above) — otherwise the uploaded rubric is
+            # silently discarded and grading falls back to a generic rubric template. A rubric
+            # pasted at "start" (rubric_text) is an explicit teacher choice and always wins.
+            if not (a.grader_rubric_text or "").strip():
+                try:
+                    rubric_excerpt = excerpt_attachment_bytes(rubric_att.filename, rubric_bytes)
+                except Exception:
+                    rubric_excerpt = ""
+                if rubric_excerpt.strip():
+                    a.grader_rubric_text = rubric_excerpt.strip()
 
     chunking_status = "skipped"
     blank_att = by_kind.get("blank_assignment")
