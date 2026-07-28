@@ -118,6 +118,9 @@ from app.grading.chunking.notebook_chunker import sanitize_grading_chunks_placeh
 from app.grading.chunking.llm_triplet_three_source import multimodal_llm_triplet_three_source_enabled
 from app.grading.chunking.template_aligned_notebook_chunks import blank_template_chunking_requested
 from app.grading.chunking.claude_parsing_agent import try_build_claude_parsing_agent_chunks
+from app.grading.chunking.prechunked_response_pairing_agent import (
+    try_build_prechunked_pairing_chunks,
+)
 
 from .aggregator import aggregate_assignment, aggregate_chunk_samples
 from .model_runner import ChunkModelRunner, MultiModelChunkRunner
@@ -183,9 +186,14 @@ def _chunk_student_response_text(chunk: GradingChunk) -> str:
     """
     Best-effort student-response text for evidence backfill (see
     :func:`app.grading.multimodal.aggregator._backfill_evidence_from_student_response`).
-    Mirrors the same trio → response_preview → extracted_text fallback chain used when
-    building the ``student_response`` shown to graders elsewhere in this codebase (e.g.
-    ``app.tasks._student_response_from_chunking_row``).
+
+    Only ever returns text a chunker attributed specifically to the *student*
+    (``evidence.trio.student_response`` / ``evidence.response_preview``, the same fields
+    ``app.tasks._student_response_from_chunking_row`` reads) — deliberately **never**
+    ``chunk.extracted_text``, which for every chunker is the raw ``question`` (+ answer-key
+    context, for some chunkers) *combined with* the response, e.g. ``f"{question}\\n\\n{
+    student_response}"``. Falling back to it here would leak question/answer-key text into the
+    "evidence" shown to justify a grade whenever a chunk has no isolated student-response text.
     """
     ev = chunk.evidence or {}
     trio = ev.get("trio")
@@ -193,10 +201,7 @@ def _chunk_student_response_text(chunk: GradingChunk) -> str:
         sr = str(trio.get("student_response") or "").strip()
         if sr:
             return sr
-    rp = str(ev.get("response_preview") or "").strip()
-    if rp:
-        return rp
-    return str(chunk.extracted_text or "").strip()
+    return str(ev.get("response_preview") or "").strip()
 
 
 def _safe_trio_export_stem(assignment_id: str) -> str:
@@ -678,23 +683,43 @@ class MultimodalGradingPipeline:
 
                 maybe_prepare_audio_half_split(envelope, app_cfg)
 
+            # When the assignment already has a teacher-reviewed question/answer chunk bank
+            # (``AssignmentQuestionChunk`` rows from the Assignment Creation flow, threaded
+            # through as ``modality_hints["prechunked_qa_pairs"]`` by
+            # ``app.tasks.grade_submission``), pair this submission's response text against that
+            # fixed chunk bank instead of re-decomposing the question/answer text from scratch
+            # for every submission — keeps question/answer chunk boundaries stable across
+            # students and skips straight to the one submission-specific step (finding the
+            # matching student response). No-ops (returns ``None``) for assignments without a
+            # chunk bank, so every fallback below is unaffected.
+            prechunked_result = (
+                try_build_prechunked_pairing_chunks(
+                    envelope, app_cfg, answer_key_plaintext=answer_key_for_prompt
+                )
+                if app_cfg is not None
+                else None
+            )
             # Claude parsing agent (Pydantic-validated question/response/answer decomposition)
-            # is tried first, ahead of the OpenAI trio frontload and every heuristic chunker
+            # is tried next, ahead of the OpenAI trio frontload and every heuristic chunker
             # below — both this pipeline's callers (course multimodal grading *and* the
             # standalone autograder) share this one ``run()``, so enabling it here covers both.
             # Isolating one question from the next (and from instructor test/setup code) is
             # Claude's job here, not a set of cell-classification regexes, so it returns ``None``
             # (never raises) on any failure and every existing fallback below still applies.
             claude_agent_result = (
-                try_build_claude_parsing_agent_chunks(
-                    envelope, app_cfg, answer_key_plaintext=answer_key_for_prompt
+                prechunked_result
+                if prechunked_result is not None
+                else (
+                    try_build_claude_parsing_agent_chunks(
+                        envelope, app_cfg, answer_key_plaintext=answer_key_for_prompt
+                    )
+                    if app_cfg is not None
+                    else None
                 )
-                if app_cfg is not None
-                else None
             )
             if claude_agent_result is not None:
                 chunks, chunker_mode = claude_agent_result
-                art.append("claude_parsing_agent", {"n_chunks": len(chunks)})
+                art.append(chunker_mode, {"n_chunks": len(chunks)})
             else:
                 raw_tpl = hints.get("blank_assignment_template_bytes")
                 raw_nb = hints.get("blank_assignment_ipynb_bytes")
@@ -910,6 +935,140 @@ class MultimodalGradingPipeline:
         # scripts) keeps calling ``run()`` exactly as before. Do not call ``run()`` from inside
         # an already-running event loop (e.g. an ``async def`` request handler); dispatch
         # grading through Celery instead, as the FastAPI routes do.
+        concurrency = max(
+            1,
+            int(getattr(embed_cfg, "MULTIMODAL_LLM_CALL_CONCURRENCY", 3) or 3),
+        )
+        graded = asyncio.run(
+            self._grade_all_chunks_async(
+                chunks,
+                concurrency=concurrency,
+                answer_key_for_prompt=answer_key_for_prompt,
+                dataset_plain=dataset_plain,
+            )
+        )
+
+        chunk_outcomes: list[ChunkGradeOutcome] = []
+        for outcome, grading_audit in graded:
+            art.append("grading", grading_audit)
+            chunk_outcomes.append(outcome)
+
+        assign = aggregate_assignment(
+            envelope.assignment_id,
+            envelope.student_id,
+            chunk_outcomes,
+        )
+        wf(
+            "aggregate",
+            assignment_normalized_score=assign.assignment_normalized_score,
+            review_status=assign.review_status.value,
+        )
+        assign.stage_artifacts["pipeline_audit"] = art.stages
+        assign.stage_artifacts["agentic_workflow"] = workflow
+        art.append("output", {"score": assign.assignment_normalized_score})
+        return assign
+
+    def grade_prebuilt_chunks(
+        self,
+        envelope: IngestionEnvelope,
+        chunks: list[GradingChunk],
+        *,
+        chunker_mode: str,
+        artifacts: PipelineArtifactStore | None = None,
+    ) -> AssignmentGradeResult:
+        """
+        Rubric-route, grade, and aggregate chunks an upstream agent has already built — e.g. the
+        Evidence Agent in
+        :func:`app.grading.multimodal.course_evidence_grading_pipeline
+        .run_course_submission_evidence_grading_pipeline`, which pairs a course/library
+        submission's response text against the assignment's saved question/answer chunk bank —
+        skipping :meth:`run`'s own chunk-building waterfall (cache lookup, Claude parsing agent,
+        OpenAI trio+RAG frontload, notebook/heuristic chunkers) entirely.
+
+        Everything downstream of chunk-building — placeholder stripping, per-chunk rubric routing
+        (the **Grading Agent**'s rubric context), multi-sample LLM grading, semantic-entropy
+        confidence, and assignment aggregation — is the *exact* code :meth:`run` uses for every
+        other chunk source, so output shape, schema validation
+        (:mod:`app.grading.grading_output.output_schema`), and confidence-score calculation
+        (:mod:`app.grading.confidence_calculation.semantic_confidence`) are identical to the
+        standalone autograder's pipeline.
+        """
+        art = artifacts or PipelineArtifactStore()
+        workflow: list[dict[str, Any]] = []
+
+        def wf(phase: str, **extra: Any) -> None:
+            row: dict[str, Any] = {"phase": phase}
+            row.update(extra)
+            workflow.append(row)
+
+        wf(
+            "ingest",
+            assignment_id=envelope.assignment_id,
+            student_id=envelope.student_id,
+            artifact_keys=sorted(envelope.artifacts.keys()),
+        )
+        wf(
+            "chunk_and_embed",
+            chunker_mode=chunker_mode,
+            cache_path=None,
+            n_chunks=len(chunks),
+            reused_embeddings=False,
+        )
+
+        if chunks:
+            sanitize_grading_chunks_placeholders(chunks)
+            wf("chunk_text_strip_assignment_placeholders", n_chunks=len(chunks))
+
+        # Same export ``run()`` writes after chunking (``{assignment}_{student}_chunking.json`` /
+        # ``{assignment}_trio_chunks.json``) — ``app.tasks._build_source_chunk_payload_map`` reads
+        # these files back to recover each question's text and student-response evidence for the
+        # grading report / review UI, so this pipeline must produce them too, not just ``run()``.
+        hints = envelope.modality_hints or {}
+        _try_persist_trio_chunks_json(envelope, chunks, hints, wf)
+        _try_persist_assignment_chunking_json(envelope, chunks, hints, chunker_mode, wf)
+
+        art.append(
+            "chunking",
+            {
+                "chunk_ids": [c.chunk_id for c in chunks],
+                "chunker_mode": chunker_mode,
+                "rag_unit_embeddings": False,
+                "reused_cached_embeddings": False,
+            },
+        )
+
+        wf(
+            "route_rubric_and_grade",
+            description=(
+                "Per chunk: modality-aware rubric routing, multi-model JSON sampling, "
+                "parse + semantic entropy → confidence and normalized scores."
+            ),
+            n_chunks=len(chunks),
+        )
+        for chunk in chunks:
+            route_rubric(
+                chunk,
+                classifier=self.classifier,
+                rubric_rows_by_type=self.rubric_rows_by_type,
+            )
+            art.append(
+                "rubric_routing",
+                {
+                    "chunk_id": chunk.chunk_id,
+                    "rubric_type": chunk.rubric_type.value
+                    if chunk.rubric_type
+                    else None,
+                    "reason": chunk.routing_reason,
+                },
+            )
+
+        answer_key_plain = str(hints.get("answer_key_plaintext") or "").strip()
+        ak_cap = int(os.getenv("MULTIMODAL_ANSWER_KEY_PROMPT_MAX_CHARS", "18000") or 18000)
+        ak_cap = max(4000, min(ak_cap, 100_000))
+        answer_key_for_prompt = answer_key_plain[:ak_cap]
+        dataset_plain = str(hints.get("dataset_context_plaintext") or "").strip()
+
+        embed_cfg = self._resolve_app_config() or Config()
         concurrency = max(
             1,
             int(getattr(embed_cfg, "MULTIMODAL_LLM_CALL_CONCURRENCY", 3) or 3),

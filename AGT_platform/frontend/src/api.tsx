@@ -654,3 +654,34 @@ export async function deleteStandaloneSubmission(id: number): Promise<{ ok: bool
   });
   return standaloneAutograderJson(res, "DELETE standalone submission");
 }
+
+/**
+ * Course/library submission results — same response shape as {@link StandaloneSubmissionDetail}
+ * (see `app.routes.submissions.get_submission`), so `SubmissionReview.tsx` can reuse
+ * `GradingResultView` exactly like `StandaloneResult.tsx` does.
+ */
+export type CourseSubmissionDetail = {
+  id: number;
+  status: string;
+  assignment_title?: string | null;
+  student_id?: number | null;
+  final_score: number | null;
+  final_feedback?: string | null;
+  max_points?: number | null;
+  rubric_points_earned?: number | null;
+  grading_dispatch_at?: string | null;
+  created_at?: string | null;
+  grading_report_object_key?: string | null;
+  question_grades?: StandaloneSubmissionDetail["question_grades"];
+  ai_scores: StandaloneSubmissionDetail["ai_scores"];
+};
+
+export function getCourseSubmission(id: number): Promise<CourseSubmissionDetail> {
+  return api.get(`/api/submissions/${id}`);
+}
+
+export function getCourseSubmissionReportUrl(
+  submissionId: number,
+): Promise<{ download_url: string; object_key: string }> {
+  return api.get(`/api/submissions/${submissionId}/report`);
+}

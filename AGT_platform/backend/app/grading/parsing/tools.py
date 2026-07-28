@@ -2,6 +2,7 @@ import io
 import json
 import logging
 import os
+import re
 import subprocess
 import tempfile
 from pathlib import Path
@@ -10,6 +11,18 @@ import nbformat
 from pypdf import PdfReader
 
 _log = logging.getLogger(__name__)
+
+# Markdown cells commonly embed pasted images as inline ``data:image/...;base64,<blob>`` URIs.
+# The blob is unreadable to an LLM and can run tens to hundreds of KB — large enough on its own
+# to consume an entire prompt's character budget (see ``_max_chars_per_source`` /
+# ``artifacts_to_concatenated_plain`` callers) and truncate away the student's actual answers,
+# which in a notebook typically appear in cells *after* the image. Strip it to a short
+# placeholder before any of this text reaches an LLM prompt.
+_DATA_URI_RE = re.compile(r"data:[\w.+-]+/[\w.+-]+;base64,[A-Za-z0-9+/=]+")
+
+
+def _strip_embedded_data_uris(text: str) -> str:
+    return _DATA_URI_RE.sub("[embedded image omitted]", text or "")
 
 
 def normalize_verticalized_pdf_text(text: str) -> str:
@@ -95,7 +108,7 @@ def extract_from_ipynb(ipynb_bytes: bytes) -> dict:
         if cell.cell_type == "code":
             code.append(cell.source)
         elif cell.cell_type == "markdown":
-            md.append(cell.source)
+            md.append(_strip_embedded_data_uris(cell.source))
     return {"code":"\n\n".join(code), "markdown":"\n\n".join(md)}
 
 
@@ -128,7 +141,7 @@ def extract_notebook_cells_structured(ipynb_bytes: bytes) -> list[dict]:
         entry: dict = {
             "index": idx,
             "cell_type": cell.cell_type,
-            "source": (cell.source or "")[:8000],
+            "source": _strip_embedded_data_uris(cell.source or "")[:8000],
         }
         if cell.cell_type == "code":
             outs = []

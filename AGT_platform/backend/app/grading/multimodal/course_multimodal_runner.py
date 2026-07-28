@@ -1,8 +1,13 @@
 """
 DB / Celery entry: map assignment + raw artifact bytes → multimodal pipeline → grading dict.
 
-Delegates to :func:`app.grading.multimodal.pipeline_runner.run_multimodal_grading` so
-production grading matches the local integration test structure.
+Course/library submissions (:func:`run_db_submission_multimodal_pipeline`) grade through
+:func:`app.grading.multimodal.course_evidence_grading_pipeline
+.run_course_submission_evidence_grading_pipeline` (Evidence Agent + Grading Agent, see that
+module's docstring). The standalone autograder (:func:`run_standalone_multimodal_pipeline`) has no
+saved question/answer chunk bank to pair against, so it keeps delegating directly to
+:func:`app.grading.multimodal.pipeline_runner.run_multimodal_grading`'s own chunker waterfall —
+production grading matches the local integration test structure either way.
 """
 
 from __future__ import annotations
@@ -11,6 +16,7 @@ from typing import Any
 
 from app.grading.rubric_routing.rubric_fallback import DEFAULT_STANDALONE_RUBRIC
 
+from .course_evidence_grading_pipeline import run_course_submission_evidence_grading_pipeline
 from .pipeline_runner import run_multimodal_grading, rubric_column_to_by_type_and_flat
 
 __all__ = [
@@ -33,12 +39,17 @@ def run_db_submission_multimodal_pipeline(
     answer_key_text: str | None,
     modality_hints_extra: dict[str, Any] | None = None,
 ) -> dict[str, Any]:
-    """Course or public autograder row: grade using :class:`MultimodalGradingPipeline`."""
+    """
+    Course or public autograder row: grade via the Evidence Agent + Grading Agent pipeline (see
+    :mod:`app.grading.multimodal.course_evidence_grading_pipeline`), which falls back to
+    :class:`MultimodalGradingPipeline`'s full chunker waterfall for assignments without a saved
+    question/answer chunk bank.
+    """
     envelope_sid = (
         str(student_id) if student_id is not None else f"anon_sub_{submission_id}"
     )
     stem = str(getattr(assignment, "title", None) or assignment_id).strip()
-    return run_multimodal_grading(
+    return run_course_submission_evidence_grading_pipeline(
         cfg,
         assignment=assignment,
         artifacts_bytes=artifacts_bytes,

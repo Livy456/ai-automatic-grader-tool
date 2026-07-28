@@ -1381,6 +1381,196 @@ class ClaudeParsingAgentTests(unittest.TestCase):
         self.assertEqual(result.chunk_results[0].chunk_id, agent_chunk.chunk_id)
 
 
+class PrechunkedResponsePairingAgentTests(unittest.TestCase):
+    """
+    Assignment-Creation-seeded question/answer chunk bank + one submission's response text ->
+    ``GradingChunk``s, without re-decomposing the question/answer text from scratch.
+    """
+
+    _QA_PAIRS = [
+        {"question_id": "q1", "question_text": "What is 2+2?", "answer_text": "4"},
+        {"question_id": "q2", "question_text": "What is 3+3?", "answer_text": "6"},
+    ]
+
+    @staticmethod
+    def _envelope(qa_pairs, **hint_overrides):
+        hints = {"answer_key_plaintext": "ref answer", "prechunked_qa_pairs": qa_pairs}
+        hints.update(hint_overrides)
+        return ingest_raw_submission(
+            assignment_id="a1",
+            student_id="s1",
+            artifacts={"txt": b"1) four\n2) six\n"},
+            extracted_plaintext="",
+            modality_hints=hints,
+        )
+
+    def test_pairs_prechunked_questions_with_student_response(self) -> None:
+        from app.grading.chunking.prechunked_response_pairing_agent import (
+            try_build_prechunked_pairing_chunks,
+        )
+
+        cfg = Config()
+        cfg.ANTHROPIC_API_KEY = "test-key"
+        envelope = self._envelope(self._QA_PAIRS)
+        fake = {
+            "pairs": [
+                {"question_id": "q1", "student_response": "four"},
+                {"question_id": "q2", "student_response": "six"},
+            ]
+        }
+        mock_inst = MagicMock()
+        mock_inst.chat_json = MagicMock(return_value=fake)
+        with patch(
+            "app.grading.chunking.prechunked_response_pairing_agent.AnthropicJsonClient",
+            return_value=mock_inst,
+        ):
+            result = try_build_prechunked_pairing_chunks(envelope, cfg)
+        self.assertIsNotNone(result)
+        assert result is not None
+        chunks, mode = result
+        self.assertEqual(mode, "prechunked_qa_pairing")
+        self.assertEqual(len(chunks), 2)
+        trio0 = (chunks[0].evidence or {}).get("trio")
+        self.assertEqual(trio0.get("question"), "What is 2+2?")
+        self.assertEqual(trio0.get("student_response"), "four")
+        self.assertEqual(trio0.get("answer_key_segment"), "4")
+        self.assertTrue((chunks[0].evidence or {}).get("_prechunked_qa_pairing"))
+        self.assertEqual(chunks[1].question_id, "q2")
+
+    def test_no_prechunked_pairs_hint_returns_none(self) -> None:
+        """Assignments without an Assignment-Creation chunk bank must no-op (fall through)."""
+        from app.grading.chunking.prechunked_response_pairing_agent import (
+            try_build_prechunked_pairing_chunks,
+        )
+
+        cfg = Config()
+        cfg.ANTHROPIC_API_KEY = "test-key"
+        envelope = self._envelope([])
+        mock_inst = MagicMock()
+        with patch(
+            "app.grading.chunking.prechunked_response_pairing_agent.AnthropicJsonClient",
+            return_value=mock_inst,
+        ):
+            result = try_build_prechunked_pairing_chunks(envelope, cfg)
+        self.assertIsNone(result)
+        mock_inst.chat_json.assert_not_called()
+
+    def test_disabled_without_anthropic_key(self) -> None:
+        from app.grading.chunking.prechunked_response_pairing_agent import (
+            try_build_prechunked_pairing_chunks,
+        )
+
+        cfg = Config()
+        cfg.ANTHROPIC_API_KEY = ""
+        envelope = self._envelope(self._QA_PAIRS)
+        self.assertIsNone(try_build_prechunked_pairing_chunks(envelope, cfg))
+
+    def test_missing_pair_in_response_yields_empty_student_response(self) -> None:
+        """A question the model failed to return a pair for still yields a chunk (empty response)
+        rather than silently dropping that question from grading."""
+        from app.grading.chunking.prechunked_response_pairing_agent import (
+            try_build_prechunked_pairing_chunks,
+        )
+
+        cfg = Config()
+        cfg.ANTHROPIC_API_KEY = "test-key"
+        envelope = self._envelope(self._QA_PAIRS)
+        mock_inst = MagicMock()
+        mock_inst.chat_json = MagicMock(
+            return_value={"pairs": [{"question_id": "q1", "student_response": "four"}]}
+        )
+        with patch(
+            "app.grading.chunking.prechunked_response_pairing_agent.AnthropicJsonClient",
+            return_value=mock_inst,
+        ):
+            result = try_build_prechunked_pairing_chunks(envelope, cfg)
+        self.assertIsNotNone(result)
+        assert result is not None
+        chunks, _mode = result
+        self.assertEqual(len(chunks), 2)
+        trio1 = (chunks[1].evidence or {}).get("trio")
+        self.assertEqual(trio1.get("question"), "What is 3+3?")
+        self.assertEqual(trio1.get("student_response"), "")
+
+    def test_pipeline_prefers_prechunked_pairs_over_claude_parsing_agent(self) -> None:
+        """
+        When an assignment has a pre-chunked question/answer bank, ``pipeline.py`` must pair
+        against it instead of falling through to the from-scratch Claude parsing agent — chunking
+        still happens exactly once per submission either way.
+        """
+        from app.grading.multimodal import pipeline as pipeline_mod
+        from app.grading.schemas import Modality as _Modality
+        from app.grading.schemas import TaskType as _TaskType
+
+        prechunked = GradingChunk(
+            chunk_id="a1:s1:prechunked_qa_pairing:0:q1",
+            assignment_id="a1",
+            student_id="s1",
+            question_id="q1",
+            modality=_Modality.WRITTEN,
+            task_type=_TaskType.FREE_RESPONSE_SHORT,
+            extracted_text="What is 2+2?\n\nfour",
+            evidence={
+                "trio": {
+                    "question": "What is 2+2?",
+                    "student_response": "four",
+                    "answer_key_segment": "4",
+                    "instructor_context": "",
+                }
+            },
+        )
+
+        class _FakeRunner:
+            async def run_chunk_samples_async(
+                self, chunk, *, system_prompt, user_prompt, semaphore=None
+            ):
+                raw = json.dumps(
+                    {
+                        "rubric_type": "free_response",
+                        "criterion_scores": [
+                            {"name": "Conceptual Correctness", "score": 1.0}
+                        ],
+                        "criterion_justifications": [""],
+                        "total_score": 1.0,
+                        "normalized_score": 1.0,
+                        "confidence_note": "",
+                        "review_flag": False,
+                    }
+                )
+                return [
+                    SampledChunkGrade(
+                        model_id="fake:test",
+                        sample_index=0,
+                        raw_text=raw,
+                        parsed=None,
+                        parse_ok=False,
+                        parse_warnings=[],
+                    )
+                ]
+
+        pipe = pipeline_mod.MultimodalGradingPipeline(
+            config=MultimodalGradingConfig(require_answer_key=False),
+            runner=_FakeRunner(),
+            app_cfg=Config(),
+        )
+        envelope = self._envelope(self._QA_PAIRS)
+        with patch.object(
+            pipeline_mod,
+            "try_build_prechunked_pairing_chunks",
+            return_value=([prechunked], "prechunked_qa_pairing"),
+        ) as mock_prechunked, patch.object(
+            pipeline_mod, "try_build_claude_parsing_agent_chunks"
+        ) as mock_claude, patch.object(
+            pipeline_mod, "build_multimodal_grading_chunks"
+        ) as mock_heuristic:
+            result = pipe.run(envelope)
+        mock_prechunked.assert_called_once()
+        mock_claude.assert_not_called()
+        mock_heuristic.assert_not_called()
+        self.assertEqual(len(result.chunk_results), 1)
+        self.assertEqual(result.chunk_results[0].chunk_id, prechunked.chunk_id)
+
+
 class AnswerKeyChunkEnrichTests(unittest.TestCase):
     """Per-question answer key snippets + embeddings on :class:`GradingChunk`."""
 
@@ -3296,6 +3486,306 @@ class MultimodalHuggingFaceRoutingTests(unittest.TestCase):
             rubric_type=RubricType.FREE_RESPONSE,
         )
         self.assertEqual(chunk_multimodal_grading_system_prompt(ch2), SYSTEM_CHUNK_GRADER)
+
+
+class GradePrebuiltChunksTests(unittest.TestCase):
+    """
+    ``MultimodalGradingPipeline.grade_prebuilt_chunks`` — the Grading Agent half of
+    ``app.grading.multimodal.course_evidence_grading_pipeline`` — must rubric-route, grade, and
+    aggregate chunks an upstream Evidence Agent already built, reusing the exact same per-chunk
+    LLM grading + semantic-entropy confidence + aggregation code :meth:`run` uses, without
+    running any of :meth:`run`'s own chunk-building waterfall.
+    """
+
+    @staticmethod
+    def _evidence_chunk(question_id: str, question: str, student_response: str, answer: str) -> "GradingChunk":
+        return GradingChunk(
+            chunk_id=f"s1:a1:prechunked_qa_pairing:{question_id}",
+            assignment_id="a1",
+            student_id="s1",
+            question_id=question_id,
+            modality=Modality.WRITTEN,
+            task_type=TaskType.FREE_RESPONSE_SHORT,
+            extracted_text=f"{question}\n\n{student_response}",
+            evidence={
+                "trio": {
+                    "question": question,
+                    "student_response": student_response,
+                    "answer_key_segment": answer,
+                    "instructor_context": "",
+                }
+            },
+        )
+
+    def test_grades_prebuilt_chunks_without_running_chunk_building_waterfall(self) -> None:
+        from app.grading.multimodal import pipeline as pipeline_mod
+
+        chunks = [
+            self._evidence_chunk("q1", "What is 2+2?", "four", "4"),
+            self._evidence_chunk("q2", "What is 3+3?", "six", "6"),
+        ]
+
+        class _FakeRunner:
+            async def run_chunk_samples_async(
+                self, chunk, *, system_prompt, user_prompt, semaphore=None
+            ):
+                raw = json.dumps(
+                    {
+                        "rubric_type": "free_response",
+                        "criterion_scores": [
+                            {"name": "Conceptual Correctness", "score": 1.0, "max_points": 1.0}
+                        ],
+                        "criterion_justifications": ["Correct."],
+                        "confidence_note": "",
+                        "review_flag": False,
+                    }
+                )
+                return [
+                    SampledChunkGrade(
+                        model_id="fake:test", sample_index=0, raw_text=raw, parsed=None, parse_ok=False, parse_warnings=[]
+                    )
+                ]
+
+        pipe = pipeline_mod.MultimodalGradingPipeline(
+            config=MultimodalGradingConfig(require_answer_key=False),
+            runner=_FakeRunner(),
+            app_cfg=Config(),
+        )
+        envelope = ingest_raw_submission(
+            assignment_id="a1",
+            student_id="s1",
+            artifacts={},
+            extracted_plaintext="four\nsix",
+            modality_hints={"answer_key_plaintext": "1) 4\n2) 6"},
+        )
+
+        with (
+            patch.object(pipeline_mod, "try_build_prechunked_pairing_chunks") as mock_evidence,
+            patch.object(pipeline_mod, "try_build_claude_parsing_agent_chunks") as mock_claude,
+            patch.object(pipeline_mod, "build_multimodal_grading_chunks") as mock_heuristic,
+        ):
+            result = pipe.grade_prebuilt_chunks(envelope, chunks, chunker_mode="prechunked_qa_pairing")
+
+        mock_evidence.assert_not_called()
+        mock_claude.assert_not_called()
+        mock_heuristic.assert_not_called()
+        self.assertEqual(len(result.chunk_results), 2)
+        self.assertEqual({c.chunk_id for c in result.chunk_results}, {c.chunk_id for c in chunks})
+        for chunk_outcome in result.chunk_results:
+            self.assertGreaterEqual(chunk_outcome.ai_confidence, 0.0)
+        chunking_audit = result.stage_artifacts["pipeline_audit"]["chunking"][0]
+        self.assertEqual(chunking_audit["chunker_mode"], "prechunked_qa_pairing")
+
+
+class CourseSubmissionEvidenceGradingPipelineTests(unittest.TestCase):
+    """
+    ``run_course_submission_evidence_grading_pipeline`` — Evidence Agent chunks feed the Grading
+    Agent when available; otherwise this falls back to the standalone-style chunker waterfall so
+    course/library assignments without a saved question/answer chunk bank still grade normally.
+    """
+
+    def _fake_assignment(self):
+        from types import SimpleNamespace
+
+        return SimpleNamespace(
+            modality="written",
+            rubric=None,
+            title="PSet 1",
+            description="Problem set 1",
+            task_type=None,
+        )
+
+    def test_uses_evidence_agent_chunks_when_available(self) -> None:
+        from app.grading.multimodal import course_evidence_grading_pipeline as cegp
+        from app.grading.multimodal.pipeline import MultimodalGradingPipeline
+
+        chunk = GradingChunk(
+            chunk_id="s1:a1:prechunked_qa_pairing:q1",
+            assignment_id="a1",
+            student_id="s1",
+            question_id="q1",
+            modality=Modality.WRITTEN,
+            task_type=TaskType.FREE_RESPONSE_SHORT,
+            extracted_text="What is 2+2?\n\nfour",
+            evidence={
+                "trio": {
+                    "question": "What is 2+2?",
+                    "student_response": "four",
+                    "answer_key_segment": "4",
+                    "instructor_context": "",
+                }
+            },
+        )
+
+        with (
+            patch.object(
+                cegp, "try_build_prechunked_pairing_chunks", return_value=([chunk], "prechunked_qa_pairing")
+            ) as mock_evidence,
+            patch.object(
+                MultimodalGradingPipeline, "grade_prebuilt_chunks"
+            ) as mock_grade_prebuilt,
+            patch.object(MultimodalGradingPipeline, "run") as mock_run,
+        ):
+            mock_grade_prebuilt.return_value = MagicMock(chunk_results=[], stage_artifacts={})
+            cegp.run_course_submission_evidence_grading_pipeline(
+                Config(),
+                assignment=self._fake_assignment(),
+                artifacts_bytes={"txt": b"four"},
+                assignment_id="a1",
+                student_id="s1",
+                answer_key_text="1) 4",
+                modality_hints_extra={
+                    "prechunked_qa_pairs": [
+                        {"question_id": "q1", "question_text": "What is 2+2?", "answer_text": "4"}
+                    ]
+                },
+                validate_output=False,
+            )
+
+        mock_evidence.assert_called_once()
+        mock_grade_prebuilt.assert_called_once()
+        mock_run.assert_not_called()
+
+    def test_falls_back_to_full_waterfall_without_evidence_chunks(self) -> None:
+        from app.grading.multimodal import course_evidence_grading_pipeline as cegp
+        from app.grading.multimodal.pipeline import MultimodalGradingPipeline
+
+        with (
+            patch.object(cegp, "try_build_prechunked_pairing_chunks", return_value=None) as mock_evidence,
+            patch.object(
+                MultimodalGradingPipeline, "grade_prebuilt_chunks"
+            ) as mock_grade_prebuilt,
+            patch.object(MultimodalGradingPipeline, "run") as mock_run,
+        ):
+            mock_run.return_value = MagicMock(chunk_results=[], stage_artifacts={})
+            cegp.run_course_submission_evidence_grading_pipeline(
+                Config(),
+                assignment=self._fake_assignment(),
+                artifacts_bytes={"txt": b"four"},
+                assignment_id="a1",
+                student_id="s1",
+                answer_key_text="1) 4",
+                validate_output=False,
+            )
+
+        mock_evidence.assert_called_once()
+        mock_run.assert_called_once()
+        mock_grade_prebuilt.assert_not_called()
+
+
+class CourseMultimodalRunnerWiringTests(unittest.TestCase):
+    """
+    ``run_db_submission_multimodal_pipeline`` (course/library submissions) must delegate to the
+    Evidence Agent + Grading Agent pipeline; ``run_standalone_multimodal_pipeline`` (no saved
+    question/answer chunk bank to pair against) must keep using the standalone chunker waterfall.
+    """
+
+    def test_course_submissions_use_evidence_grading_pipeline(self) -> None:
+        from types import SimpleNamespace
+
+        from app.grading.multimodal import course_multimodal_runner as runner_mod
+
+        assignment = SimpleNamespace(title="PSet 1", rubric=None)
+        with (
+            patch.object(
+                runner_mod, "run_course_submission_evidence_grading_pipeline", return_value={"ok": True}
+            ) as mock_evidence_pipeline,
+            patch.object(runner_mod, "run_multimodal_grading") as mock_generic_pipeline,
+        ):
+            out = runner_mod.run_db_submission_multimodal_pipeline(
+                Config(),
+                assignment,
+                {"txt": b"four"},
+                submission_id=1,
+                assignment_id=7,
+                student_id=3,
+                rubric_text=None,
+                answer_key_text="1) 4",
+            )
+        self.assertEqual(out, {"ok": True})
+        mock_evidence_pipeline.assert_called_once()
+        mock_generic_pipeline.assert_not_called()
+
+    def test_standalone_submissions_use_generic_waterfall_pipeline(self) -> None:
+        from app.grading.multimodal import course_multimodal_runner as runner_mod
+
+        with (
+            patch.object(runner_mod, "run_multimodal_grading", return_value={"ok": True}) as mock_generic_pipeline,
+            patch.object(
+                runner_mod, "run_course_submission_evidence_grading_pipeline"
+            ) as mock_evidence_pipeline,
+        ):
+            out = runner_mod.run_standalone_multimodal_pipeline(
+                Config(),
+                {"txt": b"four"},
+                1,
+                "Standalone",
+                None,
+                "1) 4",
+                None,
+                None,
+            )
+        self.assertEqual(out, {"ok": True})
+        mock_generic_pipeline.assert_called_once()
+        mock_evidence_pipeline.assert_not_called()
+
+
+class ReportQuestionGradesRowsAssignmentTextOverrideTests(unittest.TestCase):
+    """
+    ``report_question_grades_rows``'s ``assignment_question_text_by_id`` should always win over
+    whatever question text this submission's own chunking/trio-refine pass produced, so each
+    question tab in the review UI shows the exact, teacher-saved ``AssignmentQuestionChunk`` text
+    from the Assignment Creation flow (see ``app.tasks.grade_submission``).
+    """
+
+    def test_stored_assignment_question_text_overrides_chunk_derived_text(self) -> None:
+        from app.grading.multimodal.grading_report import report_question_grades_rows
+
+        question_grades = [
+            {
+                "chunk_id": "s1:a1:pair_1",
+                "_source_chunk_id": "s1:a1:prechunked_qa_pairing:0:q1",
+                "overall": {"score": 1.0, "max_points": 10, "rubric_points_earned": 10, "confidence": 0.9},
+                "criteria": [],
+            }
+        ]
+        source_chunk_payload = {
+            "s1:a1:prechunked_qa_pairing:0:q1": {
+                "question": "Re-derived (possibly drifted) question text",
+                "question_chunk_text": "chunk body text",
+                "student_response": "four",
+                "response_text": "four",
+                "question_id": "q1",
+            }
+        }
+        assignment_question_text_by_id = {"q1": "What is 2+2?"}
+
+        rows = report_question_grades_rows(
+            question_grades, source_chunk_payload, assignment_question_text_by_id
+        )
+        self.assertEqual(len(rows), 1)
+        self.assertEqual(rows[0]["question_payload"]["question"], "What is 2+2?")
+
+    def test_falls_back_to_chunk_derived_text_without_a_matching_stored_question(self) -> None:
+        from app.grading.multimodal.grading_report import report_question_grades_rows
+
+        question_grades = [
+            {
+                "chunk_id": "s1:a1:pair_1",
+                "_source_chunk_id": "chunk-1",
+                "overall": {},
+                "criteria": [],
+            }
+        ]
+        source_chunk_payload = {
+            "chunk-1": {"question": "What is 2+2?", "question_id": "q1"},
+        }
+
+        rows = report_question_grades_rows(question_grades, source_chunk_payload, {})
+        self.assertEqual(rows[0]["question_payload"]["question"], "What is 2+2?")
+
+        rows_no_override = report_question_grades_rows(question_grades, source_chunk_payload)
+        self.assertEqual(rows_no_override[0]["question_payload"]["question"], "What is 2+2?")
 
 
 if __name__ == "__main__":
