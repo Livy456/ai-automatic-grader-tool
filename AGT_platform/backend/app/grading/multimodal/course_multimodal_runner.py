@@ -31,6 +31,7 @@ def run_db_submission_multimodal_pipeline(
     student_id: int | None,
     rubric_text: str | None,
     answer_key_text: str | None,
+    modality_hints_extra: dict[str, Any] | None = None,
 ) -> dict[str, Any]:
     """Course or public autograder row: grade using :class:`MultimodalGradingPipeline`."""
     envelope_sid = (
@@ -47,6 +48,7 @@ def run_db_submission_multimodal_pipeline(
         rubric_text=rubric_text,
         answer_key_text=answer_key_text,
         assignment_stem=stem,
+        modality_hints_extra=modality_hints_extra,
         validate_output=False,
     )
 

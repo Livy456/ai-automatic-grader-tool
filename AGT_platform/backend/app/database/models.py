@@ -79,6 +79,9 @@ class Assignment(Base):
     grader_rubric_text = Column(Text, nullable=True)
     grader_answer_key_text = Column(Text, nullable=True)
     grader_instructions = Column(Text, nullable=True)
+    # Extracted plaintext of the uploaded blank assignment template (Assignment Creation flow);
+    # lets the review page show the full original document alongside the parsed Q&A chunks.
+    blank_assignment_text = Column(Text, nullable=True)
 
     course = relationship("Course")
     attachments = relationship("AssignmentAttachment", back_populates="assignment")

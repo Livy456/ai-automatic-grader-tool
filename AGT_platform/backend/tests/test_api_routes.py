@@ -11,6 +11,7 @@ disabled, so every request in these tests is implicitly an authenticated admin r
 from __future__ import annotations
 
 import io
+import json
 import tempfile
 import unittest
 from pathlib import Path
@@ -232,6 +233,113 @@ class StandaloneRouteTests(ApiRoutesTestCase):
         self.assertEqual(body["uploads"][0]["upload_url"], "https://minio.example/fake-presigned-url")
 
 
+class SubmissionsRouteTests(ApiRoutesTestCase):
+    """``GET /api/teacher/submissions`` — the "View Submissions" history page's data source."""
+
+    def test_list_recent_submissions_empty(self):
+        res = self.client.get("/api/teacher/submissions")
+        self.assertEqual(res.status_code, 200)
+        self.assertEqual(res.json(), [])
+
+    def test_list_recent_submissions_includes_assignment_and_course(self):
+        from app.database.init_db import SessionLocal
+        from app.database.models import Assignment, Course, Submission
+
+        db = SessionLocal()
+        try:
+            course = Course(code="6.100", title="Intro to CS")
+            db.add(course)
+            db.flush()
+            assignment = Assignment(
+                course_id=course.id, title="PSet 1", modality="written", rubric=[], created_at=None
+            )
+            db.add(assignment)
+            db.flush()
+            sub = Submission(assignment_id=assignment.id, student_id=None, status="graded", final_score=9.5)
+            db.add(sub)
+            db.commit()
+            sub_id = sub.id
+        finally:
+            db.close()
+
+        res = self.client.get("/api/teacher/submissions")
+        self.assertEqual(res.status_code, 200, res.text)
+        rows = res.json()
+        self.assertEqual(len(rows), 1)
+        row = rows[0]
+        self.assertEqual(row["id"], sub_id)
+        self.assertEqual(row["assignment"], "PSet 1")
+        self.assertEqual(row["course"], "6.100")
+        self.assertEqual(row["status"], "graded")
+        self.assertEqual(row["final_score"], 9.5)
+
+
+class GradeSubmissionContextTests(ApiRoutesTestCase):
+    """
+    ``app.tasks.grade_submission`` should source the blank-assignment template from the
+    Assignment's saved ``AssignmentAttachment`` automatically (Assignment Creation flow), instead
+    of requiring the student to re-upload it via a separate "Add Context" submission step.
+    """
+
+    def test_blank_assignment_attachment_becomes_modality_hint(self):
+        from app import tasks
+        from app.database.init_db import SessionLocal
+        from app.database.models import Assignment, AssignmentAttachment, Submission, SubmissionArtifact
+
+        db = SessionLocal()
+        try:
+            assignment = Assignment(
+                course_id=None,
+                title="Library assignment",
+                modality="written",
+                rubric=[],
+                created_at=None,
+                grader_answer_key_text="1) 4",
+            )
+            db.add(assignment)
+            db.flush()
+            db.add(
+                AssignmentAttachment(
+                    assignment_id=assignment.id,
+                    kind="blank_assignment",
+                    object_key="blank.ipynb",
+                    filename="blank.ipynb",
+                )
+            )
+            sub = Submission(assignment_id=assignment.id, student_id=None, status="queued")
+            db.add(sub)
+            db.flush()
+            db.add(SubmissionArtifact(submission_id=sub.id, kind="ipynb", object_key="work.ipynb"))
+            db.commit()
+            sub_id = sub.id
+        finally:
+            db.close()
+
+        def _fake_get_object_bytes(cfg, key):
+            return b'{"cells": []}' if key == "blank.ipynb" else b"print(1)"
+
+        captured: dict = {}
+
+        def _fake_pipeline(cfg, assign_for_prompt, artifacts, **kwargs):
+            captured.update(kwargs)
+            return {"overall": {}, "criteria": [], "question_grades": []}
+
+        with (
+            patch("app.tasks.get_object_bytes", side_effect=_fake_get_object_bytes),
+            patch("app.tasks.run_db_submission_multimodal_pipeline", side_effect=_fake_pipeline),
+            patch("app.tasks.minio_client"),
+        ):
+            tasks.grade_submission.run(sub_id)
+
+        hints = captured.get("modality_hints_extra")
+        self.assertIsNotNone(hints)
+        self.assertEqual(hints["blank_assignment_template_bytes"], b'{"cells": []}')
+        self.assertEqual(hints["blank_assignment_template_suffix"], ".ipynb")
+        self.assertEqual(hints["blank_assignment_ipynb_bytes"], b'{"cells": []}')
+        # Library assignments already carry the answer key text on the Assignment row itself.
+        self.assertIn("1) 4", captured.get("answer_key_text") or "")
+
+
 class AssignmentLibraryRouteTests(ApiRoutesTestCase):
     """Assignment Creation flow: upload-context (start/finalize) + editable Q&A chunks."""
 
@@ -315,10 +423,13 @@ class AssignmentLibraryRouteTests(ApiRoutesTestCase):
 
         detail = self.client.get(f"/api/assignment-library/{assignment_id}")
         self.assertEqual(detail.status_code, 200)
-        chunks = detail.json()["chunks"]
+        detail_body = detail.json()
+        chunks = detail_body["chunks"]
         self.assertEqual(len(chunks), 1)
         self.assertEqual(chunks[0]["question_text"], "What is 2+2?")
         self.assertFalse(chunks[0]["is_edited"])
+        self.assertEqual(detail_body["blank_assignment_text"], "1) What is 2+2?")
+        self.assertEqual(detail_body["answer_key_text"], "1) 4")
 
         history = self.client.get("/api/assignment-library")
         self.assertEqual(history.status_code, 200)
@@ -338,6 +449,44 @@ class AssignmentLibraryRouteTests(ApiRoutesTestCase):
         self.assertEqual(len(saved), 2)
         self.assertTrue(all(c["is_edited"] for c in saved))
         self.assertEqual({c["answer_text"] for c in saved}, {"four", "6"})
+
+    def test_material_view_notebook_spreadsheet_and_missing_kind(self):
+        with patch(
+            "app.routes.assignment_library.presigned_put_url",
+            return_value="https://minio.example/fake-presigned-url",
+        ):
+            start = self.client.post(
+                "/api/assignment-library/start",
+                json={
+                    "title": "Notebook assignment",
+                    "files": [
+                        {"filename": "blank.ipynb", "content_type": "application/x-ipynb+json", "artifact_kind": "blank_assignment"},
+                        {"filename": "key.pdf", "content_type": "application/pdf", "artifact_kind": "answer_key"},
+                        {"filename": "rubric.json", "content_type": "application/json", "artifact_kind": "rubric"},
+                    ],
+                },
+            )
+        assignment_id = start.json()["assignment_id"]
+
+        notebook_bytes = json.dumps(
+            {"cells": [{"cell_type": "markdown", "source": ["# Q1"]}, {"cell_type": "code", "source": "print(1)"}]}
+        ).encode("utf-8")
+        with (
+            patch("app.routes.assignment_library.get_presigned_url", return_value="https://minio.example/download"),
+            patch("app.routes.assignment_library.get_object_bytes", return_value=notebook_bytes),
+        ):
+            res = self.client.get(f"/api/assignment-library/{assignment_id}/materials/blank_assignment/view")
+        self.assertEqual(res.status_code, 200, res.text)
+        body = res.json()
+        self.assertEqual(body["download_url"], "https://minio.example/download")
+        self.assertEqual(body["view"]["type"], "notebook")
+        self.assertEqual(len(body["view"]["cells"]), 2)
+
+        res_bad_kind = self.client.get(f"/api/assignment-library/{assignment_id}/materials/rubric/view")
+        self.assertEqual(res_bad_kind.status_code, 400)
+
+        res_missing = self.client.get("/api/assignment-library/999999/materials/blank_assignment/view")
+        self.assertEqual(res_missing.status_code, 404)
 
 
 if __name__ == "__main__":

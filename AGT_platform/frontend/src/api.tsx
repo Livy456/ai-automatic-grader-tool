@@ -316,6 +316,8 @@ export type AssignmentLibraryEntry = {
   modality: string;
   rubric: RubricCriterion[];
   created_at: string | null;
+  blank_assignment_text: string;
+  answer_key_text: string;
 };
 
 export type AssignmentQuestionChunk = {
@@ -391,6 +393,30 @@ export function saveAssignmentLibraryChunks(
   }>
 ): Promise<{ assignment_id: number; chunks: AssignmentQuestionChunk[] }> {
   return api.put(`/api/assignment-library/${assignmentId}/chunks`, { chunks });
+}
+
+export type AssignmentMaterialKind = "blank_assignment" | "answer_key";
+
+export type AssignmentMaterialView =
+  | { type: "notebook"; cells: { cell_type: string; source: string }[] }
+  | { type: "spreadsheet"; sheets: { name: string; rows: string[][] }[] }
+  | { type: "pdf" }
+  | { type: "text"; text: string }
+  | { type: "unsupported" };
+
+export type AssignmentMaterialViewResponse = {
+  filename: string;
+  download_url: string;
+  view: AssignmentMaterialView;
+};
+
+/** Original-form view (notebook cells / spreadsheet grid / embeddable PDF / plaintext) of an
+ * uploaded blank template or answer key, for the review page's viewer tabs. */
+export function getAssignmentMaterialView(
+  assignmentId: number,
+  kind: AssignmentMaterialKind
+): Promise<AssignmentMaterialViewResponse> {
+  return api.get(`/api/assignment-library/${assignmentId}/materials/${kind}/view`);
 }
 
 // ── Standalone autograder (public API; optional Bearer when logged in) ────

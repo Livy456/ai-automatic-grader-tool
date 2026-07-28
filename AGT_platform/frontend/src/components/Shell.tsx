@@ -27,6 +27,8 @@ import AssignmentTurnedInOutlined from "@mui/icons-material/AssignmentTurnedInOu
 import AdminPanelSettingsOutlined from "@mui/icons-material/AdminPanelSettingsOutlined";
 import AutoFixHighOutlined from "@mui/icons-material/AutoFixHighOutlined";
 import NoteAddOutlined from "@mui/icons-material/NoteAddOutlined";
+import AssignmentOutlined from "@mui/icons-material/AssignmentOutlined";
+import HistoryOutlined from "@mui/icons-material/HistoryOutlined";
 
 const DISPLAY_USER = {
   email: "guest@local",
@@ -37,8 +39,8 @@ const DISPLAY_USER = {
 function pageTitle(pathname: string): string {
   if (pathname === "/") return "Dashboard";
   if (pathname === "/grades") return "My Grades";
-  if (pathname === "/assignments") return "Assignments";
-  if (pathname === "/submissions") return "Submissions";
+  if (pathname === "/assignments") return "Submit Assignment";
+  if (pathname === "/submissions") return "View Submissions";
   if (pathname === "/autograder") return "Autograder";
   if (pathname === "/autograder/results") return "Autograder Results";
   if (pathname === "/admin") return "Admin Panel";
@@ -76,6 +78,16 @@ const NAV_ITEMS: NavItem[] = [
     label: "Assignment Creation",
     to: "/assignment-creation",
     icon: <NoteAddOutlined />,
+  },
+  {
+    label: "Submit Assignment",
+    to: "/assignments",
+    icon: <AssignmentOutlined />,
+  },
+  {
+    label: "View Submissions",
+    to: "/submissions",
+    icon: <HistoryOutlined />,
   },
   {
     label: "Admin Panel",

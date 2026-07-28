@@ -16,7 +16,7 @@ from werkzeug.utils import secure_filename
 from app.database.audit import log_event
 from app.config import Config
 from app.deps import get_current_user, get_db
-from app.database.models import AIScore, Assignment, Enrollment, Submission, SubmissionArtifact
+from app.database.models import AIScore, Assignment, Enrollment, Submission, SubmissionArtifact, User
 from app.database.storage import object_exists, presigned_put_url, upload_from_fastapi_file
 from app.tasks import grade_submission
 
@@ -242,6 +242,53 @@ def submit(
         user["id"], "CREATE_SUBMISSION", "Submission", sub.id, {"assignment_id": assignment_id}
     )
     return {"submission_id": sub.id, "status": sub.status, "celery_task_id": task.id}
+
+
+def _display_name(u: User | None) -> str:
+    if not u:
+        return "—"
+    return u.name or u.email or "—"
+
+
+@router.get("/api/teacher/submissions")
+def list_recent_submissions(
+    limit: int = 200,
+    db: Session = Depends(get_db),
+    user: dict = Depends(get_current_user),
+):
+    """
+    Recent submissions, newest first, for the "View Submissions" history page. Students see only
+    their own submissions; teachers/admins see everything (same scoping rule already used by
+    ``GET /api/submissions/{id}``).
+    """
+    q = (
+        db.query(Submission)
+        .options(selectinload(Submission.assignment).selectinload(Assignment.course))
+        .order_by(Submission.created_at.desc())
+    )
+    if user["role"] == "student":
+        q = q.filter(Submission.student_id == user["id"])
+    subs = q.limit(max(1, min(limit, 500))).all()
+
+    student_ids = {s.student_id for s in subs if s.student_id is not None}
+    students_by_id = (
+        {u.id: u for u in db.query(User).filter(User.id.in_(student_ids)).all()} if student_ids else {}
+    )
+
+    return [
+        {
+            "id": s.id,
+            "student_id": s.student_id,
+            "assignment_id": s.assignment_id,
+            "course": (s.assignment.course.code if s.assignment and s.assignment.course else None) or "—",
+            "student": _display_name(students_by_id.get(s.student_id)),
+            "assignment": (s.assignment.title if s.assignment else None) or "—",
+            "submitted": s.created_at.isoformat() if s.created_at else None,
+            "status": s.status,
+            "final_score": float(s.final_score) if s.final_score is not None else None,
+        }
+        for s in subs
+    ]
 
 
 @router.get("/api/submissions/{submission_id}")
