@@ -75,6 +75,34 @@ _HEURISTIC_TASK_FROM_MODALITY: dict[Modality, TaskType] = {
 ClassifierFn = Callable[[GradingChunk], RubricRouteResult | None]
 
 
+def _rows_for_type(
+    rows_map: dict[RubricType, list[dict]], rt: RubricType
+) -> list[dict]:
+    """
+    ``rows_map[rt]``, or the assignment's one-and-only populated rubric section when ``rt`` has
+    none.
+
+    Rubric ``sections`` documents (e.g. the built-in "[Generic] Scaffolded Coding Rubric") only
+    populate the :class:`RubricType` their section name maps to — unlike a flat, teacher-uploaded
+    criteria list, which is broadcast to every type (see
+    ``app.grading.multimodal.pipeline_runner._broadcast_flat_rows_to_all_types``). Modality/
+    task-type classification is heuristic and can legitimately miss (e.g. ``.ipynb``/code chunks
+    with no explicit ``task_type`` default to ``free_response`` below); when that happens against
+    a single-section rubric, silently grading with an empty rubric would zero every criterion and
+    strip its evidence (see ``app.grading.grading_output.output_schema
+    .finalize_criterion_grading_fields``) instead of using the only rubric the assignment actually
+    has. If more than one type is populated, the routing is genuinely ambiguous, so this leaves the
+    (possibly empty) result of ``rt`` unchanged rather than guessing.
+    """
+    rows = list(rows_map.get(rt) or [])
+    if rows:
+        return rows
+    non_empty = [v for v in rows_map.values() if v]
+    if len(non_empty) == 1:
+        return list(non_empty[0])
+    return rows
+
+
 def _chunk_is_ipynb_submission(chunk: GradingChunk) -> bool:
     """True for units produced from ``.ipynb`` (cell-order chunker, OpenAI trio frontload, etc.)."""
     ev = chunk.evidence or {}
@@ -140,7 +168,7 @@ def route_rubric(
             return chunk
         # Custom plan: name resolution can yield [] while type is fixed — refill full template.
         if rr.startswith("custom_rubric"):
-            full = list(rows_map.get(chunk.rubric_type, []))
+            full = _rows_for_type(rows_map, chunk.rubric_type)
             if full:
                 chunk.rubric_rows = full
                 return chunk
@@ -160,7 +188,7 @@ def route_rubric(
         else:
             chunk.routing_reason = f"deterministic:{key[0].value}+{key[1].value}"
         chunk.rubric_type = rt
-        chunk.rubric_rows = list(rows_map.get(rt, []))
+        chunk.rubric_rows = _rows_for_type(rows_map, rt)
         return chunk
 
     if chunk.task_type == TaskType.UNKNOWN:
@@ -181,7 +209,7 @@ def route_rubric(
                 else:
                     chunk.routing_reason = f"heuristic_modality:{chunk.modality.value}"
                 chunk.rubric_type = rt
-                chunk.rubric_rows = list(rows_map.get(rt, []))
+                chunk.rubric_rows = _rows_for_type(rows_map, rt)
                 return chunk
 
     if classifier:
@@ -197,7 +225,7 @@ def route_rubric(
                 rt = _notebook_ipynb_pick_scaffolded_vs_eda(chunk)
                 reason = f"{reason};notebook_ipynb_coerced"
             chunk.rubric_type = rt
-            chunk.rubric_rows = list(rows_map.get(rt, []))
+            chunk.rubric_rows = _rows_for_type(rows_map, rt)
             chunk.routing_reason = reason
             chunk.classifier_fallback_used = fb
             return chunk
@@ -205,11 +233,11 @@ def route_rubric(
     if ipynb:
         rt = _notebook_ipynb_pick_scaffolded_vs_eda(chunk)
         chunk.rubric_type = rt
-        chunk.rubric_rows = list(rows_map.get(rt, []))
+        chunk.rubric_rows = _rows_for_type(rows_map, rt)
         chunk.routing_reason = "default_notebook_ipynb_heuristic"
         return chunk
 
     chunk.rubric_type = RubricType.FREE_RESPONSE
-    chunk.rubric_rows = list(rows_map.get(RubricType.FREE_RESPONSE, []))
+    chunk.rubric_rows = _rows_for_type(rows_map, RubricType.FREE_RESPONSE)
     chunk.routing_reason = "default_free_response"
     return chunk
