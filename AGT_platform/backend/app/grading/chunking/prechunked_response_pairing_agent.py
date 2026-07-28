@@ -92,12 +92,24 @@ def _normalize_qid(raw: object) -> str:
     return re.sub(r"\s+", " ", str(raw or "").strip()).lower()
 
 
+_ANSWER_HINT_MAX_CHARS = 1200
+
+
 def _questions_block(qa_pairs: list[dict[str, str]]) -> str:
     lines = []
     for p in qa_pairs:
         qid = str(p.get("question_id") or "").strip()
         qtext = str(p.get("question_text") or "").strip()
-        lines.append(f"- question_id: {qid}\n  question: {qtext}")
+        line = f"- question_id: {qid}\n  question: {qtext}"
+        # The teacher's saved answer for this question — included only as a hint for *locating*
+        # the matching response (expected terms/values/code shape) in a long submission; never
+        # the response itself, and never conflated with the student's own words (see the system
+        # prompt's "reference_answer" rule and _grading_chunk_from_pair, which keeps this in
+        # evidence.trio.answer_key_segment, separate from evidence.trio.student_response).
+        answer = str(p.get("answer_text") or "").strip()[:_ANSWER_HINT_MAX_CHARS]
+        if answer:
+            line += f"\n  reference_answer: {answer}"
+        lines.append(line)
     return "\n".join(lines)
 
 
@@ -105,10 +117,11 @@ def _system_prompt(modality_guidance: str = "") -> str:
     return (
         "You are a precise response-pairing agent for an automated grading pipeline.\n\n"
         "You are given QUESTIONS - a fixed list of already-isolated questions, each with a "
-        "stable question_id - and STUDENT_SUBMISSION, one student's full submission. For EVERY "
-        "question_id in QUESTIONS (same count, same order, same ids), find and return only that "
-        "student's own response for that exact question. Return only a single JSON object "
-        "matching exactly this schema (no markdown fences, no commentary, no extra keys):\n\n"
+        "stable question_id and, when available, a `reference_answer` - and STUDENT_SUBMISSION, "
+        "one student's full submission. For EVERY question_id in QUESTIONS (same count, same "
+        "order, same ids), find and return only that student's own response for that exact "
+        "question. Return only a single JSON object matching exactly this schema (no markdown "
+        "fences, no commentary, no extra keys):\n\n"
         f"{_response_schema_json()}\n"
         f"{modality_guidance}\n\n"
         "Strict rules:\n"
@@ -117,6 +130,14 @@ def _system_prompt(modality_guidance: str = "") -> str:
         "- `student_response` must contain ONLY this student's own work for this exact "
         "question - never another question's response, never instructor test/assert code, never "
         'scaffolding comments like "# TODO".\n'
+        "- When a question has a `reference_answer`, use it only to help you locate and recognize "
+        "the matching response in the submission (e.g. the terms, values, or code it implies) - "
+        "never copy the `reference_answer` itself into `student_response`, and never let it "
+        "override what the student actually wrote.\n"
+        "- The submission is often much longer than any single question; scan the whole "
+        "STUDENT_SUBMISSION for each question's own section (e.g. the cell/paragraph that follows "
+        "that exact question's own instructions or restates it) rather than assuming responses "
+        "appear in the first portion of the text.\n"
         "- Prefer verbatim excerpts over paraphrasing; never invent student work.\n"
         "- If the student did not answer a question, use an empty string for that pair - never "
         "null and never omit the pair."
