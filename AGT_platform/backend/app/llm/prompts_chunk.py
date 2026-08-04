@@ -1,7 +1,3 @@
-"""
-Evidence-based chunk grading prompts (system + user skeleton).
-"""
-
 from __future__ import annotations
 
 import json

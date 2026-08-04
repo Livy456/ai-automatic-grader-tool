@@ -1,14 +1,3 @@
-"""
-Uniform JSON error responses for the FastAPI app.
-
-FastAPI's default ``HTTPException`` renders ``{"detail": ...}``. Every route in this codebase
-was written (pre-FastAPI-migration) against a flat ``{"error": "...", ...extra fields}`` body,
-and the frontend / any external API consumers were built against that shape. Routes raise
-``HTTPException(status_code=..., detail=...)`` as usual — ``detail`` may be a plain string or a
-dict with extra fields (e.g. ``{"error": "...", "missing": [...]}``) — and the handler below
-flattens it back to the legacy top-level shape so no caller-visible contract changes.
-"""
-
 from __future__ import annotations
 
 from fastapi import FastAPI, Request
