@@ -17,20 +17,12 @@ concurrency:
 
 jobs:
   preflight:
-    name: Resolve deploy configuration
+    name: Validate deploy secrets
     runs-on: ubuntu-latest
     timeout-minutes: 5
-    outputs:
-      web_configured: ${{ steps.config.outputs.web_configured }}
-      gpu_configured: ${{ steps.config.outputs.gpu_configured }}
-      cloudflare_configured: ${{ steps.config.outputs.cloudflare_configured }}
     steps:
-      - name: Validate secrets and resolve stack mode
-        id: config
+      - name: Require web, GPU, and Cloudflare secrets
         env:
-          # Opt-in for SSH deploys to EC2/VPS. Leave unset/false when you only
-          # run the API locally (Docker) and deploy the frontend to Cloudflare.
-          DEPLOY_WEB: ${{ secrets.DEPLOY_WEB }}
           SERVER_HOST: ${{ secrets.SERVER_HOST }}
           SERVER_USER: ${{ secrets.SERVER_USER }}
           SERVER_SSH_KEY: ${{ secrets.SERVER_SSH_KEY }}
@@ -38,67 +30,34 @@ jobs:
           DEPLOY_STACK: ${{ secrets.DEPLOY_STACK }}
           CLOUDFLARE_API_TOKEN: ${{ secrets.CLOUDFLARE_API_TOKEN }}
           CLOUDFLARE_ACCOUNT_ID: ${{ secrets.CLOUDFLARE_ACCOUNT_ID }}
+          API_ORIGIN: ${{ secrets.API_ORIGIN }}
         run: |
           set -euo pipefail
+
+          missing=0
+          for name in \
+            SERVER_HOST SERVER_USER SERVER_SSH_KEY \
+            GPU_SERVER_HOST \
+            CLOUDFLARE_API_TOKEN CLOUDFLARE_ACCOUNT_ID \
+            API_ORIGIN
+          do
+            if [ -z "${!name}" ]; then
+              echo "::error::Required secret $name is not set"
+              missing=1
+            fi
+          done
 
           stack="${DEPLOY_STACK:-monolith}"
           if [ "$stack" != "monolith" ] && [ "$stack" != "split" ]; then
             echo "::error::DEPLOY_STACK must be 'monolith' or 'split' (got '$stack')"
+            missing=1
+          fi
+
+          if [ "$missing" -ne 0 ]; then
             exit 1
           fi
 
-          # SSH web/GPU deploy is opt-in. Having SERVER_HOST set is not enough —
-          # an unreachable host (stopped EC2, local-only Docker) causes
-          # "dial tcp …:22: i/o timeout" and fails the workflow.
-          deploy_web_requested=false
-          case "$(printf '%s' "${DEPLOY_WEB:-}" | tr '[:upper:]' '[:lower:]')" in
-            1|true|yes|on) deploy_web_requested=true ;;
-          esac
-
-          web_configured=false
-          if [ "$deploy_web_requested" = "true" ]; then
-            web_configured=true
-            for name in SERVER_HOST SERVER_USER SERVER_SSH_KEY; do
-              if [ -z "${!name}" ]; then
-                echo "::error::DEPLOY_WEB is enabled but secret $name is not set"
-                web_configured=false
-              fi
-            done
-            if [ "$web_configured" = "false" ]; then
-              exit 1
-            fi
-          else
-            echo "::notice::Skipping EC2 web/app deploy (secret DEPLOY_WEB is not true). Local Docker is not reachable from GitHub Actions; set DEPLOY_WEB=true only when a public SSH host is up."
-          fi
-
-          gpu_configured=false
-          if [ "$web_configured" = "true" ] && [ "$stack" = "split" ]; then
-            if [ -n "$GPU_SERVER_HOST" ]; then
-              gpu_configured=true
-            else
-              echo "::error::DEPLOY_STACK=split but GPU_SERVER_HOST is not set"
-              exit 1
-            fi
-          fi
-
-          cloudflare_configured=false
-          if [ -n "$CLOUDFLARE_API_TOKEN" ] && [ -n "$CLOUDFLARE_ACCOUNT_ID" ]; then
-            cloudflare_configured=true
-          else
-            echo "::warning::Cloudflare secrets not set; the frontend will be built but not deployed"
-          fi
-
-          if [ "$web_configured" = "false" ] && [ "$cloudflare_configured" = "false" ]; then
-            echo "::warning::No deploy targets enabled (DEPLOY_WEB off and Cloudflare secrets missing). Workflow will only run build/verify gates."
-          fi
-
-          {
-            echo "web_configured=$web_configured"
-            echo "gpu_configured=$gpu_configured"
-            echo "cloudflare_configured=$cloudflare_configured"
-          } >> "$GITHUB_OUTPUT"
-
-          echo "stack=$stack web=$web_configured gpu=$gpu_configured cloudflare=$cloudflare_configured"
+          echo "Deploy targets: web=${SERVER_HOST} gpu=${GPU_SERVER_HOST} stack=${stack} cloudflare=enabled"
 
   # Cheap syntax gate: catches Python syntax errors before anything touches a
   # server. Full pytest runs need live LLM/API keys, so they stay out of deploy.
@@ -118,8 +77,6 @@ jobs:
       - name: Compile backend sources
         run: python -m compileall -q AGT_platform/backend/app AGT_platform/backend/alembic
 
-  # Always build the frontend (validates the TypeScript/Vite build on every
-  # push to main), even when Cloudflare deployment is skipped.
   build-frontend:
     name: Build frontend
     runs-on: ubuntu-latest
@@ -159,16 +116,13 @@ jobs:
           if-no-files-found: error
           retention-days: 7
 
-  # --- Web/app EC2: FastAPI API (uvicorn). Runs Alembic migrations. Also runs
-  # the Celery worker when DEPLOY_STACK=monolith.
-  # Requires secret DEPLOY_WEB=true and a reachable SERVER_HOST:22.
-  # Local Docker on your laptop is not a valid target for this job. ---
+  # --- Web/app tier: FastAPI API (uvicorn) + Alembic migrations.
+  # Celery worker is always deployed by deploy-gpu (not restarted here). ---
   deploy-web:
     name: Deploy web / app tier
     runs-on: ubuntu-latest
     timeout-minutes: 30
     needs: [preflight, verify-backend]
-    if: needs.preflight.outputs.web_configured == 'true'
     environment: production
     steps:
       - name: Check SSH reachability of SERVER_HOST
@@ -176,19 +130,17 @@ jobs:
           SERVER_HOST: ${{ secrets.SERVER_HOST }}
         run: |
           set -euo pipefail
-          echo "Probing ${SERVER_HOST}:22 (must be a public EC2/VPS; local Docker will time out)…"
+          echo "Probing ${SERVER_HOST}:22…"
           if ! timeout 15 bash -c "echo >/dev/tcp/${SERVER_HOST}/22"; then
-            echo "::error::Cannot reach ${SERVER_HOST}:22 from GitHub Actions (connection timed out or refused). Start the EC2 instance, open SG port 22 to GitHub-hosted runners (or use a bastion), or unset DEPLOY_WEB / set DEPLOY_WEB=false to skip this job while developing locally."
+            echo "::error::Cannot reach ${SERVER_HOST}:22 from GitHub Actions. Ensure the web host is running and security group/firewall allows SSH from GitHub-hosted runners."
             exit 1
           fi
           echo "SSH port is reachable"
 
-      - name: Deploy backend to SERVER_HOST
+      - name: Deploy backend API to SERVER_HOST
         uses: appleboy/ssh-action@v1
         env:
-          DEPLOY_STACK: ${{ secrets.DEPLOY_STACK }}
           AGT_API_SERVICE: ${{ secrets.AGT_API_SERVICE }}
-          AGT_WORKER_SERVICE: ${{ secrets.AGT_WORKER_SERVICE }}
           BACKEND_PORT: ${{ secrets.BACKEND_PORT }}
         with:
           host: ${{ secrets.SERVER_HOST }}
@@ -197,7 +149,7 @@ jobs:
           port: 22
           timeout: 60s
           command_timeout: 25m
-          envs: DEPLOY_STACK,AGT_API_SERVICE,AGT_WORKER_SERVICE,BACKEND_PORT
+          envs: AGT_API_SERVICE,BACKEND_PORT
           script: |
             set -eu
 
@@ -221,20 +173,13 @@ jobs:
             echo "Running database migrations"
             python -m alembic upgrade head
 
-            STACK="${DEPLOY_STACK:-monolith}"
-            SERVICES="${AGT_API_SERVICE:-agt-api}"
-            if [ "$STACK" != "split" ]; then
-              SERVICES="$SERVICES ${AGT_WORKER_SERVICE:-agt-worker}"
+            API="${AGT_API_SERVICE:-agt-api}"
+            if systemctl cat "$API.service" >/dev/null 2>&1; then
+              echo "Restarting $API"
+              sudo systemctl restart "$API"
+            else
+              echo "::warning::systemd unit $API.service not found on host; restart the API process manually"
             fi
-
-            for svc in $SERVICES; do
-              if systemctl cat "$svc.service" >/dev/null 2>&1; then
-                echo "Restarting $svc"
-                sudo systemctl restart "$svc"
-              else
-                echo "::warning::systemd unit $svc.service not found on host; restart that process manually"
-              fi
-            done
 
             echo "Waiting for API health check"
             PORT="${BACKEND_PORT:-5000}"
@@ -248,16 +193,26 @@ jobs:
             echo "Backend failed health check on port $PORT"
             exit 1
 
-  # --- GPU EC2 (DEPLOY_STACK=split only): Celery worker consuming the "gpu"
-  # queue. No migrations here; the web tier owns the schema. ---
+  # --- GPU inference tier: Celery worker on the gpu queue. Always deployed. ---
   deploy-gpu:
     name: Deploy GPU inference tier
     runs-on: ubuntu-latest
     timeout-minutes: 30
     needs: [preflight, verify-backend]
-    if: needs.preflight.outputs.gpu_configured == 'true'
     environment: production
     steps:
+      - name: Check SSH reachability of GPU_SERVER_HOST
+        env:
+          GPU_SERVER_HOST: ${{ secrets.GPU_SERVER_HOST }}
+        run: |
+          set -euo pipefail
+          echo "Probing ${GPU_SERVER_HOST}:22…"
+          if ! timeout 15 bash -c "echo >/dev/tcp/${GPU_SERVER_HOST}/22"; then
+            echo "::error::Cannot reach ${GPU_SERVER_HOST}:22 from GitHub Actions. Ensure the GPU host is running and security group/firewall allows SSH from GitHub-hosted runners."
+            exit 1
+          fi
+          echo "SSH port is reachable"
+
       - name: Deploy worker to GPU_SERVER_HOST
         uses: appleboy/ssh-action@v1
         env:
@@ -304,15 +259,12 @@ jobs:
             fi
             echo "GPU worker deploy complete"
 
-  # Matches the Cloudflare Workers Builds path (repo-root wrangler.toml).
-  # Uses pre-built dist/ from build-frontend; wrangler [build] no-ops when
-  # dist/index.html already exists.
+  # --- Frontend: Cloudflare Worker (static assets + /api proxy). Always deployed. ---
   deploy-frontend:
     name: Deploy frontend to Cloudflare
     runs-on: ubuntu-latest
     timeout-minutes: 15
     needs: [preflight, build-frontend]
-    if: needs.preflight.outputs.cloudflare_configured == 'true'
     environment: production
     steps:
       - name: Checkout code
@@ -327,13 +279,10 @@ jobs:
       - name: Publish Worker (static assets + /api proxy)
         uses: cloudflare/wrangler-action@v3
         env:
-          # Injected at deploy time — never committed in wrangler.toml.
           API_ORIGIN: ${{ secrets.API_ORIGIN }}
         with:
           apiToken: ${{ secrets.CLOUDFLARE_API_TOKEN }}
           accountId: ${{ secrets.CLOUDFLARE_ACCOUNT_ID }}
-          # `deploy` uploads a version and promotes it (required for first-time
-          # Workers; `versions upload` alone does not create the Worker).
-          # API_ORIGIN is passed via --var from the GitHub secret of the same name
-          # (set it in repo Secrets, or once in the Cloudflare dashboard).
+          # `deploy` uploads a version and promotes it. API_ORIGIN is injected at
+          # deploy time from the GitHub secret (never committed in wrangler.toml).
           command: deploy --config wrangler.toml --var API_ORIGIN:${{ secrets.API_ORIGIN }}
