@@ -39,3 +39,4 @@ pytest test/ -v
 
 - **Many repeated runs** (e.g. **15**), for analysis under `research analysis/`: set **`MULTIMODAL_RESEARCH_ASSIGNMENT_ID`** to the assignment stem and **`MULTIMODAL_RESEARCH_RUN_COUNT=15`**, then run **`pytest tests/test_multimodal_research_runs.py -v -rs`** from `AGT_platform/backend/`. Full examples, resume behavior, and outputs are documented in **`AGT_platform/backend/ReadMe.md`** (section *Multimodal grading pipeline (local)*).
 
+
