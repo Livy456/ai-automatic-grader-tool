@@ -1,0 +1,47 @@
+# Cloudflare Workers (static assets + thin /api proxy).
+#
+# The Cloudflare Git-connected build runs from the monorepo root and invokes
+# `npx wrangler versions upload`. This file supplies the missing entry-point /
+# assets directory that otherwise fails with:
+#   "Missing entry-point to Worker script or to assets directory"
+#
+# No plaintext env values live in this file. Set runtime bindings in Cloudflare
+# (Worker → Settings → Variables and Secrets) or at deploy time, e.g.:
+#   npx wrangler deploy --config wrangler.toml --var API_ORIGIN:"$API_ORIGIN"
+#   npx wrangler secret put API_ORIGIN   # for sensitive values
+#
+# Required Worker var/secret:
+#   API_ORIGIN  — FastAPI origin used by cloudflare-worker.js for /api/* proxy
+#                 (e.g. https://api.example.com)
+#
+# Dashboard settings (Workers Builds) should be:
+#   Root directory:   /   (repo root — matches current setup)
+#   Build command:    (optional; wrangler [build] below also runs on upload)
+#   Deploy command:   npx wrangler versions upload
+#     — or, preferred for first-time / promote-to-live: npx wrangler deploy
+#
+# Project name must match the Worker in the Cloudflare dashboard.
+
+name = "ai-grader-frontend"
+compatibility_date = "2026-08-04"
+main = "AGT_platform/frontend/cloudflare-worker.js"
+
+[assets]
+directory = "AGT_platform/frontend/dist"
+binding = "ASSETS"
+not_found_handling = "single-page-application"
+# Send /api/* through the Worker so we can reverse-proxy to FastAPI.
+# Everything else is served from dist/ (SPA fallback via not_found_handling).
+run_worker_first = ["/api/*"]
+
+# Runs before upload when Cloudflare (or CI) invokes wrangler deploy / versions upload.
+# Workers Builds currently auto-detects the root pyproject.toml and never builds the
+# Vite app on its own, so this is what actually produces dist/ for
+# `npx wrangler versions upload`. Skips the Vite build when dist/ already exists
+# (GitHub Actions uploads a pre-built artifact that may bake in VITE_API_BASE).
+#
+# Never ship Pages `_redirects` into Workers assets: absolute 200 proxy rules
+# (e.g. /api/* → https://…) are rejected by the Workers assets API (code 100324).
+# SPA fallback is not_found_handling above; /api/* is cloudflare-worker.js.
+[build]
+command = "if [ ! -f AGT_platform/frontend/dist/index.html ]; then npm ci --prefix AGT_platform/frontend && npm run build --prefix AGT_platform/frontend; else echo 'Using existing frontend dist/'; fi; rm -f AGT_platform/frontend/dist/_redirects"

@@ -1,4 +1,12 @@
 {
+  "name": "ai-automatic-grader-tool",
+  "private": true,
+  "description": "Monorepo root scripts for Cloudflare Workers Builds / local tooling.",
+  "scripts": {
+    "build": "npm ci --prefix AGT_platform/frontend && npm run build --prefix AGT_platform/frontend && rm -f AGT_platform/frontend/dist/_redirects",
+    "deploy:frontend": "npm run build && npx wrangler deploy --config wrangler.toml --var API_ORIGIN:\"$API_ORIGIN\""
+
+  },
   "dependencies": {
     "jwt-decode": "^4.0.0"
   },

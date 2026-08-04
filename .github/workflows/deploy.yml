@@ -126,11 +126,11 @@ jobs:
           VITE_API_BASE: ${{ secrets.VITE_API_BASE }}
         run: npm run build
 
-      # Vite has no public/ dir in this project, so _redirects (SPA fallback +
-      # /api/* rewrite) must be copied into the deployable output explicitly.
-      - name: Include Cloudflare _redirects in build output
+      # Do not copy Pages `_redirects` into dist/: Workers rejects absolute
+      # proxy rules. SPA + /api/* are handled by wrangler.toml / cloudflare-worker.js.
+      - name: Strip Pages _redirects from Workers asset output
         working-directory: AGT_platform/frontend
-        run: cp _redirects dist/_redirects
+        run: rm -f dist/_redirects
 
       - name: Upload build artifact
         uses: actions/upload-artifact@v4
@@ -270,23 +270,36 @@ jobs:
             fi
             echo "GPU worker deploy complete"
 
+  # Matches the Cloudflare Workers Builds path (repo-root wrangler.toml).
+  # Uses pre-built dist/ from build-frontend; wrangler [build] no-ops when
+  # dist/index.html already exists.
   deploy-frontend:
-    name: Deploy frontend to Cloudflare Pages
+    name: Deploy frontend to Cloudflare
     runs-on: ubuntu-latest
-    timeout-minutes: 10
+    timeout-minutes: 15
     needs: [preflight, build-frontend]
     if: needs.preflight.outputs.cloudflare_configured == 'true'
     environment: production
     steps:
+      - name: Checkout code
+        uses: actions/checkout@v4
+
       - name: Download build artifact
         uses: actions/download-artifact@v4
         with:
           name: frontend-dist
-          path: dist
+          path: AGT_platform/frontend/dist
 
-      - name: Publish to Cloudflare Pages
+      - name: Publish Worker (static assets + /api proxy)
         uses: cloudflare/wrangler-action@v3
+        env:
+          # Injected at deploy time — never committed in wrangler.toml.
+          API_ORIGIN: ${{ secrets.API_ORIGIN }}
         with:
           apiToken: ${{ secrets.CLOUDFLARE_API_TOKEN }}
           accountId: ${{ secrets.CLOUDFLARE_ACCOUNT_ID }}
-          command: pages deploy dist --project-name=ai-grader-frontend --branch=main
+          # `deploy` uploads a version and promotes it (required for first-time
+          # Workers; `versions upload` alone does not create the Worker).
+          # API_ORIGIN is passed via --var from the GitHub secret of the same name
+          # (set it in repo Secrets, or once in the Cloudflare dashboard).
+          command: deploy --config wrangler.toml --var API_ORIGIN:${{ secrets.API_ORIGIN }}
