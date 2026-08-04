@@ -16,10 +16,14 @@ concurrency:
   cancel-in-progress: false
 
 jobs:
+  # Secrets created under Settings → Environments → production are ONLY visible
+  # to jobs that declare `environment: production`. Without that, ${{ secrets.* }}
+  # resolves empty here even when the Environment secrets exist.
   preflight:
     name: Validate deploy secrets
     runs-on: ubuntu-latest
     timeout-minutes: 5
+    environment: production
     steps:
       - name: Require web, GPU, and Cloudflare secrets
         env:
@@ -42,11 +46,12 @@ jobs:
             API_ORIGIN
           do
             if [ -z "${!name}" ]; then
-              echo "::error::Required secret $name is not set"
+              echo "::error::Required secret '$name' is empty or missing on the GitHub Environment named 'production' (Settings → Environments → production → Environment secrets). Repository secrets are a different store and are not what this workflow uses."
               missing=1
             fi
           done
 
+          # Optional; defaults to monolith when unset.
           stack="${DEPLOY_STACK:-monolith}"
           if [ "$stack" != "monolith" ] && [ "$stack" != "split" ]; then
             echo "::error::DEPLOY_STACK must be 'monolith' or 'split' (got '$stack')"
@@ -57,7 +62,7 @@ jobs:
             exit 1
           fi
 
-          echo "Deploy targets: web=${SERVER_HOST} gpu=${GPU_SERVER_HOST} stack=${stack} cloudflare=enabled"
+          echo "Deploy secrets OK (environment=production). stack=${stack} cloudflare=enabled"
 
   # Cheap syntax gate: catches Python syntax errors before anything touches a
   # server. Full pytest runs need live LLM/API keys, so they stay out of deploy.
@@ -81,6 +86,8 @@ jobs:
     name: Build frontend
     runs-on: ubuntu-latest
     timeout-minutes: 15
+    # So optional VITE_API_BASE is read from the same Environment secrets store.
+    environment: production
     steps:
       - name: Checkout code
         uses: actions/checkout@v4
