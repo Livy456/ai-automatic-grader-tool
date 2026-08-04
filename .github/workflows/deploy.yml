@@ -28,6 +28,9 @@ jobs:
       - name: Validate secrets and resolve stack mode
         id: config
         env:
+          # Opt-in for SSH deploys to EC2/VPS. Leave unset/false when you only
+          # run the API locally (Docker) and deploy the frontend to Cloudflare.
+          DEPLOY_WEB: ${{ secrets.DEPLOY_WEB }}
           SERVER_HOST: ${{ secrets.SERVER_HOST }}
           SERVER_USER: ${{ secrets.SERVER_USER }}
           SERVER_SSH_KEY: ${{ secrets.SERVER_SSH_KEY }}
@@ -38,22 +41,38 @@ jobs:
         run: |
           set -euo pipefail
 
-          web_configured=true
-          for name in SERVER_HOST SERVER_USER SERVER_SSH_KEY; do
-            if [ -z "${!name}" ]; then
-              echo "::error::Required secret $name is not set"
-              web_configured=false
-            fi
-          done
-
           stack="${DEPLOY_STACK:-monolith}"
           if [ "$stack" != "monolith" ] && [ "$stack" != "split" ]; then
             echo "::error::DEPLOY_STACK must be 'monolith' or 'split' (got '$stack')"
             exit 1
           fi
 
+          # SSH web/GPU deploy is opt-in. Having SERVER_HOST set is not enough —
+          # an unreachable host (stopped EC2, local-only Docker) causes
+          # "dial tcp …:22: i/o timeout" and fails the workflow.
+          deploy_web_requested=false
+          case "$(printf '%s' "${DEPLOY_WEB:-}" | tr '[:upper:]' '[:lower:]')" in
+            1|true|yes|on) deploy_web_requested=true ;;
+          esac
+
+          web_configured=false
+          if [ "$deploy_web_requested" = "true" ]; then
+            web_configured=true
+            for name in SERVER_HOST SERVER_USER SERVER_SSH_KEY; do
+              if [ -z "${!name}" ]; then
+                echo "::error::DEPLOY_WEB is enabled but secret $name is not set"
+                web_configured=false
+              fi
+            done
+            if [ "$web_configured" = "false" ]; then
+              exit 1
+            fi
+          else
+            echo "::notice::Skipping EC2 web/app deploy (secret DEPLOY_WEB is not true). Local Docker is not reachable from GitHub Actions; set DEPLOY_WEB=true only when a public SSH host is up."
+          fi
+
           gpu_configured=false
-          if [ "$stack" = "split" ]; then
+          if [ "$web_configured" = "true" ] && [ "$stack" = "split" ]; then
             if [ -n "$GPU_SERVER_HOST" ]; then
               gpu_configured=true
             else
@@ -69,6 +88,10 @@ jobs:
             echo "::warning::Cloudflare secrets not set; the frontend will be built but not deployed"
           fi
 
+          if [ "$web_configured" = "false" ] && [ "$cloudflare_configured" = "false" ]; then
+            echo "::warning::No deploy targets enabled (DEPLOY_WEB off and Cloudflare secrets missing). Workflow will only run build/verify gates."
+          fi
+
           {
             echo "web_configured=$web_configured"
             echo "gpu_configured=$gpu_configured"
@@ -76,10 +99,6 @@ jobs:
           } >> "$GITHUB_OUTPUT"
 
           echo "stack=$stack web=$web_configured gpu=$gpu_configured cloudflare=$cloudflare_configured"
-
-          if [ "$web_configured" = "false" ]; then
-            exit 1
-          fi
 
   # Cheap syntax gate: catches Python syntax errors before anything touches a
   # server. Full pytest runs need live LLM/API keys, so they stay out of deploy.
@@ -141,14 +160,29 @@ jobs:
           retention-days: 7
 
   # --- Web/app EC2: FastAPI API (uvicorn). Runs Alembic migrations. Also runs
-  # the Celery worker when DEPLOY_STACK=monolith. ---
+  # the Celery worker when DEPLOY_STACK=monolith.
+  # Requires secret DEPLOY_WEB=true and a reachable SERVER_HOST:22.
+  # Local Docker on your laptop is not a valid target for this job. ---
   deploy-web:
     name: Deploy web / app tier
     runs-on: ubuntu-latest
     timeout-minutes: 30
     needs: [preflight, verify-backend]
+    if: needs.preflight.outputs.web_configured == 'true'
     environment: production
     steps:
+      - name: Check SSH reachability of SERVER_HOST
+        env:
+          SERVER_HOST: ${{ secrets.SERVER_HOST }}
+        run: |
+          set -euo pipefail
+          echo "Probing ${SERVER_HOST}:22 (must be a public EC2/VPS; local Docker will time out)…"
+          if ! timeout 15 bash -c "echo >/dev/tcp/${SERVER_HOST}/22"; then
+            echo "::error::Cannot reach ${SERVER_HOST}:22 from GitHub Actions (connection timed out or refused). Start the EC2 instance, open SG port 22 to GitHub-hosted runners (or use a bastion), or unset DEPLOY_WEB / set DEPLOY_WEB=false to skip this job while developing locally."
+            exit 1
+          fi
+          echo "SSH port is reachable"
+
       - name: Deploy backend to SERVER_HOST
         uses: appleboy/ssh-action@v1
         env:
