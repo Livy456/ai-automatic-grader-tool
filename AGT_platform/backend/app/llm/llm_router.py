@@ -1,8 +1,3 @@
-"""
-LLM routing for grading: **OpenAI** (server-side) plus optional **Anthropic** for structure.
-
-Course grading and multimodal per-chunk grading use OpenAI chat clients.
-"""
 from __future__ import annotations
 
 import json

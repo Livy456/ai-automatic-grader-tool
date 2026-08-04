@@ -6,132 +6,287 @@ on:
       - main
   workflow_dispatch:
 
-jobs:
-  # --- Web / App EC2: Flask API, Postgres, Redis broker, MinIO/S3-sidecar (or point to AWS S3). ---
-  # No GPU Celery workers on this host. Migrations run here.
-  deploy-web:
-    name: Deploy web / app tier
-    runs-on: ubuntu-latest
-    if: github.ref == 'refs/heads/main'
+permissions:
+  contents: read
 
+# Never run two production deploys at once; queue instead of cancelling so an
+# in-flight release (migrations, service restarts) is not interrupted.
+concurrency:
+  group: ${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: false
+
+jobs:
+  preflight:
+    name: Resolve deploy configuration
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    outputs:
+      web_configured: ${{ steps.config.outputs.web_configured }}
+      gpu_configured: ${{ steps.config.outputs.gpu_configured }}
+      cloudflare_configured: ${{ steps.config.outputs.cloudflare_configured }}
+    steps:
+      - name: Validate secrets and resolve stack mode
+        id: config
+        env:
+          SERVER_HOST: ${{ secrets.SERVER_HOST }}
+          SERVER_USER: ${{ secrets.SERVER_USER }}
+          SERVER_SSH_KEY: ${{ secrets.SERVER_SSH_KEY }}
+          GPU_SERVER_HOST: ${{ secrets.GPU_SERVER_HOST }}
+          DEPLOY_STACK: ${{ secrets.DEPLOY_STACK }}
+          CLOUDFLARE_API_TOKEN: ${{ secrets.CLOUDFLARE_API_TOKEN }}
+          CLOUDFLARE_ACCOUNT_ID: ${{ secrets.CLOUDFLARE_ACCOUNT_ID }}
+        run: |
+          set -euo pipefail
+
+          web_configured=true
+          for name in SERVER_HOST SERVER_USER SERVER_SSH_KEY; do
+            if [ -z "${!name}" ]; then
+              echo "::error::Required secret $name is not set"
+              web_configured=false
+            fi
+          done
+
+          stack="${DEPLOY_STACK:-monolith}"
+          if [ "$stack" != "monolith" ] && [ "$stack" != "split" ]; then
+            echo "::error::DEPLOY_STACK must be 'monolith' or 'split' (got '$stack')"
+            exit 1
+          fi
+
+          gpu_configured=false
+          if [ "$stack" = "split" ]; then
+            if [ -n "$GPU_SERVER_HOST" ]; then
+              gpu_configured=true
+            else
+              echo "::error::DEPLOY_STACK=split but GPU_SERVER_HOST is not set"
+              exit 1
+            fi
+          fi
+
+          cloudflare_configured=false
+          if [ -n "$CLOUDFLARE_API_TOKEN" ] && [ -n "$CLOUDFLARE_ACCOUNT_ID" ]; then
+            cloudflare_configured=true
+          else
+            echo "::warning::Cloudflare secrets not set; the frontend will be built but not deployed"
+          fi
+
+          {
+            echo "web_configured=$web_configured"
+            echo "gpu_configured=$gpu_configured"
+            echo "cloudflare_configured=$cloudflare_configured"
+          } >> "$GITHUB_OUTPUT"
+
+          echo "stack=$stack web=$web_configured gpu=$gpu_configured cloudflare=$cloudflare_configured"
+
+          if [ "$web_configured" = "false" ]; then
+            exit 1
+          fi
+
+  # Cheap syntax gate: catches Python syntax errors before anything touches a
+  # server. Full pytest runs need live LLM/API keys, so they stay out of deploy.
+  verify-backend:
+    name: Backend syntax check
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
     steps:
       - name: Checkout code
         uses: actions/checkout@v4
 
-      - name: Validate Required Secrets
-        run: |
-          if [ -z "${{ secrets.SERVER_HOST }}" ]; then
-            echo "❌ SERVER_HOST secret is not set"
-            exit 1
-          fi
-          if [ -z "${{ secrets.SERVER_USER }}" ]; then
-            echo "❌ SERVER_USER secret is not set"
-            exit 1
-          fi
-          if [ -z "${{ secrets.SERVER_SSH_KEY }}" ]; then
-            echo "❌ SERVER_SSH_KEY secret is not set"
-            exit 1
-          fi
-          echo "✅ Web server SSH secrets are set"
+      - name: Set up Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
 
-      - name: Deploy web stack to SERVER_HOST
-        uses: appleboy/ssh-action@v1.0.0
+      - name: Compile backend sources
+        run: python -m compileall -q AGT_platform/backend/app AGT_platform/backend/alembic
+
+  # Always build the frontend (validates the TypeScript/Vite build on every
+  # push to main), even when Cloudflare deployment is skipped.
+  build-frontend:
+    name: Build frontend
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@v4
+
+      - name: Set up Node.js
+        uses: actions/setup-node@v4
+        with:
+          node-version: 20
+          cache: npm
+          cache-dependency-path: AGT_platform/frontend/package-lock.json
+
+      - name: Install dependencies
+        working-directory: AGT_platform/frontend
+        run: npm ci
+
+      - name: Build
+        working-directory: AGT_platform/frontend
+        env:
+          VITE_API_BASE: ${{ secrets.VITE_API_BASE }}
+        run: npm run build
+
+      # Vite has no public/ dir in this project, so _redirects (SPA fallback +
+      # /api/* rewrite) must be copied into the deployable output explicitly.
+      - name: Include Cloudflare _redirects in build output
+        working-directory: AGT_platform/frontend
+        run: cp _redirects dist/_redirects
+
+      - name: Upload build artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: frontend-dist
+          path: AGT_platform/frontend/dist
+          if-no-files-found: error
+          retention-days: 7
+
+  # --- Web/app EC2: FastAPI API (uvicorn). Runs Alembic migrations. Also runs
+  # the Celery worker when DEPLOY_STACK=monolith. ---
+  deploy-web:
+    name: Deploy web / app tier
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+    needs: [preflight, verify-backend]
+    environment: production
+    steps:
+      - name: Deploy backend to SERVER_HOST
+        uses: appleboy/ssh-action@v1
+        env:
+          DEPLOY_STACK: ${{ secrets.DEPLOY_STACK }}
+          AGT_API_SERVICE: ${{ secrets.AGT_API_SERVICE }}
+          AGT_WORKER_SERVICE: ${{ secrets.AGT_WORKER_SERVICE }}
+          BACKEND_PORT: ${{ secrets.BACKEND_PORT }}
         with:
           host: ${{ secrets.SERVER_HOST }}
           username: ${{ secrets.SERVER_USER }}
           key: ${{ secrets.SERVER_SSH_KEY }}
           port: 22
           timeout: 60s
-          command_timeout: 20m
+          command_timeout: 25m
+          envs: DEPLOY_STACK,AGT_API_SERVICE,AGT_WORKER_SERVICE,BACKEND_PORT
           script: |
-            set -e
-            cd /opt/ai-grader/AGT_platform || { echo "❌ Missing /opt/ai-grader/AGT_platform"; exit 1; }
-            git pull origin main
-            STACK='${{ secrets.DEPLOY_STACK }}'
-            if [ -z "$STACK" ]; then STACK=monolith; fi
-            echo "📦 Deploy stack mode: $STACK"
+            set -eu
 
-            if [ "$STACK" = "split" ]; then
-              COMPOSE_FILE=docker-compose.web.prod.yaml
-            else
-              COMPOSE_FILE=docker-compose.prod.yaml
+            cd /opt/ai-grader || { echo "Missing /opt/ai-grader checkout"; exit 1; }
+
+            echo "Updating code to origin/main"
+            git fetch origin main
+            git checkout main
+            git pull --ff-only origin main
+
+            cd AGT_platform/backend
+
+            echo "Syncing Python dependencies"
+            if [ ! -d .venv ]; then
+              python3 -m venv .venv
+            fi
+            . .venv/bin/activate
+            pip install --quiet --upgrade pip
+            pip install --quiet -r requirements.txt
+
+            echo "Running database migrations"
+            python -m alembic upgrade head
+
+            STACK="${DEPLOY_STACK:-monolith}"
+            SERVICES="${AGT_API_SERVICE:-agt-api}"
+            if [ "$STACK" != "split" ]; then
+              SERVICES="$SERVICES ${AGT_WORKER_SERVICE:-agt-worker}"
             fi
 
-            echo "🐳 Web tier ($COMPOSE_FILE) — API tier only (no GPU workers on this host)"
-            docker compose -f "$COMPOSE_FILE" --env-file .env.production pull
-            docker compose -f "$COMPOSE_FILE" --env-file .env.production up -d --build
-            echo "⏳ Waiting for backend…"
-            sleep 12
-            echo "📊 Database migrations (backend container on web tier)…"
-            docker exec ai_grader_backend_prod python -m alembic upgrade head || true
-            docker compose -f "$COMPOSE_FILE" --env-file .env.production restart backend
-            echo "✅ Web / app deploy complete"
+            for svc in $SERVICES; do
+              if systemctl cat "$svc.service" >/dev/null 2>&1; then
+                echo "Restarting $svc"
+                sudo systemctl restart "$svc"
+              else
+                echo "::warning::systemd unit $svc.service not found on host; restart that process manually"
+              fi
+            done
 
-  # --- GPU EC2: Celery worker only. Private subnet; pre-pull HF weights on this host if needed. ---
+            echo "Waiting for API health check"
+            PORT="${BACKEND_PORT:-5000}"
+            for _ in $(seq 1 15); do
+              if curl -fsS "http://127.0.0.1:$PORT/api/health" >/dev/null 2>&1; then
+                echo "Backend healthy on port $PORT — web/app deploy complete"
+                exit 0
+              fi
+              sleep 2
+            done
+            echo "Backend failed health check on port $PORT"
+            exit 1
+
+  # --- GPU EC2 (DEPLOY_STACK=split only): Celery worker consuming the "gpu"
+  # queue. No migrations here; the web tier owns the schema. ---
   deploy-gpu:
     name: Deploy GPU inference tier
     runs-on: ubuntu-latest
-    if: |
-      github.ref == 'refs/heads/main' &&
-      secrets.DEPLOY_STACK == 'split' &&
-      secrets.GPU_SERVER_HOST != ''
-
+    timeout-minutes: 30
+    needs: [preflight, verify-backend]
+    if: needs.preflight.outputs.gpu_configured == 'true'
+    environment: production
     steps:
-      - name: Checkout code
-        uses: actions/checkout@v4
-
-      - name: Deploy GPU stack to GPU_SERVER_HOST
-        uses: appleboy/ssh-action@v1.0.0
+      - name: Deploy worker to GPU_SERVER_HOST
+        uses: appleboy/ssh-action@v1
+        env:
+          AGT_WORKER_SERVICE: ${{ secrets.AGT_WORKER_SERVICE }}
         with:
           host: ${{ secrets.GPU_SERVER_HOST }}
           username: ${{ secrets.SERVER_USER }}
           key: ${{ secrets.SERVER_SSH_KEY }}
           port: 22
           timeout: 60s
-          command_timeout: 30m
+          command_timeout: 25m
+          envs: AGT_WORKER_SERVICE
           script: |
-            set -e
-            cd /opt/ai-grader/AGT_platform || { echo "❌ Missing /opt/ai-grader/AGT_platform"; exit 1; }
-            git pull origin main
-            echo "🐳 GPU tier (docker-compose.gpu.prod.yaml) — Celery worker"
-            docker compose -f docker-compose.gpu.prod.yaml --env-file .env.production.gpu pull
-            docker compose -f docker-compose.gpu.prod.yaml --env-file .env.production.gpu up -d --build
-            sleep 10
-            docker compose -f docker-compose.gpu.prod.yaml --env-file .env.production.gpu restart worker
-            echo "✅ GPU deploy complete"
+            set -eu
+
+            cd /opt/ai-grader || { echo "Missing /opt/ai-grader checkout"; exit 1; }
+
+            echo "Updating code to origin/main"
+            git fetch origin main
+            git checkout main
+            git pull --ff-only origin main
+
+            cd AGT_platform/backend
+
+            echo "Syncing Python dependencies"
+            if [ ! -d .venv ]; then
+              python3 -m venv .venv
+            fi
+            . .venv/bin/activate
+            pip install --quiet --upgrade pip
+            pip install --quiet -r requirements.txt
+            if [ -f requirements-huggingface.txt ]; then
+              pip install --quiet -r requirements-huggingface.txt
+            fi
+
+            WORKER="${AGT_WORKER_SERVICE:-agt-worker}"
+            if systemctl cat "$WORKER.service" >/dev/null 2>&1; then
+              echo "Restarting $WORKER"
+              sudo systemctl restart "$WORKER"
+              sleep 5
+              systemctl is-active --quiet "$WORKER" || { echo "$WORKER is not active after restart"; exit 1; }
+            else
+              echo "::warning::systemd unit $WORKER.service not found on host; restart the worker manually"
+            fi
+            echo "GPU worker deploy complete"
 
   deploy-frontend:
-    name: Deploy Frontend to Cloudflare Pages
+    name: Deploy frontend to Cloudflare Pages
     runs-on: ubuntu-latest
-    if: github.ref == 'refs/heads/main'
-
+    timeout-minutes: 10
+    needs: [preflight, build-frontend]
+    if: needs.preflight.outputs.cloudflare_configured == 'true'
+    environment: production
     steps:
-      - name: Checkout code
-        uses: actions/checkout@v4
+      - name: Download build artifact
+        uses: actions/download-artifact@v4
+        with:
+          name: frontend-dist
+          path: dist
 
-      - name: Validate Cloudflare Secrets
-        id: check-secrets
-        run: |
-          if [ -z "${{ secrets.CLOUDFLARE_API_TOKEN }}" ]; then
-            echo "secrets_available=false" >> $GITHUB_OUTPUT
-          elif [ -z "${{ secrets.CLOUDFLARE_ACCOUNT_ID }}" ]; then
-            echo "secrets_available=false" >> $GITHUB_OUTPUT
-          else
-            echo "secrets_available=true" >> $GITHUB_OUTPUT
-          fi
-
-      - name: Deploy to Cloudflare Pages
-        if: steps.check-secrets.outputs.secrets_available == 'true'
-        uses: cloudflare/pages-action@v1
-        continue-on-error: true
+      - name: Publish to Cloudflare Pages
+        uses: cloudflare/wrangler-action@v3
         with:
           apiToken: ${{ secrets.CLOUDFLARE_API_TOKEN }}
           accountId: ${{ secrets.CLOUDFLARE_ACCOUNT_ID }}
-          projectName: ai-grader-frontend
-          directory: AGT_platform/frontend
-          gitHubToken: ${{ secrets.GITHUB_TOKEN }}
-          wranglerVersion: '3'
-
-      - name: Skip Frontend Deployment (if secrets missing)
-        if: steps.check-secrets.outputs.secrets_available != 'true'
-        run: echo "⏭️ Skipping Cloudflare Pages (secrets not set). Set VITE_API_BASE in Pages build env."
+          command: pages deploy dist --project-name=ai-grader-frontend --branch=main

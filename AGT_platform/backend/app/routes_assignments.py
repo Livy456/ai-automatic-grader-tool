@@ -21,11 +21,6 @@ _log = logging.getLogger(__name__)
 
 router = APIRouter(prefix="/api")
 
-
-# -----------------------------
-# Helpers
-# -----------------------------
-
 def _now() -> datetime:
     """ 
     This function returns the current date and time.
@@ -94,10 +89,6 @@ def _assignment_to_dict(a: AssignmentUpload) -> Dict[str, Any]:
         "created_at": a.created_at.isoformat() if a.created_at else None,
         "updated_at": a.updated_at.isoformat() if a.updated_at else None,
     }
-
-# -----------------------------
-# Routes
-# -----------------------------
 
 @router.get("/assignments")
 def list_assignments(db: Session = Depends(get_db)):

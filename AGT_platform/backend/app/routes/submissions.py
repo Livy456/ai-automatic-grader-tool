@@ -1,8 +1,3 @@
-"""
-Submissions: production path is browser → MinIO (presigned PUT) → finalize → Celery.
-
-Multipart upload to the API is opt-in (ALLOW_FLASK_MULTIPART_UPLOAD=true) for local dev only.
-"""
 from __future__ import annotations
 
 import uuid
@@ -54,7 +49,6 @@ def _is_authorized_submitter(db: Session, user: dict, assignment_id: int) -> boo
         .first()
         is not None
     )
-
 
 @router.post("/api/submissions/direct-upload/start")
 def direct_upload_start(

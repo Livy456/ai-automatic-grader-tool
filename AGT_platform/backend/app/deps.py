@@ -1,10 +1,3 @@
-"""
-FastAPI dependencies: DB session lifecycle + auth/user context.
-
-Replaces the old Flask patterns of manually creating/closing a ``SessionLocal()`` per route
-body and the ``@require_auth`` / ``@require_role(...)`` decorators from :mod:`app.access`.
-"""
-
 from __future__ import annotations
 
 from typing import Generator
