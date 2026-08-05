@@ -470,7 +470,7 @@ class Config:
 
     WHISPER_ENABLED = _env_bool("WHISPER_ENABLED")
 
-    CELERY_WORKER_CONCURRENCY = _env_int("CELERY_WORKER_CONCURRENCY", default=5)
+    CELERY_WORKER_CONCURRENCY = _env_int("CELERY_WORKER_CONCURRENCY", default=5) # might limit the number of celery workers because this might increase api calls
     CELERY_WORKER_PREFETCH = _env_int("CELERY_WORKER_PREFETCH", default=1)
 
     # Comma-separated list of allowed origins; set CORS_ORIGINS in .env
