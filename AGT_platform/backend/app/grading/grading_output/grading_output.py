@@ -186,18 +186,48 @@ def _coerce_rubric_items(rubric: list) -> list[dict[str, Any]]:
 def _max_by_name_for_chunk(
     chunk: ChunkGradeOutcome, full_max_by_name: dict[str, float]
 ) -> dict[str, float]:
-    """Use routed rubric row names for this chunk when present; else full assignment rubric."""
+    """
+    Use routed rubric row names for this chunk when present; else full assignment rubric.
+
+    When Assignment Creation (or any other router) stamped a per-question subset onto the
+    chunk, never expand back to the full assignment rubric — even if a name is missing from
+    ``full_max_by_name`` — so submission review only shows criteria used to grade that question.
+    """
     aux = chunk.auxiliary or {}
     names = aux.get("rubric_criterion_names") or []
+    routed_max = aux.get("rubric_criterion_max_points") or {}
     if not isinstance(names, list) or not names:
         return dict(full_max_by_name)
+
     out: dict[str, float] = {}
     for n in names:
         s = str(n).strip()
-        if not s or s not in full_max_by_name:
+        if not s:
             continue
-        out[s] = float(full_max_by_name[s])
-    return out or dict(full_max_by_name)
+        if s in full_max_by_name:
+            out[s] = float(full_max_by_name[s])
+            continue
+        if isinstance(routed_max, dict) and s in routed_max:
+            try:
+                out[s] = float(routed_max[s])
+            except (TypeError, ValueError):
+                continue
+    if out:
+        return out
+    if isinstance(routed_max, dict) and routed_max:
+        resolved: dict[str, float] = {}
+        for k, v in routed_max.items():
+            name = str(k).strip()
+            if not name:
+                continue
+            try:
+                resolved[name] = float(v)
+            except (TypeError, ValueError):
+                continue
+        if resolved:
+            return resolved
+    # Routed names were present but unresolvable — keep an empty map rather than the full rubric.
+    return {}
 
 
 def _chunk_to_question_grade(
@@ -317,12 +347,19 @@ def multimodal_assignment_to_grading_dict(
 
     # --- Per-chunk allowlist, blend sync, rubric-aligned overall, then consistency ---
     all_consistency_issues: list[str] = []
-    for qg in question_grades:
+    for qg, ch in zip(question_grades, result.chunk_results, strict=True):
         cid = str(qg.get("chunk_id") or "chunk")
         crits = qg.get("criteria") or []
+        routed_names = {
+            str(n).strip()
+            for n in ((ch.auxiliary or {}).get("rubric_criterion_names") or [])
+            if str(n).strip()
+        }
+        # Prefer the per-question routed subset so review UI never shows unused criteria.
+        chunk_allowed = frozenset(routed_names) if routed_names else allowed
         filtered, q_issues = filter_criteria_dicts_to_allowlist(
             [c for c in crits if isinstance(c, dict)],
-            allowed,
+            chunk_allowed,
             context=cid,
         )
         qg["criteria"] = filtered

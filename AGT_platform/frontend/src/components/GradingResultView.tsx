@@ -335,7 +335,9 @@ export default function GradingResultView({
               </TableRow>
             </TableHead>
             <TableBody>
-              {(currentQuestion.criteria || []).map((row) => {
+              {(currentQuestion.criteria || [])
+                .filter((row) => String(row.criterion || "").trim().length > 0)
+                .map((row) => {
                 const earned =
                   typeof row.rubric_points_earned === "number"
                     ? row.rubric_points_earned

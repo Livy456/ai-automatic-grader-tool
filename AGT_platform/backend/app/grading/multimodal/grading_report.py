@@ -178,7 +178,7 @@ def report_question_grades_rows(
                 },
                 "criteria": [
                     {
-                        "criterion": qc.get("name", ""),
+                        "criterion": str(qc.get("name") or qc.get("criterion") or "").strip(),
                         "score": qc.get("score", 0),
                         "max_points": qc.get("max_points"),
                         "rubric_points_earned": qc.get("score", 0),
@@ -189,6 +189,7 @@ def report_question_grades_rows(
                     }
                     for qc in (qg.get("criteria") or [])
                     if isinstance(qc, dict)
+                    and str(qc.get("name") or qc.get("criterion") or "").strip()
                 ],
             }
         )

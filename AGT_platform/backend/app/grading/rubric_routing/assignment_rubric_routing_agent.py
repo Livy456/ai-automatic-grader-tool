@@ -423,6 +423,29 @@ class AssignmentRubricRoutingAgent:
 # ---------------------------------------------------------------------------
 
 
+def _grading_row_from_saved_criterion(raw: dict[str, Any]) -> dict[str, Any] | None:
+    """Normalize a saved criterion dict into the shape the grading prompt / report expect."""
+    name = str(raw.get("name") or raw.get("criterion") or "").strip()
+    if not name or name == "Criterion":
+        return None
+    try:
+        max_pts = float(
+            raw.get("max_points")
+            if raw.get("max_points") is not None
+            else (raw.get("max_score") if raw.get("max_score") is not None else 0.0)
+        )
+    except (TypeError, ValueError):
+        max_pts = 0.0
+    out = dict(raw)
+    out["name"] = name
+    out["criterion"] = name
+    out["max_points"] = max_pts
+    out["max_score"] = max_pts
+    if "description" not in out:
+        out["description"] = str(raw.get("description") or "")
+    return out
+
+
 def apply_assignment_creation_rubric_routing(
     chunks: list[GradingChunk],
     *,
@@ -432,15 +455,58 @@ def apply_assignment_creation_rubric_routing(
     Stamp pre-routed criterion rows from Assignment Creation onto grading chunks so
     :func:`app.grading.rubric_routing.rubric_router.route_rubric` keeps them.
 
+    Matches by ``question_id`` first, then falls back to document order so every saved
+    question still receives only its routed subset (never the full assignment rubric).
+
     Returns the number of chunks that received at least one criterion row.
     """
     if not chunks or not criteria_by_question_id:
         return 0
 
-    applied = 0
+    # Preserve insertion order from AssignmentQuestionChunk.order_index (tasks.py).
+    ordered_rows: list[list[dict[str, Any]]] = []
+    by_qid: dict[str, list[dict[str, Any]]] = {}
+    for qid, raw_rows in criteria_by_question_id.items():
+        key = str(qid or "").strip()
+        cleaned = [
+            row
+            for row in (
+                _grading_row_from_saved_criterion(r)
+                for r in (raw_rows or [])
+                if isinstance(r, dict)
+            )
+            if row is not None
+        ]
+        if not cleaned:
+            continue
+        ordered_rows.append(cleaned)
+        if key:
+            by_qid[key] = cleaned
+
+    if not by_qid and not ordered_rows:
+        return 0
+
+    # Prefer stable question_id matches. Only fall back to document order when *no*
+    # chunk matched by id — partial matches must not steal another question's rows.
+    by_index: list[list[dict[str, Any]] | None] = []
+    id_hits = 0
     for ch in chunks:
         qid = str(ch.question_id or "").strip()
-        rows = [dict(r) for r in (criteria_by_question_id.get(qid) or []) if isinstance(r, dict)]
+        rows = list(by_qid.get(qid) or []) if qid else []
+        if rows:
+            id_hits += 1
+            by_index.append(rows)
+        else:
+            by_index.append(None)
+
+    if id_hits == 0 and ordered_rows:
+        by_index = [
+            list(ordered_rows[i]) if i < len(ordered_rows) else None
+            for i in range(len(chunks))
+        ]
+
+    applied = 0
+    for ch, rows in zip(chunks, by_index, strict=True):
         if not rows:
             continue
         ch.rubric_rows = rows

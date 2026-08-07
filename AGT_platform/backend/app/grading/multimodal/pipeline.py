@@ -492,9 +492,9 @@ class MultimodalGradingPipeline:
 
         co = summarize_chunk_confidence_from_counts(dict(cluster_counts))
         rubric_fb = [
-            str(rr.get("name") or "").strip()
+            str(rr.get("name") or rr.get("criterion") or "").strip()
             for rr in (chunk.rubric_rows or [])
-            if str(rr.get("name") or "").strip()
+            if str(rr.get("name") or rr.get("criterion") or "").strip()
         ]
         outcome = aggregate_chunk_samples(
             chunk.chunk_id,
@@ -504,6 +504,25 @@ class MultimodalGradingPipeline:
             rubric_fallback_names=rubric_fb or None,
             chunk_student_response=_chunk_student_response_text(chunk),
         )
+        # Preserve per-question max points from the routed rubric rows so report shaping
+        # never expands back to the full assignment rubric when names drift slightly.
+        routed_max: dict[str, float] = {}
+        for rr in chunk.rubric_rows or []:
+            rn = str(rr.get("name") or rr.get("criterion") or "").strip()
+            if not rn:
+                continue
+            try:
+                routed_max[rn] = float(
+                    rr.get("max_points")
+                    if rr.get("max_points") is not None
+                    else (rr.get("max_score") if rr.get("max_score") is not None else 0)
+                )
+            except (TypeError, ValueError):
+                continue
+        if routed_max:
+            outcome.auxiliary["rubric_criterion_max_points"] = routed_max
+            if not outcome.auxiliary.get("rubric_criterion_names"):
+                outcome.auxiliary["rubric_criterion_names"] = list(routed_max.keys())
         sample_details = [
             {
                 "model_id": s.model_id,
@@ -905,20 +924,19 @@ class MultimodalGradingPipeline:
                 **hints_for_embed["multimodal_rag_prewindow_plain_audit"],
             )
 
-        if self.rubric_rows_by_type:
-            creation_routed = _maybe_apply_assignment_creation_rubric_routing(
+        creation_routed = _maybe_apply_assignment_creation_rubric_routing(
+            chunks,
+            hints if isinstance(hints, dict) else {},
+            wf=wf,
+        )
+        if self.rubric_rows_by_type and not creation_routed:
+            apply_custom_rubric_plan_to_chunks(
                 chunks,
+                envelope,
+                embed_cfg,
+                self.rubric_rows_by_type,
                 hints if isinstance(hints, dict) else {},
-                wf=wf,
             )
-            if not creation_routed:
-                apply_custom_rubric_plan_to_chunks(
-                    chunks,
-                    envelope,
-                    embed_cfg,
-                    self.rubric_rows_by_type,
-                    hints if isinstance(hints, dict) else {},
-                )
             crp = (hints or {}).get("custom_rubric_path") if isinstance(hints, dict) else None
             if crp:
                 wf("custom_rubric", path=str(crp))
@@ -1096,12 +1114,11 @@ class MultimodalGradingPipeline:
             n_chunks=len(chunks),
         )
         embed_cfg = self._resolve_app_config() or Config()
-        if self.rubric_rows_by_type:
-            _maybe_apply_assignment_creation_rubric_routing(
-                chunks,
-                hints if isinstance(hints, dict) else {},
-                wf=wf,
-            )
+        _maybe_apply_assignment_creation_rubric_routing(
+            chunks,
+            hints if isinstance(hints, dict) else {},
+            wf=wf,
+        )
         for chunk in chunks:
             route_rubric(
                 chunk,
