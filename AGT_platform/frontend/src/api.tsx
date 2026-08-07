@@ -226,6 +226,9 @@ export type CourseDetail = {
 export type RubricCriterion = {
   criterion: string;
   max_score: number;
+  name?: string;
+  max_points?: number;
+  description?: string;
 };
 
 export type CourseAssignment = {
@@ -326,6 +329,7 @@ export type AssignmentQuestionChunk = {
   order_index: number;
   question_text: string;
   answer_text: string;
+  rubric_criteria: RubricCriterion[];
   is_edited: boolean;
 };
 
@@ -388,9 +392,11 @@ export function getAssignmentLibraryEntry(
 
 export function saveAssignmentLibraryChunks(
   assignmentId: number,
-  chunks: Array<Pick<AssignmentQuestionChunk, "question_id" | "question_text" | "answer_text"> & {
-    id?: number;
-  }>
+  chunks: Array<
+    Pick<AssignmentQuestionChunk, "question_id" | "question_text" | "answer_text"> & {
+      id?: number;
+    }
+  >
 ): Promise<{ assignment_id: number; chunks: AssignmentQuestionChunk[] }> {
   return api.put(`/api/assignment-library/${assignmentId}/chunks`, { chunks });
 }

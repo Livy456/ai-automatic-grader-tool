@@ -15,6 +15,8 @@ teachers land on an editable question bank instead of a blank page:
 2. :mod:`app.grading.chunking.assignment_qa_chunker` ("chunking agent") — one LLM call that
    pairs each question in the blank template with its answer-key reference, isolated from
    every other question.
+3. :mod:`app.grading.rubric_routing.assignment_rubric_routing_agent` ("rubric routing agent") —
+   one LLM call that selects which rubric criteria apply to each parsed question.
 
 The resulting pairs are persisted as editable ``AssignmentQuestionChunk`` rows; teachers can
 edit/add/remove them on the review page and re-save via ``PUT .../chunks``, and revisit any
@@ -39,6 +41,10 @@ from app.database.storage import get_object_bytes, get_presigned_url, object_exi
 from app.grading.chunking.assignment_qa_chunker import try_chunk_assignment_qa_pairs
 from app.grading.multimodal.pipeline_runner import excerpt_attachment_bytes
 from app.grading.parsing.assignment_context_parser import parse_assignment_context
+from app.grading.rubric_routing.assignment_rubric_routing_agent import (
+    normalize_chunk_rubric_criteria,
+    try_route_rubric_for_questions,
+)
 from app.grading.parsing.original_view import build_original_view
 
 router = APIRouter()
@@ -87,13 +93,19 @@ def _serialize_assignment(a: Assignment) -> dict[str, Any]:
     }
 
 
-def _serialize_chunk(c: AssignmentQuestionChunk) -> dict[str, Any]:
+def _serialize_chunk(c: AssignmentQuestionChunk, *, assignment: Assignment | None = None) -> dict[str, Any]:
+    criteria = normalize_chunk_rubric_criteria(
+        c.rubric_criteria,
+        rubric=assignment.rubric if assignment is not None else None,
+        rubric_text=(assignment.grader_rubric_text or "") if assignment is not None else "",
+    )
     return {
         "id": c.id,
         "question_id": c.question_id,
         "order_index": c.order_index,
         "question_text": c.question_text,
         "answer_text": c.answer_text,
+        "rubric_criteria": criteria,
         "is_edited": c.is_edited,
     }
 
@@ -279,6 +291,7 @@ def finalize_assignment_library_entry(
                     a.grader_rubric_text = rubric_excerpt.strip()
 
     chunking_status = "skipped"
+    rubric_routing_status = "skipped"
     blank_att = by_kind.get("blank_assignment")
     answer_key_att = by_kind.get("answer_key")
     if blank_att is not None:
@@ -313,7 +326,23 @@ def finalize_assignment_library_entry(
             cfg=cfg,
         )
         if pairs:
+            routed = try_route_rubric_for_questions(
+                pairs=pairs,
+                rubric=a.rubric,
+                rubric_text=a.grader_rubric_text or "",
+                cfg=cfg,
+            )
+            if routed is not None:
+                rubric_routing_status = "ok"
+            elif a.rubric or (a.grader_rubric_text or "").strip():
+                rubric_routing_status = "no_routes"
             for i, pair in enumerate(pairs):
+                raw_criteria = routed[i] if routed and i < len(routed) else None
+                criteria = normalize_chunk_rubric_criteria(
+                    raw_criteria,
+                    rubric=a.rubric,
+                    rubric_text=a.grader_rubric_text or "",
+                )
                 db.add(
                     AssignmentQuestionChunk(
                         assignment_id=a.id,
@@ -321,6 +350,7 @@ def finalize_assignment_library_entry(
                         order_index=i,
                         question_text=pair["question"],
                         answer_text=pair["answer"],
+                        rubric_criteria=criteria or None,
                         is_edited=False,
                     )
                 )
@@ -330,7 +360,11 @@ def finalize_assignment_library_entry(
 
     db.commit()
     log_event(user["id"], "FINALIZE_ASSIGNMENT_LIBRARY_ENTRY", "Assignment", a.id, {})
-    return _serialize_assignment(a) | {"status": "created", "chunking_status": chunking_status}
+    return _serialize_assignment(a) | {
+        "status": "created",
+        "chunking_status": chunking_status,
+        "rubric_routing_status": rubric_routing_status,
+    }
 
 
 @router.get("/api/assignment-library")
@@ -365,7 +399,7 @@ def get_assignment_library_entry(
     if not a:
         raise HTTPException(404, "not found")
     chunks = sorted(a.question_chunks, key=lambda c: c.order_index)
-    return _serialize_assignment(a) | {"chunks": [_serialize_chunk(c) for c in chunks]}
+    return _serialize_assignment(a) | {"chunks": [_serialize_chunk(c, assignment=a) for c in chunks]}
 
 
 @router.get("/api/assignment-library/{assignment_id}/materials/{kind}/view")
@@ -453,6 +487,7 @@ def save_assignment_library_chunks(
                 order_index=i,
                 question_text=question_text,
                 answer_text=answer_text,
+                rubric_criteria=None,
                 is_edited=True,
             )
             db.add(row)
@@ -477,4 +512,4 @@ def save_assignment_library_chunks(
         .order_by(AssignmentQuestionChunk.order_index)
         .all()
     )
-    return {"assignment_id": a.id, "chunks": [_serialize_chunk(c) for c in chunks]}
+    return {"assignment_id": a.id, "chunks": [_serialize_chunk(c, assignment=a) for c in chunks]}

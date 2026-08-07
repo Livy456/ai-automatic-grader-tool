@@ -29,6 +29,7 @@ import {
   saveAssignmentLibraryChunks,
   type AssignmentLibraryEntry,
   type AssignmentMaterialKind,
+  type RubricCriterion,
 } from "../api";
 
 function MaterialViewer({
@@ -153,12 +154,60 @@ type EditableChunk = {
   question_id: string;
   question_text: string;
   answer_text: string;
+  rubric_criteria: RubricCriterion[];
 };
 
 let _localKeySeq = 0;
 function nextLocalKey(): string {
   _localKeySeq += 1;
   return `new-${_localKeySeq}`;
+}
+
+function criterionLabel(c: RubricCriterion): string {
+  return (c.name || c.criterion || "Criterion").trim();
+}
+
+function criterionScore(c: RubricCriterion): number | null {
+  const score = c.max_score ?? c.max_points;
+  return typeof score === "number" && Number.isFinite(score) ? score : null;
+}
+
+function RubricCriteriaDisplay({ criteria }: { criteria: RubricCriterion[] }) {
+  if (criteria.length === 0) {
+    return (
+      <Paper
+        variant="outlined"
+        sx={{ p: 2, bgcolor: "action.hover", color: "text.secondary", fontStyle: "italic" }}
+      >
+        No rubric criteria were routed to this question automatically.
+      </Paper>
+    );
+  }
+
+  return (
+    <Stack spacing={1}>
+      {criteria.map((c, i) => {
+        const score = criterionScore(c);
+        return (
+          <Paper key={`${criterionLabel(c)}-${i}`} variant="outlined" sx={{ p: 2 }}>
+            <Box sx={{ display: "flex", justifyContent: "space-between", gap: 2, mb: c.description ? 1 : 0 }}>
+              <Typography sx={{ fontWeight: 600 }}>{criterionLabel(c)}</Typography>
+              {score !== null && (
+                <Typography variant="body2" color="text.secondary" sx={{ whiteSpace: "nowrap" }}>
+                  Max {score} pts
+                </Typography>
+              )}
+            </Box>
+            {c.description ? (
+              <Typography variant="body2" color="text.secondary" sx={{ whiteSpace: "pre-wrap" }}>
+                {c.description}
+              </Typography>
+            ) : null}
+          </Paper>
+        );
+      })}
+    </Stack>
+  );
 }
 
 export default function AssignmentChunkReview() {
@@ -188,6 +237,7 @@ export default function AssignmentChunkReview() {
           question_id: c.question_id,
           question_text: c.question_text,
           answer_text: c.answer_text,
+          rubric_criteria: c.rubric_criteria ?? [],
         })),
       );
     } catch (e: unknown) {
@@ -215,7 +265,13 @@ export default function AssignmentChunkReview() {
     setSaved(false);
     setChunks((rows) => [
       ...rows,
-      { key: nextLocalKey(), question_id: `q${rows.length + 1}`, question_text: "", answer_text: "" },
+      {
+        key: nextLocalKey(),
+        question_id: `q${rows.length + 1}`,
+        question_text: "",
+        answer_text: "",
+        rubric_criteria: [],
+      },
     ]);
   };
 
@@ -239,6 +295,7 @@ export default function AssignmentChunkReview() {
           question_id: c.question_id,
           question_text: c.question_text,
           answer_text: c.answer_text,
+          rubric_criteria: c.rubric_criteria ?? [],
         })),
       );
       setSaved(true);
@@ -336,8 +393,13 @@ export default function AssignmentChunkReview() {
                     label="Answer"
                     value={c.answer_text}
                     onChange={(e) => updateChunk(c.key, { answer_text: e.target.value })}
+                    sx={{ mb: 2 }}
                     aria-label={`Answer ${i + 1} text`}
                   />
+                  <Typography variant="subtitle2" sx={{ mb: 1 }}>
+                    Rubric Criteria
+                  </Typography>
+                  <RubricCriteriaDisplay criteria={c.rubric_criteria} />
                 </CardContent>
               </Card>
             ))}

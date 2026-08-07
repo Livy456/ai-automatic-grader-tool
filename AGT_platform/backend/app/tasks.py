@@ -351,6 +351,26 @@ def grade_submission(self, submission_id: int):
                 }
                 for i, qc in enumerate(question_chunks)
             ]
+            from app.grading.rubric_routing.assignment_rubric_routing_agent import (
+                normalize_chunk_rubric_criteria,
+            )
+
+            routed_criteria = {}
+            for qc in question_chunks:
+                qid = str(qc.question_id or "").strip()
+                if not qid:
+                    continue
+                criteria = normalize_chunk_rubric_criteria(
+                    qc.rubric_criteria,
+                    rubric=assignment.rubric,
+                    rubric_text=getattr(assignment, "grader_rubric_text", None) or "",
+                )
+                if criteria:
+                    routed_criteria[qid] = criteria
+            if routed_criteria:
+                modality_hints_extra[
+                    "assignment_creation_rubric_criteria_by_question_id"
+                ] = routed_criteria
         blank_bytes_seeded = False
         for att in (
             db.query(AssignmentAttachment)

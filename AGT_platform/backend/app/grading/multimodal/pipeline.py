@@ -107,6 +107,9 @@ from app.grading.chunking.chunk_cache import (
     save_grading_chunks_cache,
 )
 from app.grading.rubric_routing.custom_rubric_export import apply_custom_rubric_plan_to_chunks
+from app.grading.rubric_routing.assignment_rubric_routing_agent import (
+    apply_assignment_creation_rubric_routing,
+)
 from app.grading.parsing.ingestion import IngestionEnvelope, ingest_raw_submission
 from app.grading.grading_output.parser import parse_chunk_grade_json
 from app.grading.rubric_routing.rubric_router import route_rubric
@@ -150,6 +153,47 @@ from app.grading.schemas import (
 )
 
 _log = logging.getLogger(__name__)
+
+
+def _maybe_apply_assignment_creation_rubric_routing(
+    chunks: list[GradingChunk],
+    hints: dict[str, Any],
+    *,
+    wf: Any,
+) -> bool:
+    """
+    When Assignment Creation saved per-question rubric criteria JSON, stamp them onto chunks
+    and skip the runtime custom-rubric LLM plan. Returns True when creation routing was applied.
+    """
+    raw_map = hints.get("assignment_creation_rubric_criteria_by_question_id")
+    if not isinstance(raw_map, dict) or not raw_map or not chunks:
+        return False
+
+    criteria_by_question_id: dict[str, list[dict[str, Any]]] = {}
+    for qid, rows in raw_map.items():
+        key = str(qid or "").strip()
+        if not key or not isinstance(rows, list):
+            continue
+        cleaned = [dict(r) for r in rows if isinstance(r, dict)]
+        if cleaned:
+            criteria_by_question_id[key] = cleaned
+    if not criteria_by_question_id:
+        return False
+
+    applied = apply_assignment_creation_rubric_routing(
+        chunks,
+        criteria_by_question_id=criteria_by_question_id,
+    )
+    if applied <= 0:
+        return False
+
+    wf(
+        "assignment_creation_rubric_routing",
+        n_chunks=len(chunks),
+        n_applied=applied,
+    )
+    hints["assignment_creation_rubric_routing_applied"] = True
+    return True
 
 
 def default_answer_key_dir() -> Path:
@@ -862,13 +906,19 @@ class MultimodalGradingPipeline:
             )
 
         if self.rubric_rows_by_type:
-            apply_custom_rubric_plan_to_chunks(
+            creation_routed = _maybe_apply_assignment_creation_rubric_routing(
                 chunks,
-                envelope,
-                embed_cfg,
-                self.rubric_rows_by_type,
                 hints if isinstance(hints, dict) else {},
+                wf=wf,
             )
+            if not creation_routed:
+                apply_custom_rubric_plan_to_chunks(
+                    chunks,
+                    envelope,
+                    embed_cfg,
+                    self.rubric_rows_by_type,
+                    hints if isinstance(hints, dict) else {},
+                )
             crp = (hints or {}).get("custom_rubric_path") if isinstance(hints, dict) else None
             if crp:
                 wf("custom_rubric", path=str(crp))
@@ -1045,6 +1095,13 @@ class MultimodalGradingPipeline:
             ),
             n_chunks=len(chunks),
         )
+        embed_cfg = self._resolve_app_config() or Config()
+        if self.rubric_rows_by_type:
+            _maybe_apply_assignment_creation_rubric_routing(
+                chunks,
+                hints if isinstance(hints, dict) else {},
+                wf=wf,
+            )
         for chunk in chunks:
             route_rubric(
                 chunk,
@@ -1068,7 +1125,6 @@ class MultimodalGradingPipeline:
         answer_key_for_prompt = answer_key_plain[:ak_cap]
         dataset_plain = str(hints.get("dataset_context_plaintext") or "").strip()
 
-        embed_cfg = self._resolve_app_config() or Config()
         concurrency = max(
             1,
             int(getattr(embed_cfg, "MULTIMODAL_LLM_CALL_CONCURRENCY", 3) or 3),

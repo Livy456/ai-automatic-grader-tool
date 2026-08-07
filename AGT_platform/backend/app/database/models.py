@@ -37,6 +37,7 @@ class AssignmentUpload(Base):
     id = Column(PG_UUID(as_uuid=True), primary_key=True, default=uuid.uuid4)
     filename = Column(String(512), nullable=False)
     storage_uri = Column(Text, nullable=False)
+    # MAKE THIS INTO AN ENUM!!
     status = Column(String(32), nullable=False, default="uploaded")  # uploaded|queued|grading|graded|error
     suggested_grade = Column(Float, nullable=True)
     feedback = Column(Text, nullable=True)
@@ -138,6 +139,7 @@ class AssignmentQuestionChunk(Base):
         order_index: Display / grading order among the assignment's chunks.
         question_text: The isolated question/prompt text.
         answer_text: The reference/expected answer text for this question.
+        rubric_criteria: JSON list of rubric criterion rows selected for this question.
         is_edited: Whether a teacher has manually created or edited this chunk since parsing.
         created_at: The date and time the chunk was first created.
         updated_at: The date and time the chunk was last updated.
@@ -154,6 +156,7 @@ class AssignmentQuestionChunk(Base):
     order_index = Column(Integer, nullable=False, default=0)
     question_text = Column(Text, nullable=False, default="")
     answer_text = Column(Text, nullable=False, default="")
+    rubric_criteria = Column(JSON, nullable=True)
     is_edited = Column(Boolean, nullable=False, default=False)
     created_at = Column(DateTime, default=datetime.utcnow)
     updated_at = Column(DateTime, default=datetime.utcnow, onupdate=datetime.utcnow)
@@ -210,20 +213,6 @@ class IssuedJwt(Base):
     expires_at = Column(DateTime, nullable=False)
     revoked_at = Column(DateTime, nullable=True)
     created_at = Column(DateTime, default=datetime.utcnow)
-
-# I might get rid of refresh tokens later [MAYBE DELETE THIS LATER]   
-class RefreshToken(Base):
-    """Opaque refresh token (hash stored); raw value is placed in an HttpOnly cookie only."""
-
-    __tablename__ = "refresh_tokens"
-
-    id = Column(Integer, primary_key=True)
-    user_id = Column(Integer, ForeignKey("users.id"), nullable=False)
-    token_hash = Column(String(64), unique=True, nullable=False, index=True)
-    expires_at = Column(DateTime, nullable=False)
-    revoked_at = Column(DateTime, nullable=True)
-    created_at = Column(DateTime, default=datetime.utcnow)
-
 
 class Course(Base):
     """

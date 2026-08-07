@@ -693,6 +693,10 @@ class AssignmentLibraryRouteTests(ApiRoutesTestCase):
                 "app.routes.assignment_library.try_chunk_assignment_qa_pairs",
                 return_value=[{"question_id": "1", "question": "What is 2+2?", "answer": "4"}],
             ),
+            patch(
+                "app.routes.assignment_library.try_route_rubric_for_questions",
+                return_value=[[{"id": "crit_0", "name": "Correctness", "criterion": "Correctness", "max_score": 10.0}]],
+            ),
         ):
             fin = self.client.post(f"/api/assignment-library/{assignment_id}/finalize")
         self.assertEqual(fin.status_code, 200, fin.text)
@@ -705,6 +709,7 @@ class AssignmentLibraryRouteTests(ApiRoutesTestCase):
         self.assertEqual(len(chunks), 1)
         self.assertEqual(chunks[0]["question_text"], "What is 2+2?")
         self.assertFalse(chunks[0]["is_edited"])
+        self.assertEqual(chunks[0]["rubric_criteria"][0]["id"], "crit_0")
         self.assertEqual(detail_body["blank_assignment_text"], "1) What is 2+2?")
         self.assertEqual(detail_body["answer_key_text"], "1) 4")
 
